@@ -221,7 +221,7 @@ void coopErr(const char* msg) { coop::logErrLine(msg); ErrorLog(msg); }
 // copy that shipped without the atlas).
 void warnIfNoPortraits(const std::string& name) {
     std::string p = coop::savexfer::saveFolderFor(name) + "\\portraits_texture.png";
-    if (GetFileAttributesA(p.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    if (GetFileAttributesW(coop::savexfer::widePath(p).c_str()) == INVALID_FILE_ATTRIBUTES) {
         char b[224];
         _snprintf(b, sizeof(b) - 1,
                   "[load] WARN save '%s' has no portraits_texture.png "

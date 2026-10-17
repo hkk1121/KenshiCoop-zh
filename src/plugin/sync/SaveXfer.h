@@ -1,4 +1,4 @@
-// SaveXfer - coordinated save + session resume (protocol 31).
+﻿// SaveXfer - coordinated save + session resume (protocol 31).
 //
 // The HOST's save is authoritative: on a coordinated save the host writes its
 // native save (which already contains the join's squad state via the sync
@@ -137,6 +137,11 @@ int  lastAckOk();
 // disarm the quiescence watch and abort an active send (the join drops the
 // orphaned chunks by xferId; the reloaded world's saves restart cleanly).
 void abortAll();
+
+// 存档路径编码约定: saveFolderFor 等返回的路径一律为 UTF-8, 调用 Win32 文件 API 前
+// 须经 widePath 转为宽字符 (W 版 API), 以免用户名/存档名含中文时受进程代码页影响 (#55).
+// codePage 默认 65001 (CP_UTF8); 传 0 (CP_ACP) 可解码引擎给出的 ANSI 代码页字符串.
+std::wstring widePath(const std::string& path, unsigned int codePage = 65001);
 
 } // namespace savexfer
 } // namespace coop
