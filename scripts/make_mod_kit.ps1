@@ -11,6 +11,7 @@
                                   is rejected at handshake by design)
       KenshiCoop.mod              mod-list entry so it shows in Kenshi's Mods menu
       RE_Kenshi.json              tells RE_Kenshi to load the plugin
+      lang_*.txt                  UI translations (e.g. lang_zh_CN.txt)
       coop_config.json            only needed for LAN/direct-UDP; Steam play is
                                   configured entirely in-game (F2)
     README.txt                  <- plain copy-the-folder instructions (NOT copied
@@ -80,6 +81,8 @@ Write-Host "=== assembling KenshiCoop mod folder ==="
 Copy-Item $dll  (Join-Path $modDir "KenshiCoop.dll")
 Copy-Item $json (Join-Path $modDir "RE_Kenshi.json")
 Copy-Item $mod  (Join-Path $modDir "KenshiCoop.mod")
+# lang_<language>.txt: UI translations, loaded when Kenshi runs in that language
+Get-ChildItem (Join-Path $repoRoot "dist\mods\KenshiCoop") -Filter "lang_*.txt" | Copy-Item -Destination $modDir
 
 # coop_config.json (LAN/UDP only; Steam play needs no config). Written fresh so
 # the release always ships a clean default.

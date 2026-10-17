@@ -1,7 +1,8 @@
-#define _CRT_SECURE_NO_WARNINGS 1 // getenv/atoi are fine; silence VC10 C4996
+﻿#define _CRT_SECURE_NO_WARNINGS 1 // getenv/atoi are fine; silence VC10 C4996
 
 #include "Config.h"
 #include "OwnRanks.h"
+#include "../CoopLog.h"
 #include <cstdlib>
 #include <cstdio>
 #include <map>
@@ -503,6 +504,46 @@ void reloadPeerFromFile(Config& c) {
     if (it != f.end() && !it->second.empty()) c.ip = it->second;
     it = f.find("port");
     if (it != f.end() && !it->second.empty()) c.port = std::atoi(it->second.c_str());
+}
+
+const char* tr(const char* en) {
+    static std::map<std::string, std::string> table;
+    static bool loaded = false;
+    if (!loaded) {
+        loaded = true;
+        // 游戏语言取自 settings.cfg 的 language= (工作目录优先, 其次 DLL 所在的 mods\<mod>\..\..)
+        std::string modDir = configFilePath();
+        modDir = modDir.substr(0, modDir.find_last_of("\\/") + 1);
+        std::string lang;
+        const std::string cfgPaths[2] = { "settings.cfg", modDir + "..\\..\\settings.cfg" };
+        for (int i = 0; i < 2 && lang.empty(); ++i) {
+            std::ifstream sf(cfgPaths[i].c_str());
+            std::string line;
+            while (std::getline(sf, line)) {
+                if (line.compare(0, 9, "language=") != 0) continue;
+                lang = line.substr(9);
+                while (!lang.empty() && (lang[lang.size() - 1] == '\r' || lang[lang.size() - 1] == ' '))
+                    lang.erase(lang.size() - 1);
+                break;
+            }
+        }
+        // 语言文件为 UTF-8 文本, 每行 "英文原文=译文", # 开头为注释 (MyGUI 按 UTF-8 显示)
+        std::ifstream lf((modDir + "lang_" + lang + ".txt").c_str(), std::ios::binary);
+        std::string line;
+        while (!lang.empty() && std::getline(lf, line)) {
+            if (line.compare(0, 3, "\xEF\xBB\xBF") == 0) line.erase(0, 3);
+            if (!line.empty() && line[line.size() - 1] == '\r') line.erase(line.size() - 1);
+            size_t eq = line.find('=');
+            if (line.empty() || line[0] == '#' || eq == std::string::npos || eq == 0) continue;
+            table[line.substr(0, eq)] = line.substr(eq + 1);
+        }
+        char b[160];
+        _snprintf(b, sizeof(b) - 1, "[i18n] language='%s' entries=%u", lang.c_str(), (unsigned)table.size());
+        b[sizeof(b) - 1] = '\0';
+        coop::logLine(b);
+    }
+    std::map<std::string, std::string>::const_iterator it = table.find(en);
+    return it != table.end() ? it->second.c_str() : en;
 }
 
 } // namespace coop

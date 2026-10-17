@@ -1,4 +1,4 @@
-// Config - parse the KENSHICOOP_* environment variables once at load.
+﻿// Config - parse the KENSHICOOP_* environment variables once at load.
 //
 // Mode/role and all runtime knobs are env-driven so host vs join is chosen
 // without a recompile (the test harness sets these before launching Kenshi).
@@ -617,6 +617,10 @@ void reloadPeerFromFile(Config& c);
 // config did this run actually use?" answerable from the log alone (real
 // sessions included), instead of having to reconstruct it from env + file.
 std::string describeConfig(const Config& c);
+
+// 界面文字本地化: 按游戏语言加载 mod 目录下的 lang_<language>.txt (如 lang_zh_CN.txt),
+// 返回 en 的译文 (UTF-8); 无语言文件或无该条目时原样返回 en. 仅主线程调用.
+const char* tr(const char* en);
 
 } // namespace coop
 

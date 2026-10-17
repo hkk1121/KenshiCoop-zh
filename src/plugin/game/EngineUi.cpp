@@ -1,4 +1,4 @@
-// EngineUi.cpp - the in-game co-op UI plane: the debug marker HUD labels, the
+﻿// EngineUi.cpp - the in-game co-op UI plane: the debug marker HUD labels, the
 // F2 co-op session panel (native DatapanelGUI), and the persistent status
 // overlay. Split out of EngineEntity.cpp (Phase 5e code motion, 2026-07-19) so
 // the entity capture/resolve/apply TU stays focused on sync and the UI/render
@@ -24,6 +24,7 @@
 #include <windows.h>
 
 #include "../core/SteamId.h" // parseSteamId64 (paste button) + maskSteamId64 (id rows)
+#include "../core/Config.h"  // coop::tr (UI text localization)
 
 namespace coop {
 namespace engine {
@@ -476,60 +477,67 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
 
     // (Re)populate the rows when anything visible changed.
     if (g_panel.panel && (g_panel.needsRebuild || !g_panel.built)) {
-        std::string title    = "Co-op Session    -    F2 to close";
+        // 可见文字经 coop::tr 本地化; 整句作为格式串翻译, 以适应不同语言的语序 (fb 为格式化缓冲)
+        char fb[256];
+        fb[sizeof(fb) - 1] = '\0';
+        std::string title    = coop::tr("Co-op Session    -    F2 to close");
         std::string roleKey  = "role";
-        std::string roleCap  = std::string("Role: ") + (g_panel.hostFlag ? "HOST" : "JOIN") + "    (switch)";
+        _snprintf(fb, sizeof(fb) - 1, coop::tr("Role: %s    (switch)"), coop::tr(g_panel.hostFlag ? "HOST" : "JOIN"));
+        std::string roleCap  = fb;
         std::string transKey = "trans";
-        std::string transCap = std::string("Transport: ") + (g_panel.steamFlag ? "STEAM" : "UDP") + "    (switch)";
+        _snprintf(fb, sizeof(fb) - 1, coop::tr("Transport: %s    (switch)"), g_panel.steamFlag ? "STEAM" : "UDP");
+        std::string transCap = fb;
         std::string connKey  = "conn";
-        std::string connCap  = std::string("Connection: ") + (g_panel.connectedFlag ? "ONLINE" : "OFFLINE") + "    (switch)";
+        _snprintf(fb, sizeof(fb) - 1, coop::tr("Connection: %s    (switch)"), coop::tr(g_panel.connectedFlag ? "ONLINE" : "OFFLINE"));
+        std::string connCap  = fb;
 
         // White debug line: describes the live connection state + type. Reflects
         // the ACTUAL running session when online; the armed toggles when offline.
-        std::string transStr = (st->transportSel == 0) ? "Steam" : "UDP";
-        std::string dbgKey   = "Connection status";
-        std::string dbgVal;
+        const char* transStr = (st->transportSel == 0) ? "Steam" : "UDP";
+        std::string dbgKey   = coop::tr("Connection status");
         if (st->running) {
             if (st->peerPresent)
-                dbgVal = (st->isHost ? std::string("Hosting") : std::string("Joining")) +
-                         " over " + transStr + " - peer connected";
+                _snprintf(fb, sizeof(fb) - 1, coop::tr(st->isHost ? "Hosting over %s - peer connected"
+                                                                   : "Joining over %s - peer connected"), transStr);
             else if (st->isHost)
-                dbgVal = std::string("Hosting over ") + transStr + " - waiting for peer...";
+                _snprintf(fb, sizeof(fb) - 1, coop::tr("Hosting over %s - waiting for peer..."), transStr);
             else
-                dbgVal = std::string("Joining over ") + transStr + " - connecting to host...";
+                _snprintf(fb, sizeof(fb) - 1, coop::tr("Joining over %s - connecting to host..."), transStr);
         } else {
-            dbgVal = std::string("Offline - will ") + (g_panel.hostFlag ? "host" : "join") +
-                     " over " + (g_panel.steamFlag ? "Steam" : "UDP") + " on Connect";
+            _snprintf(fb, sizeof(fb) - 1, coop::tr(g_panel.hostFlag ? "Offline - will host over %s on Connect"
+                                                                    : "Offline - will join over %s on Connect"),
+                      g_panel.steamFlag ? "Steam" : "UDP");
         }
+        std::string dbgVal = fb;
         // A join streaming the host's world at the menu has no leader for the
         // screen overlay, so surface the live progress here instead (amber).
-        if (!transfer.empty()) { dbgVal = transfer; dbgKey = "World transfer"; }
+        if (!transfer.empty()) { dbgVal = transfer; dbgKey = coop::tr("World transfer"); }
 
         // Friend's SteamID: prefer the value pasted in-panel this session; fall
         // back to the config (steamPeer, mainly for advanced/back-compat use).
         // Both id rows show only the last 4 digits - the panel is often on screen
         // while streaming. Nothing needs the full digits by eye: Copy puts the
         // real id on the clipboard and Paste takes it back off.
-        std::string peerKey = "Friend's Steam ID";
+        std::string peerKey = coop::tr("Friend's Steam ID");
         std::string peerVal;
         unsigned long long peerShown = g_pastedPeer ? g_pastedPeer
                                                      : (unsigned long long)st->peerSteamId;
         if (peerShown != 0) {
             peerVal = coop::maskSteamId64(peerShown);
         } else if (g_pasteFailed) {
-            peerVal = "(clipboard was not a Steam ID - copy theirs and retry)";
+            peerVal = coop::tr("(clipboard was not a Steam ID - copy theirs and retry)");
         } else {
-            peerVal = "(click Paste friend's Steam ID)";
+            peerVal = coop::tr("(click Paste friend's Steam ID)");
         }
         std::string pasteKey = "pasteid";
-        std::string pasteCap = "Paste friend's Steam ID";
+        std::string pasteCap = coop::tr("Paste friend's Steam ID");
 
-        std::string selfKey  = "Your Steam ID";
+        std::string selfKey  = coop::tr("Your Steam ID");
         std::string selfVal  = st->selfSteamId
                                    ? coop::maskSteamId64((unsigned long long)st->selfSteamId)
-                                   : std::string("(Steam not running)");
+                                   : std::string(coop::tr("(Steam not running)"));
         std::string copyKey  = "copyid";
-        std::string copyCap  = "Copy my Steam ID";
+        std::string copyCap  = coop::tr("Copy my Steam ID");
         std::string empty    = "";
 
         PanelStrings ps;

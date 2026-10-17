@@ -1,0 +1,38 @@
+# KenshiCoop 简体中文界面文字
+# 游戏语言（settings.cfg 中 language=zh_CN）为简体中文时自动加载本文件
+# 格式：每行 英文原文=译文，以第一个 = 分隔；# 开头为注释；文件须保存为 UTF-8
+# 注意：含 %s / %d / %.1f / %% 的条目，译文必须保留相同数量、相同顺序的占位符，否则游戏可能崩溃
+
+# F2 联机面板
+Co-op Session    -    F2 to close=联机会话    -    按 F2 关闭
+Role: %s    (switch)=角色：%s    （点击切换）
+HOST=主机
+JOIN=加入
+Transport: %s    (switch)=连接方式：%s    （点击切换）
+Connection: %s    (switch)=连接状态：%s    （点击切换）
+ONLINE=在线
+OFFLINE=离线
+Connection status=当前状态
+Hosting over %s - peer connected=正在通过 %s 主持 - 好友已连接
+Joining over %s - peer connected=正在通过 %s 加入 - 已连接主机
+Hosting over %s - waiting for peer...=正在通过 %s 主持 - 等待好友加入...
+Joining over %s - connecting to host...=正在通过 %s 加入 - 正在连接主机...
+Offline - will host over %s on Connect=离线 - 上线后将通过 %s 主持
+Offline - will join over %s on Connect=离线 - 上线后将通过 %s 加入
+World transfer=世界传输
+Friend's Steam ID=好友 Steam ID
+(clipboard was not a Steam ID - copy theirs and retry)=（剪贴板内容不是 Steam ID，请让好友重新复制后再试）
+(click Paste friend's Steam ID)=（请点击“粘贴好友 Steam ID”）
+Paste friend's Steam ID=粘贴好友 Steam ID
+Your Steam ID=我的 Steam ID
+(Steam not running)=（Steam 未运行）
+Copy my Steam ID=复制我的 Steam ID
+
+# 左上角状态条 / 存档传输进度
+Connected - peer joined=已连接 - 好友已加入
+Connected to host=已连接到主机
+Hosting - waiting for peer...=主持中 - 等待好友加入...
+Connecting...=正在连接...
+Offline - press F2, then set Connection to ONLINE=离线 - 按 F2 打开面板，将连接状态切换为在线
+Streaming host world... %d%% (%.1f/%.1f MB)=正在接收主机世界... %d%% (%.1f/%.1f MB)
+Preparing host world...=正在准备主机世界...

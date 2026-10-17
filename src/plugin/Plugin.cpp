@@ -755,13 +755,13 @@ void coopPanelDrive() {
     std::string detail;
     int ostate;
     if (g_peerPresent) {
-        detail = g_cfg.isHost ? "Connected - peer joined" : "Connected to host";
+        detail = coop::tr(g_cfg.isHost ? "Connected - peer joined" : "Connected to host");
         ostate = 2;
     } else if (g_net.isRunning()) {
-        detail = g_cfg.isHost ? "Hosting - waiting for peer..." : "Connecting...";
+        detail = coop::tr(g_cfg.isHost ? "Hosting - waiting for peer..." : "Connecting...");
         ostate = 1;
     } else {
-        detail = "Offline - press F2, then set Connection to ONLINE";
+        detail = coop::tr("Offline - press F2, then set Connection to ONLINE");
         ostate = 0;
     }
     ps.detail = detail.c_str();
@@ -777,16 +777,16 @@ void coopPanelDrive() {
             unsigned __int64 tot = coop::savexfer::recvTotalBytes();
             int pct = (tot > 0) ? (int)((got * 100) / tot) : 0;
             if (pct > 100) pct = 100;
-            char tb[96];
+            char tb[160];
             _snprintf(tb, sizeof(tb) - 1,
-                      "Streaming host world... %d%% (%.1f/%.1f MB)", pct,
+                      coop::tr("Streaming host world... %d%% (%.1f/%.1f MB)"), pct,
                       (double)got / (1024.0 * 1024.0),
                       (double)tot / (1024.0 * 1024.0));
             tb[sizeof(tb) - 1] = '\0';
             transfer = tb;
         } else if (!g_loadAfterCommit.empty()) {
             // NACK sent (host baking/streaming) or committed + about to load.
-            transfer = "Preparing host world...";
+            transfer = coop::tr("Preparing host world...");
         }
     }
     ps.transferDetail = transfer.empty() ? (const char*)0 : transfer.c_str();
