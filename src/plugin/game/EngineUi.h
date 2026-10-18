@@ -1,4 +1,4 @@
-// EngineUi.h - narrow PUBLIC engine surface: the in-game co-op session panel +
+﻿// EngineUi.h - narrow PUBLIC engine surface: the in-game co-op session panel +
 // status overlay. Carved out of Engine.h (Phase 5a domain split, 2026-07-19) so
 // the UI root (Plugin.cpp) includes only what it needs and the sync/replication
 // consumers stop transitively seeing the panel API.
@@ -19,8 +19,8 @@ namespace engine {
 // MyGUI comboboxes/editboxes have no usable RVAs and don't receive keyboard focus
 // during gameplay) and Connect/Disconnect. The friend's Steam ID is entered by
 // clipboard: "Copy my Steam ID" puts the player's own id on the clipboard to
-// share, and "Paste friend's Steam ID" reads the friend's id back in (per-session,
-// never written to disk). The UDP endpoint (ip/port) still comes from
+// share, and "Paste friend's Steam ID" reads the friend's id back in
+// (有效粘贴会记入 coop_last_peer.txt，下次启动预填). The UDP endpoint (ip/port) still comes from
 // coop_config.json. The GUI layer stays session-agnostic: live status is passed IN
 // via *st and the user's actions are handed BACK through the callbacks (the plugin
 // root owns the session/config wiring). Main-thread only; SEH-guarded.

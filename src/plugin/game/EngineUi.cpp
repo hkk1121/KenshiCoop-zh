@@ -260,10 +260,9 @@ DataPanelLine*          g_peerLine     = 0; // white "Friend's Steam ID" row
 DataPanelLine*          g_selfLine     = 0; // white "Your Steam ID" row
 std::string             g_selfIdStr;   // self SteamID as digits (set each tick; "" = none)
 
-// Friend's SteamID pasted in-panel this session (0 = none). Per-session by
-// design: it lives only in memory, so relaunching Kenshi clears it and the
-// friend's id is re-pasted (nothing is written to disk). Passed to onConnect,
+// Friend's SteamID pasted in-panel this session (0 = none). Passed to onConnect,
 // where it overrides the (usually empty) config steamPeer.
+// 有效粘贴同时经 saveLastPeer 写入 coop_last_peer.txt，下次启动作为默认好友 ID 预填（上游 PR #25）
 unsigned long long      g_pastedPeer   = 0;
 bool                    g_pasteFailed  = false; // last paste wasn't a valid Steam ID
 
@@ -312,6 +311,7 @@ void onPasteIdBtn(DataPanelLine*) {
     if (clipboardGetText(clip) && coop::parseSteamId64(clip, id)) {
         g_pastedPeer  = id;
         g_pasteFailed = false;
+        coop::saveLastPeer(id);
         char b[64];
         _snprintf(b, sizeof(b) - 1, "[coop-ui] paste friend id=%llu ok=1", id);
         b[sizeof(b) - 1] = '\0';

@@ -622,6 +622,12 @@ std::string describeConfig(const Config& c);
 // 返回 en 的译文 (UTF-8); 无语言文件或无该条目时原样返回 en. 仅主线程调用.
 const char* tr(const char* en);
 
+// 记住 F2 面板上次粘贴的好友 SteamID（上游 PR #25）：存于 DLL 旁的 coop_last_peer.txt，
+// 不改写 coop_config.json（其 // 注释会被扁平解析器丢掉）。saveLastPeer 忽略 0、写失败静默；
+// loadLastPeer 文件缺失或内容不是合法 SteamID64 时返回 0
+void saveLastPeer(unsigned long long id);
+unsigned long long loadLastPeer();
+
 } // namespace coop
 
 #endif // KENSHICOOP_CONFIG_H

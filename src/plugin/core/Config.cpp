@@ -2,6 +2,7 @@
 
 #include "Config.h"
 #include "OwnRanks.h"
+#include "SteamId.h"
 #include "../CoopLog.h"
 #include <cstdlib>
 #include <cstdio>
@@ -254,6 +255,8 @@ void loadConfig(Config& c) {
     c.transport = envOr("KENSHICOOP_TRANSPORT", fileOr(f, "transport", "udp").c_str());
     c.steamPeer = (unsigned long long)_strtoui64(
         envOr("KENSHICOOP_STEAM_PEER", fileOr(f, "steamPeer", "0").c_str()).c_str(), 0, 10);
+    // 环境变量与 coop_config.json 都未指定时，用 F2 面板上次粘贴的好友 ID（优先级 env > 文件 > 上次粘贴）
+    if (c.steamPeer == 0) c.steamPeer = loadLastPeer();
     c.steamPing = (unsigned long long)_strtoui64(envOr("KENSHICOOP_STEAM_PING", "0").c_str(), 0, 10);
 
     // In-game panel session control: opt-in legacy auto-start. Default OFF so a
@@ -544,6 +547,29 @@ const char* tr(const char* en) {
     }
     std::map<std::string, std::string>::const_iterator it = table.find(en);
     return it != table.end() ? it->second.c_str() : en;
+}
+
+void saveLastPeer(unsigned long long id) {
+    if (id == 0) return;
+    std::string p = configFilePath();
+    p = p.substr(0, p.find_last_of("\\/") + 1) + "coop_last_peer.txt";
+    std::ofstream f(p.c_str(), std::ios::binary | std::ios::trunc);
+    if (!f) return;
+    char b[32];
+    _snprintf(b, sizeof(b) - 1, "%llu\n", id);
+    b[sizeof(b) - 1] = '\0';
+    f << b;
+}
+
+unsigned long long loadLastPeer() {
+    std::string p = configFilePath();
+    p = p.substr(0, p.find_last_of("\\/") + 1) + "coop_last_peer.txt";
+    std::ifstream f(p.c_str(), std::ios::binary);
+    if (!f) return 0;
+    std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    // 读回时重新校验，被改坏的文件不会注入非法好友 ID
+    unsigned long long id = 0;
+    return parseSteamId64(text, id) ? id : 0;
 }
 
 } // namespace coop
