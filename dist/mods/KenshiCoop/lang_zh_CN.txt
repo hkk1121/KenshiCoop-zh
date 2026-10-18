@@ -36,3 +36,7 @@ Connecting...=正在连接...
 Offline - press F2, then set Connection to ONLINE=离线 - 按 F2 打开面板，将连接状态切换为在线
 Streaming host world... %d%% (%.1f/%.1f MB)=正在接收主机世界... %d%% (%.1f/%.1f MB)
 Preparing host world...=正在准备主机世界...
+Peer connected=好友已连接
+Peer disconnected=好友已断开连接
+Version mismatch with host - update both to the same KenshiCoop build=与主机版本不一致 - 请双方更新到相同版本的 KenshiCoop
+Rejected a joiner: version mismatch - update both to the same KenshiCoop build=已拒绝一名玩家加入：版本不一致 - 请双方更新到相同版本的 KenshiCoop

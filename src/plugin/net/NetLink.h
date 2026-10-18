@@ -1,4 +1,4 @@
-// NetLink - owns ENet on a dedicated background thread.
+﻿// NetLink - owns ENet on a dedicated background thread.
 //
 // Threading contract:
 //   * The net thread EXCLUSIVELY owns the ENetHost; the game thread never
@@ -24,6 +24,13 @@
 #include "../core/Inbound.h"
 
 namespace coop {
+
+// 网络线程 -> 界面的连接错误通道（上游 PR #24）：版本不一致等拒绝原因原先只进日志，加入方只会停在
+// “正在连接”再掉回“离线”。网络线程 setNetUiError 发布一行英文原因（界面经 coop::tr 翻译），
+// 主线程每帧 netUiError 读取（无则返回 ""），新一次连接开始时 clearNetUiError 清除
+void        setNetUiError(const char* msg);
+const char* netUiError();
+void        clearNetUiError();
 
 class NetLink {
 public:

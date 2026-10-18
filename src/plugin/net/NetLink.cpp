@@ -1,4 +1,4 @@
-#define _CRT_SECURE_NO_WARNINGS 1 // _snprintf is fine here; silence VC10 C4996
+﻿#define _CRT_SECURE_NO_WARNINGS 1 // _snprintf is fine here; silence VC10 C4996
 
 #include "NetLink.h"
 #include "SteamP2P.h"
@@ -26,6 +26,20 @@ const enet_uint8 CH_RELIABLE   = 0;  // handshake + small reliable game events
 const enet_uint8 CH_UNRELIABLE = 1;  // entity batches / stealth / cam (newest supersedes)
 const enet_uint8 CH_BULK       = 2;  // coordinated save/load transfer (bulk reliable)
 const int        CH_COUNT      = 3;  // channels negotiated at host-create / connect
+
+// 断开原因码，经 enet_peer_disconnect(peer, data) 传给对端（对端 DISCONNECT 事件的 ev.data）。
+// 主机在 HELLO 阶段发现版本不一致时用它告诉被拒的加入方原因（上游 PR #24）；0 = 正常断开
+const enet_uint32 DISCONNECT_VERSION_MISMATCH = 1;
+
+// 网络线程 -> 界面的连接错误通道存储。全局对象在 DLL 加载时构造（早于任何网络线程），
+// 临界区必然先初始化（VC10 的函数内静态变量不是线程安全的）
+struct NetUiErrChannel {
+    CRITICAL_SECTION cs;
+    char             buf[256];
+    NetUiErrChannel() { InitializeCriticalSection(&cs); buf[0] = '\0'; }
+    ~NetUiErrChannel() { DeleteCriticalSection(&cs); }
+};
+NetUiErrChannel g_netUiErr;
 
 // Net-thread diagnostics. OutputDebugStringA is thread-safe, and CoopLog guards
 // its FILE* with a lock, so both are safe to call off the main thread.
@@ -94,11 +108,13 @@ NetLink::~NetLink() {
 }
 
 bool NetLink::startHost(int port, Inbound* inbound) {
+    clearNetUiError(); // 新一次连接尝试，清掉上次的拒绝原因
     isHost_ = true; port_ = port; inbound_ = inbound; myId_ = 0;
     return launchThread();
 }
 
 bool NetLink::startClient(const std::string& ip, int port, Inbound* inbound) {
+    clearNetUiError(); // 新一次连接尝试，清掉上次的拒绝原因
     isHost_ = false; ip_ = ip; port_ = port; inbound_ = inbound; myId_ = 0;
     return launchThread();
 }
@@ -475,7 +491,9 @@ void NetLink::threadLoop() {
                                           (unsigned)h.version, (unsigned)PROTOCOL_VERSION);
                                 b[sizeof(b) - 1] = '\0';
                                 netErr(b);
-                                enet_peer_disconnect(ev.peer, 0);
+                                // 主机界面也显示拒绝原因，并经断开数据告知被拒的加入方（它收不到 WELCOME）
+                                setNetUiError("Rejected a joiner: version mismatch - update both to the same KenshiCoop build");
+                                enet_peer_disconnect(ev.peer, DISCONNECT_VERSION_MISMATCH);
                             } else {
                                 u32 id = nextId++;
                                 // TWO-PLAYER ASSUMPTION (step-6 guard): the sync model
@@ -513,6 +531,7 @@ void NetLink::threadLoop() {
                                           (unsigned)w.version, (unsigned)PROTOCOL_VERSION);
                                 b[sizeof(b) - 1] = '\0';
                                 netErr(b);
+                                setNetUiError("Version mismatch with host - update both to the same KenshiCoop build");
                             } else {
                                 InterlockedExchange(&myId_, (LONG)w.playerId);
                                 char b[96];
@@ -986,6 +1005,11 @@ void NetLink::threadLoop() {
                     } else {
                         serverPeer_ = 0;
                         if (inbound_) inbound_->pushLeave(OWNER_ID_ALL);
+                        // 主机因版本不一致拒绝时会在断开数据里带上原因
+                        if (ev.data == DISCONNECT_VERSION_MISMATCH) {
+                            netErr("host rejected us: protocol/version mismatch");
+                            setNetUiError("Version mismatch with host - update both to the same KenshiCoop build");
+                        }
                         netLog("disconnected from host");
                     }
                     break;
@@ -1871,6 +1895,30 @@ void NetLink::threadLoop() {
     if (enetHost_) { enet_host_destroy(enetHost_); enetHost_ = 0; }
     if (steam) steamp2p::removeEnetHooks();
     InterlockedExchange(&running_, 0);
+}
+
+// 连接错误通道（上游 PR #24）：setNetUiError 在网络线程调用，netUiError/clearNetUiError 在主线程调用，
+// 三者共用同一把锁
+void setNetUiError(const char* msg) {
+    EnterCriticalSection(&g_netUiErr.cs);
+    _snprintf(g_netUiErr.buf, sizeof(g_netUiErr.buf) - 1, "%s", msg ? msg : "");
+    g_netUiErr.buf[sizeof(g_netUiErr.buf) - 1] = '\0';
+    LeaveCriticalSection(&g_netUiErr.cs);
+}
+
+const char* netUiError() {
+    // 调用方只在主线程，锁内拷贝到主线程私有缓冲区，返回的字符串不会被网络线程写到一半
+    static char mainCopy[256];
+    EnterCriticalSection(&g_netUiErr.cs);
+    memcpy(mainCopy, g_netUiErr.buf, sizeof(mainCopy));
+    LeaveCriticalSection(&g_netUiErr.cs);
+    return mainCopy;
+}
+
+void clearNetUiError() {
+    EnterCriticalSection(&g_netUiErr.cs);
+    g_netUiErr.buf[0] = '\0';
+    LeaveCriticalSection(&g_netUiErr.cs);
 }
 
 } // namespace coop

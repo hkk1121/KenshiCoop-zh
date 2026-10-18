@@ -198,6 +198,12 @@ const DWORD     CRAFT_REARM_MS  = 3000; // re-issue the work goal at most this o
 const DWORD  SWAP_MIN_MS        = 400;   // shorter world-swap dips are flicker, not a reload
 const DWORD  LOAD_PUMP_GRACE_MS = 2000;  // deferred-LOADGAME backstop grace window
 
+// 好友连接/断开瞬间在状态栏短暂提示（上游 PR #24，改为复用状态栏而非另建控件）
+const DWORD  TOAST_SHOW_MS      = 4000;
+const char*  g_toastText        = 0;     // 已翻译的提示文字，0 = 无
+int          g_toastState       = 0;     // 状态栏颜色（2 = 绿，0 = 红）
+DWORD        g_toastArmMs       = 0;
+
 // Original function pointers, filled by KenshiLib::AddHook.
 void (*g_mainLoop_orig)(GameWorld*, float) = 0;
 void (*g_titleUpdate_orig)(TitleScreen*)   = 0;
@@ -300,6 +306,8 @@ void processNetEvents(GameWorld* gw) {
         if (g_cfg.latejoinSync) g_repl.onPeerConnected(g_net, g_net.localId());
         else coopLog("[latejoin] connect edge seen, resync OFF (gate)");
         g_peerPresent = true;
+        coop::clearNetUiError(); // 好友已连上，此前的拒绝原因作废
+        g_toastText = coop::tr("Peer connected"); g_toastState = 2; g_toastArmMs = GetTickCount();
         // Coordinated save (protocol 31): while connected under save-sync,
         // the JOIN never writes a save locally - the host's save is
         // authoritative and a local save press forwards as PKT_SAVE_REQ.
@@ -323,6 +331,10 @@ void processNetEvents(GameWorld* gw) {
         // the departed peer's stream will never author its drop/exit edges -
         // release any carry or occupancy its driven copies still hold.
         if (gw && (g_cfg.carrySync || g_cfg.furnSync)) g_repl.sweepCarries(gw);
+        // 仅在确实连着时提示断开（加入方重试连接失败也会产生离开事件，避免每次重试都弹）
+        if (g_peerPresent) {
+            g_toastText = coop::tr("Peer disconnected"); g_toastState = 0; g_toastArmMs = GetTickCount();
+        }
         g_peerPresent = false;
         // Coordinated save: disconnected = solo again; local saves must work.
         if (!g_cfg.isHost && g_cfg.saveSync) {
@@ -762,6 +774,15 @@ void coopPanelDrive() {
         ostate = 1;
     } else {
         detail = coop::tr("Offline - press F2, then set Connection to ONLINE");
+        ostate = 0;
+    }
+    // 连接/断开后 4 秒内状态栏显示提示；未连上时优先显示网络层的拒绝原因（如版本不一致）
+    const char* netErrMsg = coop::netUiError();
+    if (g_toastText && GetTickCount() - g_toastArmMs < TOAST_SHOW_MS) {
+        detail = g_toastText;
+        ostate = g_toastState;
+    } else if (!g_peerPresent && netErrMsg[0]) {
+        detail = coop::tr(netErrMsg);
         ostate = 0;
     }
     ps.detail = detail.c_str();
