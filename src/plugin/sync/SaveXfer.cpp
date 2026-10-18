@@ -589,9 +589,44 @@ void onSaveBegin(const SaveBeginPacket& b) {
     g_recvTotalBytes = b.totalBytes;
     g_recvBytes      = 0;
     g_recvStartTick  = GetTickCount();
-    g_recvStaging    = saveFolderFor(g_recvName + "__incoming");
     g_recvCrcs.assign(b.fileCount, fnv1aInit());
     g_recvSeen.assign(b.fileCount, 0);
+
+    // 存档名安全检查（上游 PR #16）：拒绝空名、路径分隔符、':'、".."、以 '.'/空格开头的名称，
+    // 防止提交目标落到存档根目录或越界。与 saveFolderFor 一致按 ANSI 代码页解码后检查，
+    // 避免 GBK 尾字节 0x5C 被误判为分隔符。不安全时不推导任何磁盘路径，本次 FILE/DONE 全部丢弃
+    std::wstring wName = widePath(g_recvName, CP_ACP);
+    if (wName.empty() || wName.size() > 64 || wName[0] == L'.' || wName[0] == L' ' ||
+        wName.find_first_of(L"\\/:") != std::wstring::npos ||
+        wName.find(L"..") != std::wstring::npos) {
+        g_recvActive = false;
+        g_recvStaging.clear();
+        char eb[224];
+        _snprintf(eb, sizeof(eb) - 1,
+                  "[save] XFER-RECV REFUSED id=%u unsafe name='%s' (nothing staged)",
+                  b.xferId, name);
+        eb[sizeof(eb) - 1] = '\0'; coop::logErrLine(eb);
+        return;
+    }
+
+    // 上次提交在移出/移入之间中断时，真实存档只剩 <name>__old：先放回原位
+    {
+        std::string finalDir = saveFolderFor(g_recvName);
+        std::string oldDir   = finalDir + "__old";
+        if (GetFileAttributesW(widePath(oldDir).c_str()) != INVALID_FILE_ATTRIBUTES &&
+            GetFileAttributesW(widePath(finalDir).c_str()) == INVALID_FILE_ATTRIBUTES) {
+            BOOL moved = MoveFileExW(widePath(oldDir).c_str(), widePath(finalDir).c_str(),
+                                     MOVEFILE_WRITE_THROUGH);
+            char rb[224];
+            _snprintf(rb, sizeof(rb) - 1, moved
+                      ? "[save] RECOVER restored stranded save '%s' from __old"
+                      : "[save] RECOVER FAILED to restore '%s' from __old", name);
+            rb[sizeof(rb) - 1] = '\0';
+            if (moved) coop::logLine(rb); else coop::logErrLine(rb);
+        }
+    }
+
+    g_recvStaging    = saveFolderFor(g_recvName + "__incoming");
 
     // A fresh staging folder: stale partials from an aborted transfer would
     // otherwise pollute the CRC verify.
@@ -656,7 +691,8 @@ int onSaveDone(const SaveDoneHeader& d, const u32* crcs,
     recvCloseFile();
     g_recvActive = false;
 
-    bool ok = (d.fileCount == g_recvFileCount);
+    // 文件数须非零且一致、CRC 表须存在才允许提交（上游 PR #16）：空传输否则会把现有存档换成空目录
+    bool ok = g_recvFileCount > 0 && d.fileCount == g_recvFileCount && crcs != 0;
     unsigned int bad = 0;
     if (ok) {
         for (u16 i = 0; i < d.fileCount; ++i) {
