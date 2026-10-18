@@ -364,9 +364,14 @@ bool describeCharacter(Character* c, char* charSid, unsigned int charSidLen,
 // (animals scale body size by age; <= 0 or non-finite falls back to the adult
 // default). Appearance/equipment are the template's (randomized gear) -
 // cosmetic; combat outcomes stay host-authoritative + damage-guarded. Returns
-// the proxy Character* or 0.
+// the proxy Character* or 0. name：主机端角色名（"" = 不改名，协议 1001）。
 Character* spawnProxyNpc(GameWorld* gw, const char* charSid, const char* facSid,
-                         float x, float y, float z, float heading, float age);
+                         float x, float y, float z, float heading, float age,
+                         const char* name);
+
+// 年龄读写（协议 1001 动物体型同步）。SEH 保护；charAge 出错返回 <= 0，setCharAge 忽略非有限值或 <= 0
+float charAge(Character* c);
+void  setCharAge(Character* c, float age);
 
 // SEH-guarded (Phase 1 spawn parity, game/ZoneQuery.cpp): is the world block at
 // (x,y,z) fully LOADED locally (loaded and not mid-load)? Within a loaded block

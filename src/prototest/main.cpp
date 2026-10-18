@@ -92,10 +92,10 @@ static void testSizes() {
     CHECK_EQ("sizeof(TreatmentPacket)",         sizeof(TreatmentPacket),         77);
     CHECK_EQ("sizeof(CombatHitPacket)",         sizeof(CombatHitPacket),         37);
     CHECK_EQ("sizeof(SpeedPacket)",             sizeof(SpeedPacket),             14);
-    CHECK_EQ("sizeof(StatsPacket)",             sizeof(StatsPacket),             194);
+    CHECK_EQ("sizeof(StatsPacket)",             sizeof(StatsPacket),             198);
     CHECK_EQ("sizeof(StealthPacket)",           sizeof(StealthPacket),           427);
     CHECK_EQ("sizeof(SpawnReqPacket)",          sizeof(SpawnReqPacket),          25);
-    CHECK_EQ("sizeof(SpawnInfoPacket)",         sizeof(SpawnInfoPacket),         143);
+    CHECK_EQ("sizeof(SpawnInfoPacket)",         sizeof(SpawnInfoPacket),         207);
     CHECK_EQ("sizeof(MoneyPacket)",             sizeof(MoneyPacket),             13);
     CHECK_EQ("sizeof(MoneyDeltaPacket)",        sizeof(MoneyDeltaPacket),        13);
     CHECK_EQ("sizeof(FactionPacket)",           sizeof(FactionPacket),           61);
@@ -310,8 +310,8 @@ static void testSizes() {
     CHECK_EQ("EVT_SQUAD_MOVE id", (int)EVT_SQUAD_MOVE, 11);
     CHECK("EVT_SQUAD_MOVE distinct", EVT_SQUAD_MOVE != EVT_RECRUIT &&
           EVT_SQUAD_MOVE != EVT_NONE && EVT_SQUAD_MOVE != EVT_EXIT_FURNITURE);
-    CHECK_EQ("PROTOCOL_VERSION (v55: runtime-fixture identity)",
-             (int)PROTOCOL_VERSION, 55);
+    CHECK_EQ("PROTOCOL_VERSION (v1001: zh-cn fork, name + animal age sync)",
+             (int)PROTOCOL_VERSION, 1001);
 
     // Protocol 52: the shared money pool. The two players spend from ONE wallet,
     // so the join reports CHANGES and the host the authoritative TOTAL - swap

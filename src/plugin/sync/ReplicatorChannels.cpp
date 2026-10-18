@@ -1,4 +1,4 @@
-// ReplicatorChannels.cpp - the periodic state channels (monolith split from
+﻿// ReplicatorChannels.cpp - the periodic state channels (monolith split from
 // Replicator.cpp, 2026-07-12): medical (+treatments), stats, the money pool,
 // faction relations, doors, production machines, research, placed builds
 // (+build doors), recruits, squad moves, stealth, consensus game speed,
@@ -469,6 +469,9 @@ void Replicator::publishStats(GameWorld* gw, NetLink& net, u32 ownerId) {
             pkt.stats[i] = (i < n) ? sr.stats[i] : -1.0f;
         pkt.xp                  = sr.xp;
         pkt.freeAttributePoints = sr.freeAttribPts;
+        // 动物体型同步（协议 1001）：随属性包发送年龄，成长中的小队动物两边体型一致
+        Character* ac = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
+        pkt.age = ac ? engine::charAge(ac) : -1.0f;
         net.queueStats(pkt);
         if (changed) { // periodic resends stay silent; changes are the signal
             // str/dex/tough/stealth/athletics cover the scenario + the stats a
@@ -510,6 +513,11 @@ void Replicator::applyStats(GameWorld* gw, Inbound& in) {
         w.xp            = p.xp;
         w.freeAttribPts = p.freeAttributePoints;
         bool ok = engine::writeStats(c, w);
+        // 年龄有偏差时才写入（协议 1001），避免每包都改
+        if (p.age > 0.0f && p.age < 1.0e6f) {
+            float cur = engine::charAge(c);
+            if (cur < 0.0f || fabs(cur - p.age) > 0.01f) engine::setCharAge(c, p.age);
+        }
         char b[200]; _snprintf(b, sizeof(b) - 1,
             "[stats] RECV hand=%u,%u ok=%d str=%.1f dex=%.1f tough=%.1f stealth=%.1f athl=%.1f xp=%.0f",
             k.i, k.s, ok ? 1 : 0, p.stats[1], p.stats[18], p.stats[21],

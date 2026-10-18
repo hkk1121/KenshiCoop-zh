@@ -1,4 +1,4 @@
-// KenshiCoop unified wire protocol (clean rebuild, v1).
+﻿// KenshiCoop unified wire protocol (clean rebuild, v1).
 //
 // Compiled by the VS2010 (v100) plugin only. Keep it plain C++03: no <cstdint>
 // reliance, no constexpr, no scoped enums, no STL on the wire. Wire format is
@@ -25,7 +25,9 @@ typedef double         f64;
 // this header stays a definition file. When you bump PROTOCOL_VERSION, add the
 // matching entry at the bottom of that doc. The version is checked at handshake
 // and a mismatch is rejected (no back-compat).
-const u16 PROTOCOL_VERSION = 55;
+// 本分支（zh-cn-improvements）自有协议号：基于上游 55，加入名字同步与动物年龄同步（上游 PR #28）后
+// 改为 1001 起编号，避开上游后续序列；双方须使用同一改进版，与官方 v0.51 不再互通
+const u16 PROTOCOL_VERSION = 1001;
 
 // Packet type tags (first byte of every packet).
 enum PacketType {
@@ -966,6 +968,7 @@ struct StatsPacket {
     f32 stats[STATS_SLOT_MAX]; // by StatsEnumerated index (-1 = unreadable)
     f32 xp;                    // CharStats::xp (-1 = unreadable)
     f32 freeAttributePoints;   // CharStats::freeAttributePoints (int on wire as f32; -1 = unreadable)
+    f32 age;                   // Character::getAge（协议 1001，动物按年龄缩放体型）；<= 0 = 不可读
 };
 
 // ---- Protocol 52: shared money pool ------------------------------------------
@@ -1329,6 +1332,7 @@ struct SpawnInfoPacket {
     u32 hSerial;
     char charSid[48]; // character template GameData stringID
     char facSid[48];  // faction GameData stringID ("" = unknown -> join fallback)
+    char name[64];    // 主机端角色显示名（协议 1001，UTF-8，中文名每字 3 字节）；"" = 无名
     f32 x;            // world transform at reply time
     f32 y;
     f32 z;

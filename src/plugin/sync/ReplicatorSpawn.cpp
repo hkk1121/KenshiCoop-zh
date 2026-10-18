@@ -147,6 +147,7 @@ void Replicator::syncSpawns(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerI
             pkt.found = found ? 1 : 0;
             pkt.dead  = dead ? 1 : 0;
             pkt.age   = age; // animals scale body size by age (protocol 39)
+            if (found) engine::charName(c, pkt.name, sizeof(pkt.name)); // 名字同步（协议 1001）
             net.queueSpawnInfo(pkt);
             char b[224]; _snprintf(b, sizeof(b) - 1,
                 "[spawn] INFO send hand=%u,%u,%u,%u,%u found=%d dead=%d age=%.2f sid='%s' fac='%s'",
@@ -547,7 +548,8 @@ void Replicator::syncSpawns(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerI
             }
         }
         Character* proxy = engine::spawnProxyNpc(gw, p.charSid, p.facSid,
-                                                 p.x, p.y, p.z, p.heading, p.age);
+                                                 p.x, p.y, p.z, p.heading, p.age,
+                                                 p.name);
         if (!proxy) {
             // Local mint failed (template/faction absent here - modded host?).
             // Back off hard; retrying in seconds cannot succeed.

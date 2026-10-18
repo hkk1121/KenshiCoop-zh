@@ -1,4 +1,4 @@
-// EngineSpawnCombat.cpp - spawn + combat + medical primitives (monolith split
+﻿// EngineSpawnCombat.cpp - spawn + combat + medical primitives (monolith split
 // from EngineInternal.cpp, 2026-07-12): protocol 21 runtime-spawn proxy replication
 // (spawnProxyNpc/despawnProxyNpc/spawnRuntimeSquad + describeCharacter),
 // scenario scene setup (seats/beds/cages/machines/duel/down scenes), combat
@@ -49,6 +49,12 @@ Character* createCharGuarded(GameWorld* gw, GameData* tmpl, Faction* fac,
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0;
     }
+}
+// 设置代理角色名（setName 取 std::string，调用方在本帧外构造好再传指针，本帧无需析构的对象，可用 SEH）
+void setNameGuarded(Character* c, const std::string* name) {
+    __try {
+        c->setName(*name);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 } // namespace
 
@@ -188,7 +194,8 @@ Character* adoptCandidateNear(GameWorld* gw, const char* charSid,
 }
 
 Character* spawnProxyNpc(GameWorld* gw, const char* charSid, const char* facSid,
-                         float x, float y, float z, float heading, float age) {
+                         float x, float y, float z, float heading, float age,
+                         const char* name) {
     if (!gw || !gw->theFactory || !g_createCharFn || !charSid || !charSid[0]) return 0;
     // Creature-size sync (protocol 39): animals scale body size by age, so the
     // proxy must be CREATED at the host's age or it spawns full-grown (the
@@ -235,6 +242,11 @@ Character* spawnProxyNpc(GameWorld* gw, const char* charSid, const char* facSid,
     // authority for a proxy (AI-suspend re-asserts this every driven tick).
     detachFromTownAI(c);
     clearGoals(c);
+    // 名字同步（上游 PR #28）：代理用主机端角色名，避免运行时生成的 NPC/新招募角色在对方显示默认 "Name"
+    if (name && name[0]) {
+        std::string nm(name);
+        setNameGuarded(c, &nm);
+    }
     return c;
 }
 
@@ -2281,6 +2293,21 @@ bool orderAttackByHand(GameWorld* gw, const unsigned int atkHand[5],
     CombatRead cr;
     if (readCombat(a, &cr) && cr.inCombat) return true; // already fighting - don't thrash
     return orderMeleeAttack(a, v);
+}
+
+// 年龄读写（上游 PR #28 动物体型同步）。动物按年龄缩放体型；人类年龄仅为外观数值
+float charAge(Character* c) {
+    if (!c) return -1.0f;
+    __try {
+        return c->getAge();
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return -1.0f; }
+}
+
+void setCharAge(Character* c, float age) {
+    if (!c || !(age > 0.0f && age < 1.0e6f)) return;
+    __try {
+        c->setAge(age);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
 
