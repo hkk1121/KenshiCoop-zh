@@ -1,4 +1,4 @@
-// CoopLog - tiny thread-safe file logger for KenshiCoop.
+﻿// CoopLog - tiny thread-safe file logger for KenshiCoop.
 //
 // Why a separate logger when KenshiLib already has DebugLog/ErrorLog?
 //   * Those route into the engine's kenshi.log, which is overwritten each
@@ -20,6 +20,7 @@ namespace coop {
 
 // Open the log file at 'path' (truncating any previous run) and remember a
 // short mode tag (e.g. "HOST"/"JOIN"). Safe to call once at plugin load.
+// 再次调用时只更新标签，并把已打开的日志文件改名为 'path'（内容保留，继续追加）。
 void logInit(const char* path, const char* modeTag);
 
 // The wall clock every timestamp in this plugin derives from: milliseconds

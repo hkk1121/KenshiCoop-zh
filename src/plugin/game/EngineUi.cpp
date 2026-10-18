@@ -415,7 +415,10 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
     }
 
     // F2 rising edge toggles the panel open/closed.
-    bool f2 = (GetAsyncKeyState(VK_F2) & 0x8000) != 0;
+    // 仅当游戏窗口在前台时响应（GetAsyncKeyState 是全局按键状态，同机双开时会同时触发两个窗口）
+    DWORD fgPid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &fgPid);
+    bool f2 = fgPid == GetCurrentProcessId() && (GetAsyncKeyState(VK_F2) & 0x8000) != 0;
     if (f2 && !g_panel.f2Down) {
         if (!g_panel.open) {
             g_panel.hostFlag      = st->isHost;

@@ -1,4 +1,4 @@
-// CoopLog implementation. See CoopLog.h for rationale.
+﻿// CoopLog implementation. See CoopLog.h for rationale.
 //
 // VS2010 (v100) compatible: Win32 CRITICAL_SECTION + GetLocalTime, plain stdio.
 
@@ -16,6 +16,7 @@ FILE*            g_fp   = 0;
 CRITICAL_SECTION g_cs;
 bool             g_init = false;
 char             g_tag[16] = { 0 };
+char             g_path[MAX_PATH] = { 0 };
 volatile long    g_fakeSkewMs = 0;
 
 void writeLine(const char* level, const char* msg) {
@@ -55,7 +56,24 @@ unsigned long wallClockMs() {
 void logSetFakeSkewMs(long skewMs) { g_fakeSkewMs = skewMs; }
 
 void logInit(const char* path, const char* modeTag) {
-    if (g_init) return;
+    // 再次调用（联机面板切换了角色）：更新标签，日志文件改名为新路径并继续追加
+    if (g_init) {
+        EnterCriticalSection(&g_cs);
+        if (modeTag) {
+            size_t i = 0;
+            for (; modeTag[i] && i < sizeof(g_tag) - 1; ++i) g_tag[i] = modeTag[i];
+            g_tag[i] = '\0';
+        }
+        if (g_fp && path && path[0] && _stricmp(path, g_path) != 0) {
+            std::fclose(g_fp);
+            MoveFileExA(g_path, path, MOVEFILE_REPLACE_EXISTING);
+            g_fp = std::fopen(path, "a");
+            lstrcpynA(g_path, path, MAX_PATH);
+        }
+        LeaveCriticalSection(&g_cs);
+        writeLine("INFO", "log retagged");
+        return;
+    }
     InitializeCriticalSection(&g_cs);
     g_init = true;
 
@@ -67,6 +85,7 @@ void logInit(const char* path, const char* modeTag) {
 
     if (path && path[0]) {
         g_fp = std::fopen(path, "w"); // fresh file each run
+        lstrcpynA(g_path, path, MAX_PATH);
     }
     writeLine("INFO", "log opened");
 }

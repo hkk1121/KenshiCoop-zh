@@ -1,4 +1,4 @@
-// Plugin - RE_Kenshi / KenshiLib plugin entry point (clean rebuild).
+﻿// Plugin - RE_Kenshi / KenshiLib plugin entry point (clean rebuild).
 //
 // Responsibilities (kept deliberately thin - everything substantive lives in the
 // core/, net/, game/, sync/ modules):
@@ -1824,6 +1824,12 @@ void coopUiConnect(bool isHost, bool useSteam, unsigned long long peerId) {
     // proxies before clearing maps so a re-connect leaves no orphaned duplicates.
     sessionResetForUi();
 
+    // 角色变化时同步日志标签；使用默认日志名时一并改名（KENSHICOOP_LOG 自定义路径不动）
+    if (isHost != g_cfg.isHost) {
+        if (g_cfg.logPath == (g_cfg.isHost ? "KenshiCoop_host.log" : "KenshiCoop_join.log"))
+            g_cfg.logPath = isHost ? "KenshiCoop_host.log" : "KenshiCoop_join.log";
+        coop::logInit(g_cfg.logPath.c_str(), isHost ? "HOST" : "JOIN");
+    }
     g_cfg.isHost    = isHost;
     g_cfg.transport = useSteam ? "steam" : "udp";
     // Re-read the UDP endpoint (ip/port) from coop_config.json so editing it then
