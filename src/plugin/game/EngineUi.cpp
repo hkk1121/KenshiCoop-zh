@@ -723,5 +723,17 @@ void coopOverlayTick(const char* text, int state, bool show) {
     }
 }
 
+// 任意物品栏/交易窗口打开时返回 true（上游 PR #28）。调用方据此推迟物品栏修改，
+// 避免释放 UI 仍持有的 Item（Inventory::removeItem 释放后使用，进城/商店时崩溃）
+bool inventoryUiOpen() {
+    ForgottenGUI* g = ::gui; // KenshiLib data export (spike 46)
+    if (!g) return false;
+    __try {
+        return g->getNumOpenInventoryWindows() > 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 } // namespace engine
 } // namespace coop

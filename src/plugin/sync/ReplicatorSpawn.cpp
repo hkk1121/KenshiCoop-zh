@@ -1,4 +1,4 @@
-// ReplicatorSpawn.cpp - runtime-spawn proxy + event replication (monolith
+﻿// ReplicatorSpawn.cpp - runtime-spawn proxy + event replication (monolith
 // split from Replicator.cpp, 2026-07-12): syncSpawns (protocol 21 spawn
 // describe/request/mint incl. far minting + creature-size/age sync),
 // applyEvents (reliable EVT_* intake: KO/death/limb/recruit/treatment edges)
@@ -81,6 +81,8 @@ void Replicator::syncSpawns(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerI
                 b[sizeof(b) - 1] = '\0'; coop::logLine(b);
                 spawnReq_.erase(it->first); // allow a fresh REQ/mint cycle
                 lifeSet(it->first, LIFE_UNKNOWN, "proxy-despawned");
+                // 已消失的代理指针移出 mintedBodies_，防止地址复用后误销毁真实角色
+                mintedBodies_.erase(it->second);
                 proxyByKey_.erase(it++);
                 continue;
             }
@@ -901,6 +903,11 @@ void Replicator::applyEvents(GameWorld* gw, Inbound& in) {
                 if ((nk.t | nk.c | nk.cs | nk.i | nk.s) == 0) {
                     pinPeer_.erase(k);
                     pinOwned_.erase(k);
+                    // 解绑前把该代理移出 mintedBodies_（解绑后不再受本插件管理）
+                    {
+                        std::map<Key, Character*>::iterator pf = proxyByKey_.find(k);
+                        if (pf != proxyByKey_.end()) mintedBodies_.erase(pf->second);
+                    }
                     proxyByKey_.erase(k);
                     targets_.erase(k);
                     rekeyedOld_[k] = nowMs(); // no REQ for the dead key's tail
@@ -1108,7 +1115,17 @@ void Replicator::rekeyPeerBody(GameWorld* gw, const Key& oldK, const Key& newK,
         // into our squad), insertPeerMember pins the actual local hand OWNED so
         // publishOwned streams it and the local player controls it. Idempotent +
         // tab-aware, so a squad-move re-containers an existing member too.
-        insertPeerMember(gw, c, newK, tag, destOwned);
+        // 死亡锁存的尸体不再并入玩家小队：joinPlayerSquadAt 会触发头像刷新，为已死/重键的角色
+        // 构建头像会解引用空 PortraitData（MainBarGUI 崩溃）。尸体由 targets_[newK] 的死亡锁存保持倒地，
+        // 昏迷的队员仍照常并入（上游 PR #28）
+        if (carryDeath) {
+            char sk[176]; _snprintf(sk, sizeof(sk) - 1,
+                "[%s] MEMBER skip new=%u,%u,%u,%u,%u (death-latched corpse)",
+                (tag ? tag : "squad"), newK.t, newK.c, newK.cs, newK.i, newK.s);
+            sk[sizeof(sk) - 1] = '\0'; coop::logLine(sk);
+        } else {
+            insertPeerMember(gw, c, newK, tag, destOwned);
+        }
         if (destOwned) {
             // Control hand-off: drop every residual DRIVE artifact so publishOwned
             // streams the body immediately and applyTargets never fights our own
@@ -1138,6 +1155,14 @@ void Replicator::rekeyPeerBody(GameWorld* gw, const Key& oldK, const Key& newK,
                 (tag ? tag : "squad"), newK.t, newK.c, newK.cs, newK.i, newK.s);
             cf[sizeof(cf) - 1] = '\0'; coop::logLine(cf);
         }
+    } else if (carryDeath) {
+        // 无本地副本的死亡尸体：不强制 REQ/生成，否则会生成一具无名尸体（死后出现 "Name" 头像，
+        // 因为代理角色名字不同步）。同时压制已在途的回复生成（上游 PR #28）
+        rekeyedOld_[newK] = nowMs();
+        char fb[176]; _snprintf(fb, sizeof(fb) - 1,
+            "[%s] REKEY-DEAD skip-mint new=%u,%u,%u,%u,%u",
+            (tag ? tag : "squad"), newK.t, newK.c, newK.cs, newK.i, newK.s);
+        fb[sizeof(fb) - 1] = '\0'; coop::logLine(fb);
     } else {
         // ok=0: no local body at the OLD hand and no proxy to migrate. The
         // recruit/move fired while this hand was OUTSIDE our interest (the

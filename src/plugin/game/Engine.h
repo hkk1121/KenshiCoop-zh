@@ -1,4 +1,4 @@
-// Engine - SEH-guarded access to Kenshi engine state.
+﻿// Engine - SEH-guarded access to Kenshi engine state.
 //
 // Every call here either reads or pokes live game memory, so it is the ONLY
 // place allowed to touch the engine, and only ever from the main (game) thread.
@@ -314,6 +314,9 @@ void  markerDestroy(void* label);
 // this before dereferencing and callers holding a handle across ticks should
 // too. Cheap (a pointer scan of the GUI's own label registry).
 bool  markerAlive(void* label);
+
+// 任意物品栏/交易窗口打开时为 true（引擎 UI 持有 Item 指针，此时同步不得释放物品，上游 PR #28）。SEH 保护。
+bool  inventoryUiOpen();
 
 // ---- In-game co-op session panel ---------------------------------------------
 // Moved to EngineUi.h (Phase 5a domain split): CoopPanelState, CoopConnectFn,

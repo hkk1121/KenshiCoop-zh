@@ -1,4 +1,4 @@
-// ReplicatorItems.cpp - item planes (monolith split from Replicator.cpp,
+﻿// ReplicatorItems.cpp - item planes (monolith split from Replicator.cpp,
 // 2026-07-12): publishInventories/applyInventories (Phase 4a container
 // contents), publishWorldItems/applyWorldItems (Phase W1 ground-item
 // proxies), detectAndPublishWeaponDrops + applyWeaponDrops/Pickups (Phase W2
@@ -185,6 +185,12 @@ void Replicator::applyInventories(GameWorld* gw) {
         // any explicitly-registered container OR any squad member we own this tick.
         if (ownedContainers_.count(it->first) != 0) continue;
         if (ownHands_.count(it->first) != 0) continue;
+        // 物品栏/交易窗口打开期间推迟对账：释放 UI 仍持有的物品会导致释放后使用崩溃（进城/商店）。
+        // 对账是幂等的，重新标脏，窗口关闭后重试（上游 PR #28）
+        if (engine::inventoryUiOpen()) {
+            it->second.dirty = true;
+            continue;
+        }
         const Key& k = it->first;
         // A mine's container key is the AUTHOR's hand for its own instance of
         // the node's building, which names nothing here - reconciling it

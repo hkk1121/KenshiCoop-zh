@@ -1,4 +1,4 @@
-// ReplicatorCore.cpp - Replicator construction + session lifecycle (monolith
+﻿// ReplicatorCore.cpp - Replicator construction + session lifecycle (monolith
 // split from Replicator.cpp, 2026-07-12): the ctor defaults, the Phase 3
 // unified entity-lifecycle audit (lifeName/lifeSet/lifeSweep + life_),
 // resetSession (the ONE place every cross-tick hub resets on session swap),
@@ -188,6 +188,7 @@ void Replicator::resetSession() {
     rekeyLogged_.clear();      // and the change-detector for its [rekey] line
     jailObs_.clear();          // jail-observe spike per-captive last sample
     proxyByKey_.clear();
+    mintedBodies_.clear();     // 与 proxyByKey_ 同为旧世界指针，读档后失效
     suppressed_.clear();
     midBand_.clear();          // host mid-band round-robin (rebuilt by next census)
     midCursor_ = 0; midSliceMs_ = 0;
