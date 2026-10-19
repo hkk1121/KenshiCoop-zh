@@ -53,7 +53,7 @@ Replicator::Replicator()
       gateAuthority_(false), trustLogTick_(0),
       trustGrants_(0), trustRevokes_(0),
       authSuppresses_(0), authRestores_(0), authReassertMs_(0), authPruned_(0),
-      censusRadius_(0.0f), censusSendMs_(0), censusRecvMs_(0), censusOwner_(0),
+      censusRadius_(0.0f), censusSendMs_(0), censusRecvMs_(0),
       censusCulls_(0),
       censusOffCell_(0), cellYields_(0), localId_(0xFFFFFFFFu), hostDriveRefusals_(0),
       censusPubTrunc_(false), censusFreshPrev_(false), censusFreshChkMs_(0),
@@ -97,7 +97,7 @@ Replicator::Replicator()
       timeLastSendMs_(0), timeLastLogMs_(0), timeSlewApplied_(-1.0f),
       platoonT0_(0),
       lifeSweepMs_(0),
-      tabReqMs_(0), tabNotice_(0) {
+      tabNotice_(0) {
 }
 
 // ---- Phase 3: unified entity lifecycle ---------------------------------------
@@ -211,6 +211,7 @@ void Replicator::resetSession() {
     // Protocol 36: the existence census describes the OLD world's hands; the
     // host re-publishes within a second of the new world going live.
     censusHands_.clear();
+    censusByOwner_.clear();
     censusPos_.clear();
     censusPrev_.clear();
     censusPrevMs_ = 0;
@@ -300,7 +301,6 @@ void Replicator::resetSession() {
     tabAuth_.clear();
     tabReq_.clear();
     tabOutbox_.clear();
-    tabReqMs_ = 0;
     tabNotice_ = 0;
     peerBodyOwnerCounts_.clear();
     peerBodyOwnerQueue_.clear();
@@ -440,8 +440,14 @@ void Replicator::clearOwnerReplicationState(GameWorld* gw, u32 ownerId) {
     unsigned int undriven = 0;
     for (std::map<Key, Driven>::iterator ti = targets_.begin();
          ti != targets_.end(); ) {
-        if (ti->second.owner == ownerId) { targets_.erase(ti++); ++undriven; }
-        else ++ti;
+        if (ti->second.owner != ownerId) { ++ti; continue; }
+        std::map<Key, Character*>::iterator px = proxyByKey_.find(ti->first);
+        if (px != proxyByKey_.end()) {
+            if (gw && px->second && destroyIfMinted(gw, px->second)) ++cleared;
+            proxyByKey_.erase(px);
+        }
+        targets_.erase(ti++);
+        ++undriven;
     }
     // 3. Its world-item proxies: keyed by (author, netId), so the scope is
     //    exact. The REAL ground items it dropped stay grounded (conservation:
@@ -475,6 +481,24 @@ void Replicator::clearOwnerReplicationState(GameWorld* gw, u32 ownerId) {
     speedSeqSeen_.erase(ownerId);
     peerCams_.erase(ownerId);
     peerClock_.erase(ownerId);
+    censusByOwner_.erase(ownerId);
+    refreshCensusUnion();
+    bool claimsChanged = false;
+    for (std::map<std::pair<u32, u32>, CellClaim>::iterator ci = claimSlots_.begin();
+         ci != claimSlots_.end(); ) {
+        if (ci->first.first == ownerId) {
+            claimSlots_.erase(ci++);
+            claimsChanged = true;
+        } else ++ci;
+    }
+    for (std::map<std::pair<int, int>, u32>::iterator li = cellLastOwner_.begin();
+         li != cellLastOwner_.end(); ) {
+        if (li->second == ownerId) {
+            cellLastOwner_.erase(li++);
+            claimsChanged = true;
+        } else ++li;
+    }
+    if (claimsChanged) rebuildClaimedCells();
     for (std::set<std::pair<u32, u32> >::iterator di = appliedDrops_.begin();
          di != appliedDrops_.end(); ) {
         if (di->first == ownerId) appliedDrops_.erase(di++); else ++di;
@@ -921,7 +945,7 @@ void Replicator::applySquadAuth(GameWorld* gw, const EventPacket& ev) {
         if (mine) {
             tabReq_[tab].ownerId = ev.ownerId;
             tabReq_[tab].mode = 2;
-            tabReqMs_ = nowMs();
+            tabReq_[tab].ms = nowMs();
             tabNotice_ = 5;               // 状态栏提示“好友申请控制你的小队”
         } else {
             // 该标签不归本端（刚交接完 / 未知标签）：直接拒绝，保持两端状态明确
@@ -983,20 +1007,24 @@ void Replicator::squadAuthTick(GameWorld* gw, NetLink& net, u32 ownerId) {
             sendSquadAuth(net, ownerId, out[i].targetId, out[i].kind, tab);
         }
     }
-    if (!tabReq_.empty()) {
-        unsigned long now = nowMs();
-        if (tabReqMs_ == 0) tabReqMs_ = now;
-        if ((now - tabReqMs_) > (unsigned long)TAB_AUTH_TIMEOUT_MS) {
-            char b[128];
-            _snprintf(b, sizeof(b) - 1, "[auth] TIMEOUT pending=%u",
-                      (unsigned)tabReq_.size());
-            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
-            tabReq_.clear();
-            tabReqMs_ = 0;
-            tabNotice_ = 1;
+    unsigned long now = nowMs();
+    unsigned int expired = 0;
+    for (std::map<std::pair<u32, u32>, AuthPeer>::iterator it = tabReq_.begin();
+         it != tabReq_.end(); ) {
+        if (it->second.ms != 0 &&
+            (now - it->second.ms) > (unsigned long)TAB_AUTH_TIMEOUT_MS) {
+            it = tabReq_.erase(it);
+            ++expired;
+        } else {
+            ++it;
         }
-    } else {
-        tabReqMs_ = 0;
+    }
+    if (expired > 0) {
+        char b[128];
+        _snprintf(b, sizeof(b) - 1, "[auth] TIMEOUT pending=%u",
+                  (unsigned)tabReq_.size());
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        tabNotice_ = 1;
     }
 }
 
@@ -1004,6 +1032,7 @@ void Replicator::squadAuthTick(GameWorld* gw, NetLink& net, u32 ownerId) {
 void Replicator::requestSquadAuth(NetLink& net, u32 ownerId) {
     (void)net; (void)ownerId;
     if (!squadSync_) return;
+    unsigned long now = nowMs();
     for (std::map<std::pair<u32, u32>, unsigned int>::const_iterator it = tabRank_.begin();
          it != tabRank_.end(); ++it) {
         if (ownsTabEffective(it->first, it->second)) continue;
@@ -1013,11 +1042,11 @@ void Replicator::requestSquadAuth(NetLink& net, u32 ownerId) {
         if (tabReq_.find(it->first) != tabReq_.end()) continue; // 已有挂起申请
         tabReq_[it->first].ownerId = target;
         tabReq_[it->first].mode = 1;
+        tabReq_[it->first].ms = now;
         SquadAuthMsg m; m.kind = 1; m.targetId = target;
         m.c = it->first.first; m.cs = it->first.second;
         tabOutbox_.push_back(m);
     }
-    tabReqMs_ = nowMs();
 }
 
 // 面板 [同意]：先把本侧停发（归属翻成对方，命令拦截同帧生效），再回 GRANT。
@@ -1060,11 +1089,13 @@ void Replicator::denySquadAuth(NetLink& net, u32 ownerId) {
 void Replicator::revokeSquadAuth(GameWorld* gw, NetLink& net, u32 ownerId) {
     (void)net; (void)ownerId;
     std::vector<std::pair<u32, u32> > borrowed;
+    unsigned long now = nowMs();
     for (std::map<std::pair<u32, u32>, AuthPeer>::iterator it = tabAuth_.begin();
          it != tabAuth_.end(); ++it) {
         if (it->second.mode == 2) { borrowed.push_back(it->first); continue; }
         tabReq_[it->first].ownerId = it->second.ownerId;
         tabReq_[it->first].mode = 3;
+        tabReq_[it->first].ms = now;
         SquadAuthMsg m; m.kind = 4; m.targetId = it->second.ownerId;
         m.c = it->first.first; m.cs = it->first.second;
         tabOutbox_.push_back(m);
@@ -1079,7 +1110,6 @@ void Replicator::revokeSquadAuth(GameWorld* gw, NetLink& net, u32 ownerId) {
         tabOutbox_.push_back(m);
         tabNotice_ = 4;
     }
-    tabReqMs_ = nowMs();
 }
 
 int Replicator::squadAuthPendingPeer() const {

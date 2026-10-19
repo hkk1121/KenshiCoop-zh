@@ -636,7 +636,7 @@ Faction* findNearbyNonPlayerFaction(GameWorld* gw);
 // Caller holds SEH. INTEREST_LEADERS = one leader sphere per player
 // (MAX_PLAYERS in Wire.h); INTEREST_MAX adds the local camera + one hint
 // slot per join (engine::PEER_CAM_SLOTS).
-const unsigned int INTEREST_LEADERS = 4;
+const unsigned int INTEREST_LEADERS = coop::MAX_PLAYERS;
 const unsigned int INTEREST_MAX     = INTEREST_LEADERS + PEER_CAM_SLOTS + 1;
 unsigned int interestCenters(GameWorld* gw, Ogre::Vector3 outC[INTEREST_MAX]);
 // Case-insensitive substring test on raw C strings (SEH legal).

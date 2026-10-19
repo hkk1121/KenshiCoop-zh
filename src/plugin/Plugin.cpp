@@ -180,10 +180,12 @@ std::map<coop::u32, DWORD>& g_peerBodyRepushDue = g_session.peerBodyRepushDue;
 std::string& g_loadAfterCommit = g_session.loadAfterCommit;
 coop::u32&   g_loadCommitBase  = g_session.loadCommitBase;
 DWORD&       g_loadPumpArmTick  = g_session.loadPumpArmTick;
-// 兜底存档传输被加入方判失败（ACK ok=0）时自动重发：最近一次兜底传输的存档名与已重发次数
+// 兜底存档传输被加入方判失败（ACK ok=0）时自动重发。多人会连续排入多份传输，
+// 因此按 xferId 记录存档目标，并按 owner 单独计算重发次数。
 std::string  g_loadXferLastName;
 coop::u32    g_loadXferLastOwner = 0;
-unsigned int g_loadXferRetries  = 0;
+std::map<coop::u32, std::pair<std::string, coop::u32> > g_loadXferSent;
+std::map<coop::u32, unsigned int> g_loadXferRetries;
 const unsigned int LOAD_XFER_MAX_RETRIES = 2;
 // Scenario harness state. Harness/Debug builds only - the shipped Release DLL
 // excludes test/Scenario*.cpp and does not define KENSHICOOP_HARNESS (Phase 1).
@@ -288,7 +290,8 @@ void sessionResetForUi() {
     g_peerBodyRepushDue.clear();
     g_loadXferLastName.clear();
     g_loadXferLastOwner = 0;
-    g_loadXferRetries = 0;
+    g_loadXferSent.clear();
+    g_loadXferRetries.clear();
     if (g_lastGw) g_repl.clearPeerReplicationState(g_lastGw);
     else          g_repl.resetSession();
     g_inbound.flushWorldState();
@@ -413,7 +416,8 @@ void processNetEvents(GameWorld* gw) {
             g_peerBodyRepushDue.clear();
             g_loadXferLastName.clear();
             g_loadXferLastOwner = 0;
-            g_loadXferRetries = 0;
+            g_loadXferSent.clear();
+            g_loadXferRetries.clear();
             g_bootstrapTargets.clear();
             g_loadXferPending.clear();
             g_repl.clearPeerReplicationState(gw);
@@ -431,6 +435,13 @@ void processNetEvents(GameWorld* gw) {
                 g_loadXferLastName.clear();
                 g_loadXferLastOwner = 0;
             }
+            for (std::map<coop::u32, std::pair<std::string, coop::u32> >::iterator
+                     xi = g_loadXferSent.begin();
+                 xi != g_loadXferSent.end(); ) {
+                if (xi->second.second == *it) xi = g_loadXferSent.erase(xi);
+                else ++xi;
+            }
+            g_loadXferRetries.erase(*it);
             for (std::vector<std::pair<std::string, coop::u32> >::iterator
                      xi = g_loadXferPending.begin();
                  xi != g_loadXferPending.end(); ) {
@@ -598,8 +609,15 @@ void driveSaveSync() {
             }
         }
         // Paced chunk pump for an in-flight transfer.
-        if (coop::savexfer::sending())
-            coop::savexfer::tickSend(g_net, g_net.localId());
+        if (coop::savexfer::sending() &&
+            coop::savexfer::tickSend(g_net, g_net.localId())) {
+            if (g_loadXferLastOwner != 0) {
+                g_loadXferSent[coop::savexfer::lastSentXferId()] =
+                    std::make_pair(g_loadXferLastName, g_loadXferLastOwner);
+                g_loadXferLastName.clear();
+                g_loadXferLastOwner = 0;
+            }
+        }
 
         // Join commit acknowledgements.
         std::deque<coop::InboundSaveAck> acks;
@@ -616,23 +634,39 @@ void driveSaveSync() {
             if (it->pkt.ok) coopLog(b); else coopErr(b);
             coop::savexfer::noteAck(it->pkt.xferId, it->pkt.ownerId,
                                     it->pkt.ok ? 1 : 0);
-            // 兜底传输失败：加入方仍在等待提交（失败后会重新等待），只向失败者重发同名存档
-            if (!it->pkt.ok && !g_loadXferLastName.empty() &&
-                it->pkt.ownerId == g_loadXferLastOwner &&
-                g_loadXferRetries < LOAD_XFER_MAX_RETRIES) {
-                ++g_loadXferRetries;
-                g_loadXferPending.push_back(
-                    std::make_pair(g_loadXferLastName, g_loadXferLastOwner));
-                _snprintf(b, sizeof(b) - 1,
-                          "[load] transfer failed on join -> retry %u/%u name='%s' target=%u",
-                          g_loadXferRetries, LOAD_XFER_MAX_RETRIES,
-                          g_loadXferLastName.c_str(),
-                          (unsigned)g_loadXferLastOwner);
-                b[sizeof(b) - 1] = '\0'; coopLog(b);
-            }
-            if (it->pkt.ok && it->pkt.ownerId == g_loadXferLastOwner) {
-                g_loadXferLastName.clear();
-                g_loadXferLastOwner = 0;
+            // 按 xferId 找回对应的兜底传输；连续给多人发送时，ACK 可能晚于
+            // 下一份传输开始，不能再用“最近一次”推断失败者。
+            std::map<coop::u32, std::pair<std::string, coop::u32> >::iterator sent =
+                g_loadXferSent.find(it->pkt.xferId);
+            if (sent != g_loadXferSent.end()) {
+                std::string sentName = sent->second.first;
+                coop::u32 sentOwner = sent->second.second;
+                g_loadXferSent.erase(sent);
+                if (it->pkt.ok) {
+                    g_loadXferRetries.erase(sentOwner);
+                } else {
+                    unsigned int& retries = g_loadXferRetries[sentOwner];
+                    if (retries < LOAD_XFER_MAX_RETRIES) {
+                        ++retries;
+                        bool queued = false;
+                        for (std::vector<std::pair<std::string, coop::u32> >::iterator
+                                 xi = g_loadXferPending.begin();
+                             xi != g_loadXferPending.end(); ++xi) {
+                            if (xi->second != sentOwner) continue;
+                            xi->first = sentName;
+                            queued = true;
+                            break;
+                        }
+                        if (!queued)
+                            g_loadXferPending.push_back(
+                                std::make_pair(sentName, sentOwner));
+                        _snprintf(b, sizeof(b) - 1,
+                                  "[load] transfer failed on join -> retry %u/%u name='%s' target=%u",
+                                  retries, LOAD_XFER_MAX_RETRIES, sentName.c_str(),
+                                  (unsigned)sentOwner);
+                        b[sizeof(b) - 1] = '\0'; coopLog(b);
+                    }
+                }
             }
         }
     } else {
@@ -770,7 +804,14 @@ void driveLoadSync(GameWorld* gw) {
             if (!updated)
                 g_loadXferPending.push_back(
                     std::make_pair(std::string(name), it->pkt.ownerId));
-            g_loadXferRetries = 0;   // 新的 NACK：重发计数从头算
+            g_loadXferRetries[it->pkt.ownerId] = 0; // 新的 NACK：该玩家计数从头算
+            for (std::map<coop::u32, std::pair<std::string, coop::u32> >::iterator
+                     xi = g_loadXferSent.begin();
+                 xi != g_loadXferSent.end(); ) {
+                if (xi->second.second == it->pkt.ownerId)
+                    xi = g_loadXferSent.erase(xi);
+                else ++xi;
+            }
         }
         if (!g_loadXferPending.empty() && coop::engine::gameplayLive(gw) &&
             !coop::savexfer::sending()) {
@@ -783,15 +824,26 @@ void driveLoadSync(GameWorld* gw) {
                       "[load] starting fallback transfer name='%s' target=%u",
                       next.first.c_str(), (unsigned)next.second);
             b[sizeof(b) - 1] = '\0'; coopLog(b);
-            coop::savexfer::beginSend(g_net, g_net.localId(), next.first,
-                                      next.second);
-            g_loadXferLastName = next.first;
-            g_loadXferLastOwner = next.second;
+            if (coop::savexfer::beginSend(g_net, g_net.localId(), next.first,
+                                          next.second)) {
+                g_loadXferLastName = next.first;
+                g_loadXferLastOwner = next.second;
+            } else {
+                g_loadXferLastName.clear();
+                g_loadXferLastOwner = 0;
+            }
         }
         // The chunk pump normally lives in driveSaveSync; keep the fallback
         // transfer moving even when saveSync is gated off.
-        if (!g_cfg.saveSync && coop::savexfer::sending())
-            coop::savexfer::tickSend(g_net, g_net.localId());
+        if (!g_cfg.saveSync && coop::savexfer::sending() &&
+            coop::savexfer::tickSend(g_net, g_net.localId())) {
+            if (g_loadXferLastOwner != 0) {
+                g_loadXferSent[coop::savexfer::lastSentXferId()] =
+                    std::make_pair(g_loadXferLastName, g_loadXferLastOwner);
+                g_loadXferLastName.clear();
+                g_loadXferLastOwner = 0;
+            }
+        }
     } else {
         // Test-only (KENSHICOOP_FORCE_STREAM=1, join): force the missing/diverged
         // NACK branch even when our on-disk fingerprint MATCHES the host's, so a

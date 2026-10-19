@@ -1,4 +1,4 @@
-// ReplicatorAuthority.cpp - host-authority enforcement on the join (monolith
+﻿// ReplicatorAuthority.cpp - host-authority enforcement on the join (monolith
 // split from Replicator.cpp, 2026-07-12): applyNpcCensus (protocol 36 census
 // intake), enforceHostAuthority (suppress/park/cull of local copies the host
 // does not corroborate, far-mint requests), parkDivergedCopy, and the debug
@@ -75,68 +75,49 @@ void Replicator::applyNpcCensus(GameWorld* gw, Inbound& in) {
     std::deque<InboundNpcCensus> got;
     in.drainNpcCensus(got);
     if (got.empty()) return;
-    // Latest wins (reliable-ordered channel, 1 Hz - normally one pending).
-    const InboundNpcCensus& nc = got.back();
-    // Whose existence claim this is. At two players there is exactly one peer,
-    // so a single set IS "the peer's census" - what was missing is the label,
-    // which is what lets enforcement ask whether the sender actually owns the
-    // cell a body stands in.
-    censusOwner_ = nc.ownerId;
-    censusHands_.clear();
-    // Keep the outgoing rows as the previous sample before they are overwritten:
-    // two consecutive census positions are the only evidence the join has of how
-    // fast the host's copy of an unstreamed body is travelling, and the walk-
-    // converge band has to out-pace exactly that.
+    // Keep the outgoing union as the previous sample before rebuilding it.
     censusPrev_.swap(censusPos_);
     censusPrevMs_ = censusRecvMs_;
     censusPos_.clear();
-    unsigned int n = (unsigned int)(nc.hands.size() / 5);
-    bool havePos = nc.pos.size() >= (size_t)n * 3;
-    // PER-ROW ownership check (2026-08-08). censusOwner_ is one label for the
-    // whole message, so before this the sender's rows spoke for every cell we
-    // happened to resolve to that sender - including cells the sender does not
-    // own. The publish side already filters, but it filters against the
-    // SENDER's map, and the two maps are only eventually equal: a claim reaches
-    // the peer a round trip after it reaches us, so there is always a window in
-    // which each side resolves a cell differently and both believe they author
-    // it. cellLastOwner_ can make such a window permanent (see Replicator.h),
-    // and rebuilding authority out of converged state to close it was measured
-    // strictly worse - so the receiver has to tolerate disagreement rather than
-    // the publisher having to avoid it.
-    //
-    // Judging each row against OUR map is what makes the window harmless: a row
-    // may only speak for a cell we agree the sender owns, so while the two
-    // disagree, each side simply ignores the other's rows about the contested
-    // region and keeps authoring its own copies. Rejected rows are NOT culled
-    // or hidden - a rejection means we think the cell is ours, and
-    // authorHoldsBody already declines to judge anything in a cell we own, so
-    // the body stays ours to author and nobody else's to enforce against.
     unsigned int nOff = 0;
-    for (unsigned int i = 0; i < n; ++i) {
-        Key k;
-        k.t  = nc.hands[i * 5 + 0];
-        k.c  = nc.hands[i * 5 + 1];
-        k.cs = nc.hands[i * 5 + 2];
-        k.i  = nc.hands[i * 5 + 3];
-        k.s  = nc.hands[i * 5 + 4];
-        CensusPos cp;
-        if (havePos) {
-            cp.x = nc.pos[i * 3 + 0];
-            cp.y = nc.pos[i * 3 + 1];
-            cp.z = nc.pos[i * 3 + 2];
+    unsigned int n = 0, totalN = 0;
+    for (std::deque<InboundNpcCensus>::const_iterator it = got.begin();
+         it != got.end(); ++it) {
+        const InboundNpcCensus& nc = *it;
+        n = (unsigned int)(nc.hands.size() / 5);
+        totalN += n;
+        bool havePos = nc.pos.size() >= (size_t)n * 3;
+        PeerCensus& pc = censusByOwner_[nc.ownerId];
+        pc.hands.clear();
+        pc.pos.clear();
+        for (unsigned int i = 0; i < n; ++i) {
+            Key k;
+            k.t  = nc.hands[i * 5 + 0];
+            k.c  = nc.hands[i * 5 + 1];
+            k.cs = nc.hands[i * 5 + 2];
+            k.i  = nc.hands[i * 5 + 3];
+            k.s  = nc.hands[i * 5 + 4];
+            CensusPos cp;
+            if (havePos) {
+                cp.x = nc.pos[i * 3 + 0];
+                cp.y = nc.pos[i * 3 + 1];
+                cp.z = nc.pos[i * 3 + 2];
+            }
+            // 每行只代表发送者实际拥有的小队所在的格子；位置缺失时按旧逻辑
+            // 接受为存在声明，不做越权过滤。
+            if (cellAuth_ && gw && havePos &&
+                authorityFor(gw, cp.x, cp.z) != nc.ownerId) {
+                ++nOff;
+                continue;
+            }
+            pc.hands.insert(k);
+            if (havePos) pc.pos[k] = cp;
         }
-        // Positionless rows cannot be placed in a cell, so they cannot be
-        // judged and are taken at face value, as before.
-        if (cellAuth_ && gw && havePos &&
-            authorityFor(gw, cp.x, cp.z) != nc.ownerId) {
-            ++nOff;
-            continue;
-        }
-        censusHands_.insert(k);
-        if (havePos) censusPos_[k] = cp;
+        pc.recvMs = nowMs();
+        censusRecvMs_ = pc.recvMs;
     }
+    refreshCensusUnion();
     censusOffCell_ += nOff;
-    censusRecvMs_ = nowMs();
     static unsigned long logTick = 0;
     if ((censusRecvMs_ - logTick) > 10000) {
         logTick = censusRecvMs_;
@@ -144,7 +125,7 @@ void Replicator::applyNpcCensus(GameWorld* gw, Inbound& in) {
         _snprintf(b, sizeof(b) - 1,
                   "[census] recv n=%u kept=%u offcell=%u culls=%lu (offcell=%lu "
                   "cellYields=%lu hostRefus=%lu)",
-                  n, n - nOff, nOff, censusCulls_, censusOffCell_, cellYields_,
+                  totalN, totalN - nOff, nOff, censusCulls_, censusOffCell_, cellYields_,
                   hostDriveRefusals_);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
     }
@@ -152,6 +133,9 @@ void Replicator::applyNpcCensus(GameWorld* gw, Inbound& in) {
 
 void Replicator::enforceHostAuthority(GameWorld* gw, u32 localId) {
     if (!gw) return;
+    // 每个玩家的 census 独立计时；即使其他人仍在发包，离开或静默的玩家
+    // 也必须按时从存在性并集中过期。
+    refreshCensusUnion();
     // Hysteresis (step 5, spike 18): a hard streamed/unstreamed edge churned
     // boundary NPCs. Suppress only after a sustained unstreamed run (~1 s), and
     // restore only after a sustained streamed dwell (~2 s), counted in frames.
@@ -1174,7 +1158,13 @@ bool Replicator::authorHoldsBody(GameWorld* gw, u32 localId, const Key& k,
     // not ours to judge. The second case matters as much as the first - a cell
     // whose owner has sent no census is unspoken-for, not empty, and treating
     // silence as absence is the whole ghost mechanism.
-    if (owner != localId && owner == censusOwner_) return false;
+    if (owner != localId) {
+        std::map<u32, PeerCensus>::const_iterator ce = censusByOwner_.find(owner);
+        if (ce == censusByOwner_.end() || ce->second.recvMs == 0 ||
+            (nowMs() - ce->second.recvMs) > 5000)
+            return true;
+        return false;
+    }
     // INCUMBENT HOLDS. A body the peer's stream is already writing is the peer's,
     // whatever this cell verdict says, because the verdict is not a shared fact:
     // each side evaluates it against ITS OWN copy's position, and the two copies
@@ -1376,7 +1366,7 @@ unsigned int Replicator::peerAnchors(GameWorld* gw, float* out) {
     // TAB was 5200 u away, while the join went on attending it through its
     // local copy of the host's leader - and suppressed 26 real bodies against
     // the resulting silence.
-    for (unsigned int ci = 0; ci < ctnrs.size() && nOut < 3; ++ci) {
+    for (unsigned int ci = 0; ci < ctnrs.size() && nOut < coop::MAX_PLAYERS; ++ci) {
         for (unsigned int i = 0; i < nSquad; ++i) {
             if (raw[i].hContainer != ctnrs[ci].first ||
                 raw[i].hContainerSerial != ctnrs[ci].second) continue;
@@ -1389,7 +1379,8 @@ unsigned int Replicator::peerAnchors(GameWorld* gw, float* out) {
     }
     float pc[3];
     for (unsigned int slot = 0;
-         slot < engine::PEER_CAM_SLOTS && nOut < 3 + engine::PEER_CAM_SLOTS &&
+         slot < engine::PEER_CAM_SLOTS &&
+         nOut < coop::MAX_PLAYERS + engine::PEER_CAM_SLOTS &&
          engine::peerCamAnchor(slot, pc); ++slot) {
         out[nOut * 3 + 0] = pc[0];
         out[nOut * 3 + 1] = pc[1];
@@ -1800,5 +1791,23 @@ void Replicator::pruneDebugMarkers(const std::set<Character*>& live) {
     }
 }
 
+void Replicator::refreshCensusUnion() {
+    censusHands_.clear();
+    censusPos_.clear();
+    unsigned long now = nowMs();
+    for (std::map<u32, PeerCensus>::iterator it = censusByOwner_.begin();
+         it != censusByOwner_.end(); ) {
+        if (it->second.recvMs == 0 ||
+            (now - it->second.recvMs) > 5000) {
+            censusByOwner_.erase(it++);
+            continue;
+        }
+        censusHands_.insert(it->second.hands.begin(), it->second.hands.end());
+        for (std::map<Key, CensusPos>::const_iterator pi = it->second.pos.begin();
+             pi != it->second.pos.end(); ++pi)
+            censusPos_[pi->first] = pi->second;
+        ++it;
+    }
+}
 
 } // namespace coop

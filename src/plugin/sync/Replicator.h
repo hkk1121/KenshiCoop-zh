@@ -1094,15 +1094,14 @@ private:
     std::map<Key, AuthCount>  authCount_;
     unsigned long             authSuppresses_; // churn counters (split_interest metric)
     unsigned long             authRestores_;
-    // NPC existence census (protocol 36): the host's 1 Hz wide-radius hand
-    // list. On the join, censusHands_ is the latest received existence set and
-    // censusRecvMs_ its arrival time - enforceHostAuthority culls local NPCs
-    // OUTSIDE the stream bubble that are absent from it (with the same
-    // hysteresis), but only while the census is FRESH (staleness disables
-    // wide culling rather than mass-suppressing on a silent host).
+    // NPC existence census (protocol 36): each player publishes the hands in
+    // its 1 Hz wide-radius list. censusHands_ is the union of fresh per-owner
+    // sets and censusRecvMs_ is the newest arrival - enforceHostAuthority
+    // culls local NPCs OUTSIDE the stream bubble that are absent from it (with
+    // the same hysteresis), but only while the union is FRESH.
     float                     censusRadius_;  // 0 = census disabled
     unsigned long             censusSendMs_;  // host: last census publish
-    unsigned long             censusRecvMs_;  // join: last census arrival
+    unsigned long             censusRecvMs_;  // newest census arrival
     // Camera hint channel (protocol 43): every participant sends its camera
     // center at ~1 Hz and keeps the latest received hint + arrival stamp PER
     // OWNER (a map since protocol 49). A stale hint (silent peer > 3 s) drops
@@ -1114,11 +1113,7 @@ private:
     };
     unsigned long             camHintSendMs_; // last local hint send
     std::map<u32, PeerCam>    peerCams_;      // latest received hint per owner
-    std::set<Key>             censusHands_;   // join: latest existence set
-    // Whose claim censusHands_ is. Under presence authority a census only
-    // speaks for the cells its sender owns, so enforcement has to know who
-    // sent it. Defaults to the host, which is who it always was.
-    u32                       censusOwner_;
+    std::set<Key>             censusHands_;   // fresh per-owner census union
     unsigned long             censusCulls_;   // join: wide-radius suppress count
     // Rows dropped because OUR map does not put the sender's cell in the
     // sender's hands. A steady nonzero here is the two maps disagreeing, which
@@ -1186,6 +1181,13 @@ private:
     // enforceHostAuthority parks a local copy that diverged past
     // censusParkDist_ back onto the host's spot (0 disables).
     struct CensusPos { float x, y, z; };
+    struct PeerCensus {
+        std::set<Key> hands;
+        std::map<Key, CensusPos> pos;
+        unsigned long recvMs;
+        PeerCensus() : recvMs(0) {}
+    };
+    std::map<u32, PeerCensus> censusByOwner_;
     std::map<Key, CensusPos>  censusPos_;     // join: host pos per census row
     std::map<Key, CensusPos>  proxyDriftPrev_; // join: census pos at the last [proxy]
                                               //   drift sweep (owner-motion estimate)
@@ -2721,13 +2723,13 @@ private:
     struct AuthPeer {
         u32 ownerId;
         unsigned char mode;
-        AuthPeer() : ownerId(OWNER_ID_ALL), mode(0) {}
+        unsigned long ms;
+        AuthPeer() : ownerId(OWNER_ID_ALL), mode(0), ms(0) {}
     };
     std::map<std::pair<u32, u32>, AuthPeer> tabAuth_;
     std::map<std::pair<u32, u32>, AuthPeer> tabReq_;
     struct SquadAuthMsg { unsigned char kind; u32 targetId; u32 c; u32 cs; };
     std::vector<SquadAuthMsg> tabOutbox_;
-    unsigned long tabReqMs_;  // 挂起申请的时间戳（超时清理用）
     unsigned int  tabNotice_; // 供 UI 取用的一次性提示（0 = 无）
     // 归属判定：tabOwned_ 与授权表的合成。publishOwned / rekeyPeerBody / 拖拽判定
     // 三处共用它，保证口径一致（rank 由调用方从 tabRank_ 取，未 latch 时传 0xFFFFFFFF）。
@@ -2760,6 +2762,9 @@ public:
     void setLocalId(u32 id) { localId_ = id; }
     unsigned int peerBodyTabCount() const { return peerBodyTabs_; }
     bool takePeerBodyTabOwner(u32* ownerId);
+    // Rebuild the union consumed by generic existence/parking after one
+    // owner's census changes or leaves.
+    void refreshCensusUnion();
 };
 
 } // namespace coop

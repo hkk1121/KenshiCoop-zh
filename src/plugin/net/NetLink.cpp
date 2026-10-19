@@ -360,11 +360,11 @@ bool NetLink::acceptEpoch(u32 ownerId, u32 epoch) {
 // (speed/save/load/spawn requests and time probes) and the handshake never
 // relay. Camera hints are the exception: attention-gated reconciliation needs
 // every client to evaluate the same camera-anchor set, so the host forwards a
-// join's hint to the other join. The host-authoritative channels
-// (census/prod/research/time/
-// stealth/spawn-info) are only ever host-authored so they never arrive at the
-// host to begin with. PKT_ENTITY_BATCH relays too, but inside its epoch-
-// accepted branch in the receive ladder, not through this list. The symmetric
+// join's hint to the other join. Census is also symmetric: every player's
+// rows only claim the cells that player owns, so all joins need the merged
+// existence set. Host-directed channels (prod/research/time/stealth/spawn-info)
+// never arrive at the host through this list. PKT_ENTITY_BATCH relays too, but
+// inside its epoch-accepted branch in the receive ladder. The symmetric
 // change-gated rows (faction/door/build) stay host-echoed for now: the host
 // applies the join's intent and its own authoritative stream re-broadcasts
 // the result, so relaying the raw row would race the echo.
@@ -383,6 +383,7 @@ bool NetLink::isRelayedType(u8 type) {
         case PKT_TREATMENT:
         case PKT_STATS:
         case PKT_MONEY:
+        case PKT_NPC_CENSUS:
         case PKT_CAM_HINT:
         case PKT_CELL_CLAIM:
             return true;
