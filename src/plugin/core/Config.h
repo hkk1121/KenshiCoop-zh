@@ -641,6 +641,8 @@ struct Config {
     // A test scenario or KENSHICOOP_TEST_SECONDS ALWAYS auto-starts regardless
     // (the unattended harness never touches the panel); see Plugin.cpp.
     bool               autoConnect;
+    unsigned long long localPlayerId;
+    std::string playerName;
 };
 
 // Read every KENSHICOOP_* var into 'out', applying host/join defaults. Values in

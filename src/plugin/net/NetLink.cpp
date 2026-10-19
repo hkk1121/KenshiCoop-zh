@@ -94,12 +94,13 @@ void pushLocked(CRITICAL_SECTION& cs, std::vector<T>& q, const T& v) {
 NetLink::NetLink()
     : isHost_(false), port_(0),
       enetHost_(0), serverPeer_(0), inbound_(0),
-      claimRank_(1),
+      claimRank_(1), playerId_(0),
       outOwner_(0), outStampMs_(0), haveOut_(false),
       thread_(0), running_(0), stopFlag_(0), myId_(0),
       sendEpoch_(0),
       steamPeer_(0),
       simDelayMs_(0), simJitterMs_(0), simLossPct_(0) {
+    playerName_[0] = 0;
     InitializeCriticalSection(&outCs_);
 }
 
@@ -111,12 +112,14 @@ NetLink::~NetLink() {
 bool NetLink::startHost(int port, Inbound* inbound) {
     clearNetUiError(); // 新一次连接尝试，清掉上次的拒绝原因
     isHost_ = true; port_ = port; inbound_ = inbound; myId_ = 0;
+    if (!playerId_) return false;
     return launchThread();
 }
 
 bool NetLink::startClient(const std::string& ip, int port, Inbound* inbound) {
     clearNetUiError(); // 新一次连接尝试，清掉上次的拒绝原因
     isHost_ = false; ip_ = ip; port_ = port; inbound_ = inbound; myId_ = 0;
+    if (!playerId_) return false;
     return launchThread();
 }
 
@@ -438,7 +441,9 @@ void NetLink::routeOut(u32 targetId, enet_uint8 channel, ENetPacket* pkt) {
 // NET thread (protocol 49): one PKT_PEER_STATUS roster row to one join.
 void NetLink::sendStatusTo(ENetPeer* to, u32 ownerId, u32 ownRank, bool present) {
     if (!to || to->state != ENET_PEER_STATE_CONNECTED) return;
-    PeerStatusPacket ps;
+    std::map<u32, PeerStatusPacket>::const_iterator row = statusById_.find(ownerId);
+    if (row == statusById_.end()) return;
+    PeerStatusPacket ps = row->second;
     ps.type    = (u8)PKT_PEER_STATUS;
     ps.present = present ? 1 : 0;
     ps.ownerId = ownerId;
@@ -469,6 +474,12 @@ void NetLink::dropPeer(u32 id, bool announce) {
     peersById_.erase(id);
     epochSeen_.erase(id);
     if (announce) broadcastStatusExcept(id, id, rank, false);
+    std::map<u32, PeerStatusPacket>::iterator row = statusById_.find(id);
+    if (row != statusById_.end()) {
+        row->second.present = 0;
+        if (inbound_) inbound_->pushPeerStatus(row->second);
+        statusById_.erase(row);
+    }
     if (inbound_) inbound_->pushLeave(id);
     char b[64];
     _snprintf(b, sizeof(b) - 1, "peer disconnected id=%u rank=%u", (unsigned)id,
@@ -564,6 +575,15 @@ void NetLink::threadLoop() {
     // survive a thread restart.
     peersById_.clear();
     rankById_.clear();
+    statusById_.clear();
+    if (isHost_) {
+        PeerStatusPacket self;
+        memset(&self, 0, sizeof(self));
+        self.type = (u8)PKT_PEER_STATUS; self.present = 1;
+        self.playerId = playerId_; memcpy(self.name, playerName_, sizeof(self.name));
+        statusById_[0] = self;
+        if (inbound_) inbound_->pushPeerStatus(self);
+    }
 
     // Wall-clock time-sync state (client only). The join pings every ~2 s; each
     // pong yields an (rtt, offset) sample; the minimum-RTT sample wins (NTP
@@ -626,8 +646,12 @@ void NetLink::threadLoop() {
                         // squad slot we claim (protocol 49).
                         HelloPacket h;
                         h.type = (u8)PKT_HELLO; h.version = PROTOCOL_VERSION;
-                        h.ownRank = claimRank_; h.nameLen = 0;
-                        ENetPacket* out = enet_packet_create(&h, sizeof(h), ENET_PACKET_FLAG_RELIABLE);
+                        h.ownRank = claimRank_; h.playerId = playerId_;
+                        h.nameLen = (u8)strlen(playerName_);
+                        unsigned char hello[sizeof(h) + 63];
+                        memcpy(hello, &h, sizeof(h));
+                        memcpy(hello + sizeof(h), playerName_, h.nameLen);
+                        ENetPacket* out = enet_packet_create(hello, sizeof(h) + h.nameLen, ENET_PACKET_FLAG_RELIABLE);
                         enet_peer_send(ev.peer, CH_RELIABLE, out);
                         netLog("connected to host; sent HELLO");
                     }
@@ -635,7 +659,13 @@ void NetLink::threadLoop() {
                 }
                 case ENET_EVENT_TYPE_RECEIVE: {
                     const u8 type = packetType(ev.packet->data, (unsigned)ev.packet->dataLength);
+                    if (isHost_ && type != PKT_HELLO && ev.peer->data == 0) {
+                        enet_packet_destroy(ev.packet); break;
+                    }
                     if (isHost_ && type == PKT_HELLO) {
+                        if (ev.packet->dataLength >= 3 && ev.packet->dataLength < sizeof(HelloPacket)) {
+                            enet_peer_disconnect(ev.peer, DISCONNECT_VERSION_MISMATCH);
+                        }
                         HelloPacket h;
                         if (readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &h)) {
                             if (h.version != PROTOCOL_VERSION) {
@@ -648,6 +678,13 @@ void NetLink::threadLoop() {
                                 // 主机界面也显示拒绝原因，并经断开数据告知被拒的加入方（它收不到 WELCOME）
                                 setNetUiError("Rejected a joiner: version mismatch - update both to the same KenshiCoop build");
                                 enet_peer_disconnect(ev.peer, DISCONNECT_VERSION_MISMATCH);
+                            } else if (!h.playerId || h.playerId == playerId_ || h.nameLen > 63 ||
+                                       ev.packet->dataLength != sizeof(h) + h.nameLen ||
+                                       (steam && steamp2p::peerIdForHost(ev.peer->address.host) != h.playerId)) {
+                                netErr("[owners] rejected invalid player identity");
+                                enet_peer_disconnect(ev.peer, 0);
+                            } else if (ev.peer->data != 0) {
+                                netErr("[owners] repeated HELLO ignored");
                             } else {
                                 // Admit policy (protocol 49). The sync model is a
                                 // host-relayed star: join-authored state reaches the
@@ -655,31 +692,19 @@ void NetLink::threadLoop() {
                                 // join is supported - up to MAX_PLAYERS, each on its
                                 // own squad-tab rank.
                                 //
-                                // Squad-slot uniqueness: a claim for rank 0 (the
-                                // host's tab) or for a rank a CONNECTED join already
-                                // holds is rejected loudly - with one exception: if
-                                // the holder's link is dead-but-not-yet-timed-out (a
-                                // crash ghost), the claim is treated as that player
-                                // rejoining and the ghost is evicted. ENet keeps a
-                                // crashed peer CONNECTED for its timeout window, so
-                                // without the eviction a crash rejoin would be locked
-                                // out for ~30 s.
+                                // 槽位冲突直接拒绝；只有相同稳定身份允许替换旧连接。
                                 u32 rank = h.ownRank;
                                 u32 ghostId = 0;
                                 bool taken = (rank == 0 || rank >= MAX_PLAYERS);
                                 for (std::map<u32, u32>::iterator it = rankById_.begin();
                                      it != rankById_.end(); ++it) {
-                                    if (it->second != rank) continue;
-                                    ghostId = it->first;
-                                    taken = true;
-                                    break;
+                                    std::map<u32, PeerStatusPacket>::const_iterator identity = statusById_.find(it->first);
+                                    bool same = identity != statusById_.end() && identity->second.playerId == h.playerId;
+                                    if (same) ghostId = it->first;
+                                    else if (it->second == rank) { taken = true; break; }
                                 }
-                                if (taken && ghostId != 0) {
-                                    // Same slot, new link: evict the ghost and let the
-                                    // claim through. (A genuinely live holder loses its
-                                    // link here too - two people who BOTH configure
-                                    // slot 1 will see a reconnect fight in the logs,
-                                    // which is the loud failure we want.)
+                                if (!taken && ghostId != 0) {
+                                    // 同一个玩家重连，先撤销旧连接的授权与会话状态。
                                     std::map<u32, ENetPeer*>::iterator pit =
                                         peersById_.find(ghostId);
                                     ENetPeer* ghost = (pit != peersById_.end()) ? pit->second : 0;
@@ -717,6 +742,13 @@ void NetLink::threadLoop() {
                                     ev.peer->data = (void*)(size_t)id;
                                     peersById_[id] = ev.peer;
                                     rankById_[id]  = rank;
+                                    PeerStatusPacket row;
+                                    memset(&row, 0, sizeof(row));
+                                    row.type = (u8)PKT_PEER_STATUS; row.present = 1;
+                                    row.ownerId = id; row.ownRank = rank; row.playerId = h.playerId;
+                                    memcpy(row.name, ev.packet->data + sizeof(h), h.nameLen);
+                                    statusById_[id] = row;
+                                    if (inbound_) inbound_->pushPeerStatus(row);
                                     WelcomePacket w;
                                     w.type = (u8)PKT_WELCOME; w.version = PROTOCOL_VERSION; w.playerId = id;
                                     ENetPacket* out =
@@ -727,10 +759,9 @@ void NetLink::threadLoop() {
                                     // newcomer. The receiving game threads reset that
                                     // owner's state and re-burst their own reliable
                                     // channels, which the relay carries across.
-                                    for (std::map<u32, u32>::iterator it = rankById_.begin();
-                                         it != rankById_.end(); ++it) {
-                                        if (it->first == id) continue;
-                                        sendStatusTo(ev.peer, it->first, it->second, true);
+                                    for (std::map<u32, PeerStatusPacket>::iterator it = statusById_.begin();
+                                         it != statusById_.end(); ++it) {
+                                        sendStatusTo(ev.peer, it->first, it->second.ownRank, true);
                                     }
                                     broadcastStatusExcept(id, id, rank, true);
                                     char b[96];
@@ -778,6 +809,11 @@ void NetLink::threadLoop() {
                         if (!isHost_ &&
                             readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &ps)
                             && inbound_) {
+                            if (!ps.playerId || ps.ownerId >= MAX_PLAYERS) {
+                                enet_packet_destroy(ev.packet); break;
+                            }
+                            ps.name[63] = 0;
+                            inbound_->pushPeerStatus(ps);
                             epochSeen_.erase(ps.ownerId);
                             char b[96];
                             _snprintf(b, sizeof(b) - 1,
@@ -786,8 +822,10 @@ void NetLink::threadLoop() {
                                       ps.present ? "joined" : "left");
                             b[sizeof(b) - 1] = '\0';
                             netLog(b);
-                            if (ps.present) inbound_->pushConnect(ps.ownerId);
-                            else            inbound_->pushLeave(ps.ownerId);
+                            if (ps.ownerId != 0 && ps.ownerId != (u32)myId_) {
+                                if (ps.present) inbound_->pushConnect(ps.ownerId);
+                                else            inbound_->pushLeave(ps.ownerId);
+                            }
                         }
                     } else if (type == PKT_ENTITY_BATCH) {
                         const unsigned len = (unsigned)ev.packet->dataLength;
@@ -2138,6 +2176,12 @@ void clearNetUiError() {
     EnterCriticalSection(&g_netUiErr.cs);
     g_netUiErr.buf[0] = '\0';
     LeaveCriticalSection(&g_netUiErr.cs);
+}
+
+void NetLink::setIdentity(u64 id, const std::string& name) {
+    playerId_ = id;
+    memset(playerName_, 0, sizeof(playerName_));
+    strncpy(playerName_, name.c_str(), sizeof(playerName_) - 1);
 }
 
 } // namespace coop

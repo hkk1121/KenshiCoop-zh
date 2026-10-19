@@ -17,6 +17,7 @@ typedef signed char    i8;
 typedef signed int     i32;
 typedef unsigned short u16;
 typedef unsigned int   u32;
+typedef unsigned long long u64;
 typedef float          f32;
 typedef double         f64;
 
@@ -27,9 +28,9 @@ typedef double         f64;
 // and a mismatch is rejected (no back-compat).
 // 本分支（zh-cn-improvements）自有协议号：基于上游 55，加入名字同步与动物年龄同步（上游 PR #28）后
 // 改为 1001 起编号，避开上游后续序列；1002 加入小队控制授权（EVT_SQUAD_AUTH）；
-// 1003 加入多人对端名单与授权目标；
+// 1003 加入多人对端名单与授权目标；1004 加入稳定玩家身份与存档归属表；
 // 双方须使用同一改进版，与官方 v0.51 不再互通
-const u16 PROTOCOL_VERSION = 1003;
+const u16 PROTOCOL_VERSION = 1004;
 
 // Session player cap (four-player first stage): the host + up to three joins.
 // Transport and replication are N-generic; the host enforces this policy limit
@@ -153,6 +154,7 @@ struct HelloPacket {
                  // The host rejects a claim that is 0 (the host's own tab) or
                  // already held by a connected join - loud and deterministic
                  // instead of two joins silently double-claiming one squad.
+    u64 playerId; // 稳定身份，连接编号不能代替主人身份
     u8  nameLen; // bytes of name following this struct (0..63)
     // char name[nameLen] follows
 };
@@ -175,6 +177,8 @@ struct PeerStatusPacket {
     u8  present; // 1 = joined, 0 = left
     u32 ownerId; // the join this row describes (never 0 = the host)
     u32 ownRank; // the squad-tab rank that join claimed at HELLO
+    u64 playerId;
+    char name[64];
 };
 
 // A reliable one-shot transition. 'subject' is the hand the event happened TO; the

@@ -879,6 +879,7 @@ private:
     // SESSION-PRESERVING: presence edges (the connection persists across a swap).
     SessionQ<u32>                  conn_;
     SessionQ<u32>                  leave_;
+    SessionQ<PeerStatusPacket>      peerStatus_;
 
     // WORLD-STATE: describe the current world; auto-cleared on a session reset.
     WorldQ<InboundEntity>          ent_;
@@ -929,6 +930,13 @@ private:
 
     Inbound(const Inbound&);
     Inbound& operator=(const Inbound&);
+public:
+    void pushPeerStatus(const PeerStatusPacket& row) {
+        EnterCriticalSection(&cs_); peerStatus_.push_back(row); LeaveCriticalSection(&cs_);
+    }
+    void drainPeerStatus(std::deque<PeerStatusPacket>& out) {
+        EnterCriticalSection(&cs_); out.swap(peerStatus_); LeaveCriticalSection(&cs_);
+    }
 };
 
 } // namespace coop

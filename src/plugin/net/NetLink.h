@@ -298,6 +298,9 @@ private:
     // Join-side squad-slot claim (protocol 49), set before startClient and
     // read by the net thread when it sends HELLO. Default 1.
     u32 claimRank_;
+    u64 playerId_;
+    char playerName_[64];
+    std::map<u32, PeerStatusPacket> statusById_;
 
     CRITICAL_SECTION         outCs_;
     std::vector<EntityState> out_;
@@ -421,6 +424,8 @@ private:
 
     NetLink(const NetLink&);
     NetLink& operator=(const NetLink&);
+public:
+    void setIdentity(u64 id, const std::string& name);
 };
 
 } // namespace coop

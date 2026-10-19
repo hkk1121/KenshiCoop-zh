@@ -133,6 +133,55 @@ void loadConfig(Config& c) {
     // coop_config.json (next to the DLL) supplies the interactive-install
     // defaults; env vars still override every one of them (test harness).
     std::map<std::string, std::string> f = readConfigFile();
+    c.localPlayerId = _strtoui64(fileOr(f, "localPlayerId", "0").c_str(), 0, 10);
+    c.playerName = fileOr(f, "playerName", "");
+    if (!c.localPlayerId) {
+        // 只在首次安装时生成；保留原文件的注释和所有其它设置。
+        typedef BOOLEAN (APIENTRY* RandomFn)(PVOID, ULONG);
+        HMODULE adv = LoadLibraryA("advapi32.dll");
+        RandomFn random = adv ? (RandomFn)GetProcAddress(adv, "SystemFunction036") : 0;
+        unsigned long long id = 0;
+        bool generated = random && random(&id, sizeof(id)) && id != 0;
+        if (adv) FreeLibrary(adv);
+        if (generated) {
+            id |= 0x8000000000000000ULL;
+            const std::string path = configFilePath();
+            std::ifstream input(path.c_str(), std::ios::binary);
+            std::string text((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+            input.close();
+            size_t open = text.find('{');
+            if (text.empty()) { text = "{\r\n}\r\n"; open = 0; }
+            if (open != std::string::npos) {
+                char row[96];
+                _snprintf(row, sizeof(row), "\r\n  \"localPlayerId\": \"%llu\",", id);
+                // 空对象的首项不加尾逗号；已有对象保持原有内容不变。
+                size_t key = text.find("\"localPlayerId\"");
+                if (key != std::string::npos) {
+                    size_t begin = text.find(':', key) + 1;
+                    size_t finish = text.find_first_of(",}\r\n", begin);
+                    char value[32]; _snprintf(value, sizeof(value), " \"%llu\"", id);
+                    text.replace(begin, finish - begin, value);
+                } else if (f.empty()) {
+                    std::string r(row); r.erase(r.size() - 1); text.insert(open + 1, r);
+                } else text.insert(open + 1, row);
+                std::string temp = path + ".tmp";
+                std::ofstream output(temp.c_str(), std::ios::binary | std::ios::trunc);
+                output.write(text.data(), (std::streamsize)text.size());
+                output.close();
+                if (output && MoveFileExA(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+                    c.localPlayerId = id;
+            }
+        }
+        if (!c.localPlayerId) coop::logErrLine("[owners] local identity could not be persisted; UDP connection disabled");
+    }
+    if (c.playerName.empty()) {
+        wchar_t name[64]; DWORD count = 64;
+        if (GetUserNameW(name, &count)) {
+            char utf8[192];
+            int n = WideCharToMultiByte(CP_UTF8, 0, name, -1, utf8, sizeof(utf8), 0, 0);
+            if (n > 0) c.playerName = utf8;
+        }
+    }
 
     std::string mode = envOr("KENSHICOOP_MODE", fileOr(f, "role", "host").c_str());
     c.isHost      = (mode != "join");

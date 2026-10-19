@@ -73,9 +73,9 @@ static int g_total  = 0;
 
 static void testSizes() {
     std::printf("== wire struct sizes (the packed contract both clients memcpy) ==\n");
-    CHECK_EQ("sizeof(HelloPacket)",             sizeof(HelloPacket),             8); // v49: +ownRank
+    CHECK_EQ("sizeof(HelloPacket)",             sizeof(HelloPacket),             16); // v49: +ownRank
     CHECK_EQ("sizeof(WelcomePacket)",           sizeof(WelcomePacket),           7);
-    CHECK_EQ("sizeof(PeerStatusPacket)",        sizeof(PeerStatusPacket),        10); // v49: roster edge
+    CHECK_EQ("sizeof(PeerStatusPacket)",        sizeof(PeerStatusPacket),        82); // v49: roster edge
     CHECK_EQ("sizeof(EventPacket)",             sizeof(EventPacket),             58); // v1003: +target owner
     CHECK_EQ("sizeof(EntityState)",             sizeof(EntityState),             79);
     CHECK_EQ("sizeof(EntityBatchHeader)",       sizeof(EntityBatchHeader),       14); // v35: +sendMs; v44: +epoch
@@ -312,8 +312,8 @@ static void testSizes() {
     CHECK_EQ("EVT_SQUAD_MOVE id", (int)EVT_SQUAD_MOVE, 11);
     CHECK("EVT_SQUAD_MOVE distinct", EVT_SQUAD_MOVE != EVT_RECRUIT &&
           EVT_SQUAD_MOVE != EVT_NONE && EVT_SQUAD_MOVE != EVT_EXIT_FURNITURE);
-    CHECK_EQ("PROTOCOL_VERSION (v1003: four-player first stage)",
-             (int)PROTOCOL_VERSION, 1003);
+    CHECK_EQ("PROTOCOL_VERSION (v1004: stable player identity)",
+             (int)PROTOCOL_VERSION, 1004);
 
     // Protocol 52: the shared money pool. The two players spend from ONE wallet,
     // so the join reports CHANGES and the host the authoritative TOTAL - swap
@@ -517,7 +517,8 @@ static void testFraming() {
     // HELLO: [u8 type][u16 version][u32 ownRank][u8 nameLen] (v49) - the
     // version check that rejects mismatched builds and the squad-slot claim
     // the host admits on both depend on this exact layout.
-    unsigned char hello[8];
+    unsigned char hello[16];
+    memset(hello, 0, sizeof(hello));
     hello[0] = (unsigned char)PKT_HELLO;
     hello[1] = (unsigned char)(PROTOCOL_VERSION & 0xFF);
     hello[2] = (unsigned char)((PROTOCOL_VERSION >> 8) & 0xFF);
@@ -525,11 +526,13 @@ static void testFraming() {
     hello[4] = 0;
     hello[5] = 0;
     hello[6] = 0;
-    hello[7] = 0; // nameLen
+    hello[7] = 0x88; hello[14] = 0x11; // 稳定身份保留完整 64 位
+    hello[15] = 0; // nameLen
     HelloPacket h;
-    CHECK("HELLO parses from raw bytes", readPacket(hello, 8, &h));
+    CHECK("HELLO parses from raw bytes", readPacket(hello, sizeof(hello), &h));
     CHECK_EQ("HELLO version field offset", h.version, PROTOCOL_VERSION);
     CHECK_EQ("HELLO ownRank field offset", h.ownRank, 2);
+    CHECK_EQ("HELLO stable identity offset", h.playerId, 0x1100000000000088ULL);
     CHECK("HELLO version mismatch detectable", ((u16)(PROTOCOL_VERSION + 1)) != h.version);
 
     // Entity batch framing: [EntityBatchHeader][EntityState*count], the exact

@@ -70,6 +70,9 @@ void removeEnetHooks();
 // Close the P2P sessions (peer + ping peer).
 void shutdown();
 
+SteamId peerIdForHost(unsigned int host);
+const char* selfName();
+
 } // namespace steamp2p
 } // namespace coop
 

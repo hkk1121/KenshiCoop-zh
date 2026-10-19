@@ -2771,6 +2771,12 @@ public:
     // Rebuild the union consumed by generic existence/parking after one
     // owner's census changes or leaves.
     void refreshCensusUnion();
+    void setPlayerIdentity(u64 id);
+    void ingestPlayers(Inbound& in);
+    const std::map<u64, PeerStatusPacket>& players() const { return players_; }
+private:
+    u64 playerIdentity_;
+    std::map<u64, PeerStatusPacket> players_;
 };
 
 } // namespace coop

@@ -62,6 +62,7 @@ UserBLoggedOnFn   g_loggedOn    = 0;
 
 bool    g_ready    = false;
 SteamId g_selfId   = 0;
+char g_selfName[64] = { 0 };
 // Tunnel peer registry (channel 0; protocol 49). Slot i talks to fabricated
 // ENet address 1.0.0.(1+i):port, so ENet's per-address peer routing can hold
 // several Steam counterparties at once. A JOIN registers exactly one entry
@@ -341,6 +342,14 @@ bool init() {
     if (g_iface == 0) { steamLog("init FAILED: no ISteamNetworking interface"); return false; }
 
     g_selfId = getId(g_user);
+    ClientGetIfaceFn getFriends = (ClientGetIfaceFn)GetProcAddress(mod, "SteamAPI_ISteamClient_GetISteamFriends");
+    typedef const char* (*PersonaFn)(void*);
+    PersonaFn persona = (PersonaFn)GetProcAddress(mod, "SteamAPI_ISteamFriends_GetPersonaName");
+    if (getFriends && persona) {
+        void* friends = getFriends(client, hUser, hPipe, "SteamFriends015");
+        const char* name = friends ? persona(friends) : 0;
+        if (name) { strncpy(g_selfName, name, sizeof(g_selfName) - 1); g_selfName[63] = 0; }
+    }
     if (allowRelay != 0) allowRelay(g_iface, true); // Valve-relay fallback ON
 
     g_ready = true;
@@ -443,6 +452,13 @@ void shutdown() {
     if (g_pingPeer != 0 && !pingClosed) g_close(g_iface, g_pingPeer);
     g_peerCount = 0;
 }
+
+SteamId peerIdForHost(unsigned int host) {
+    int slot = slotForFakeHost(host);
+    return slot < 0 ? 0 : g_peers[slot];
+}
+
+const char* selfName() { return g_selfName; }
 
 } // namespace steamp2p
 } // namespace coop

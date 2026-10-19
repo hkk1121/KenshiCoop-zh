@@ -97,7 +97,7 @@ Replicator::Replicator()
       timeLastSendMs_(0), timeLastLogMs_(0), timeSlewApplied_(-1.0f),
       platoonT0_(0),
       lifeSweepMs_(0),
-      tabNotice_(0) {
+      tabNotice_(0), playerIdentity_(0) {
 }
 
 // ---- Phase 3: unified entity lifecycle ---------------------------------------
@@ -1207,6 +1207,27 @@ bool Replicator::takePeerBodyTabOwner(u32* ownerId) {
     *ownerId = peerBodyOwnerQueue_.front();
     peerBodyOwnerQueue_.erase(peerBodyOwnerQueue_.begin());
     return true;
+}
+
+void Replicator::setPlayerIdentity(u64 id) {
+    if (playerIdentity_ != id) players_.clear();
+    playerIdentity_ = id;
+    for (std::map<u64, PeerStatusPacket>::iterator it = players_.begin(); it != players_.end(); ++it)
+        it->second.present = 0;
+}
+
+void Replicator::ingestPlayers(Inbound& in) {
+    std::deque<PeerStatusPacket> got;
+    in.drainPeerStatus(got);
+    for (std::deque<PeerStatusPacket>::const_iterator it = got.begin(); it != got.end(); ++it) {
+        for (std::map<u64, PeerStatusPacket>::iterator old = players_.begin(); old != players_.end(); ++old)
+            if (old->second.ownerId == it->ownerId) old->second.present = 0;
+        players_[it->playerId] = *it;
+        char b[224];
+        _snprintf(b, sizeof(b) - 1, "[owners] player=%llu owner=%u rank=%u online=%u name='%s'",
+                  it->playerId, it->ownerId, it->ownRank, it->present, it->name);
+        b[sizeof(b) - 1] = 0; coop::logLine(b);
+    }
 }
 
 } // namespace coop

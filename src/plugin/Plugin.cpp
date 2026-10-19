@@ -351,6 +351,7 @@ void armConnectPush(coop::u32 targetId) {
 void processNetEvents(GameWorld* gw) {
     std::deque<coop::u32> conns, leaves;
     g_repl.setLocalId(g_net.localId());
+    g_repl.ingestPlayers(g_inbound);
     g_inbound.drainConnects(conns);
     g_inbound.drainLeaves(leaves);
     for (std::deque<coop::u32>::iterator it = conns.begin(); it != conns.end(); ++it) {
@@ -2370,6 +2371,12 @@ void startNetworking() {
         }
     }
 
+    bool useSteamId = g_cfg.transport == "steam" && !steamFallback;
+    coop::u64 identity = useSteamId ? coop::steamp2p::selfId() : g_cfg.localPlayerId;
+    std::string name = useSteamId && coop::steamp2p::selfName()[0]
+                         ? coop::steamp2p::selfName() : g_cfg.playerName;
+    g_net.setIdentity(identity, name);
+    g_repl.setPlayerIdentity(identity);
     bool ok;
     if (g_cfg.isHost) {
         coopLog("KenshiCoop: starting as HOST");
