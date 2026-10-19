@@ -165,6 +165,10 @@ std::string& g_loadXferPending = g_session.loadXferPending;
 std::string& g_loadAfterCommit = g_session.loadAfterCommit;
 coop::u32&   g_loadCommitBase  = g_session.loadCommitBase;
 DWORD&       g_loadPumpArmTick  = g_session.loadPumpArmTick;
+// 兜底存档传输被加入方判失败（ACK ok=0）时自动重发：最近一次兜底传输的存档名与已重发次数
+std::string  g_loadXferLastName;
+unsigned int g_loadXferRetries  = 0;
+const unsigned int LOAD_XFER_MAX_RETRIES = 2;
 
 // Scenario harness state. Harness/Debug builds only - the shipped Release DLL
 // excludes test/Scenario*.cpp and does not define KENSHICOOP_HARNESS (Phase 1).
@@ -380,21 +384,25 @@ void processNetEvents(GameWorld* gw) {
 // being copy-pasted into both. Emits no log line, so the oracle log contract is
 // unaffected by the extraction.
 void pumpSaveReceive() {
+    // 按与网络线程入队相反的顺序取队列（DONE → FILE → BEGIN）：网络线程按 BEGIN、FILE…、DONE
+    // 的顺序入队，若先取 FILE 后取 DONE，最后一块和 DONE 恰好在两次取之间到达时，就会先校验
+    // 后写入，最后一块被判丢失（badCrc=1）。反序取保证取到的 DONE / FILE 之前的包都已在手。
+    std::deque<coop::InboundSaveDone> dones;
+    g_inbound.drainSaveDones(dones);
+    std::deque<coop::InboundSaveFile> chunks;
+    g_inbound.drainSaveFiles(chunks);
     std::deque<coop::InboundSaveBegin> begins;
     g_inbound.drainSaveBegins(begins);
+
     for (std::deque<coop::InboundSaveBegin>::iterator it = begins.begin();
          it != begins.end(); ++it)
         coop::savexfer::onSaveBegin(it->pkt);
 
-    std::deque<coop::InboundSaveFile> chunks;
-    g_inbound.drainSaveFiles(chunks);
     for (std::deque<coop::InboundSaveFile>::iterator it = chunks.begin();
          it != chunks.end(); ++it)
         coop::savexfer::onSaveFile(it->hdr, it->path.c_str(),
                                    it->data.empty() ? 0 : &it->data[0]);
 
-    std::deque<coop::InboundSaveDone> dones;
-    g_inbound.drainSaveDones(dones);
     for (std::deque<coop::InboundSaveDone>::iterator it = dones.begin();
          it != dones.end(); ++it) {
         coop::u16 files = 0;
@@ -531,6 +539,16 @@ void driveSaveSync() {
             b[sizeof(b) - 1] = '\0';
             if (it->pkt.ok) coopLog(b); else coopErr(b);
             coop::savexfer::noteAck(it->pkt.xferId, it->pkt.ok ? 1 : 0);
+            // 兜底传输失败：加入方仍在等待提交（失败后会重新等待），重发同名存档
+            if (!it->pkt.ok && !g_loadXferLastName.empty() &&
+                g_loadXferRetries < LOAD_XFER_MAX_RETRIES) {
+                ++g_loadXferRetries;
+                g_loadXferPending = g_loadXferLastName;
+                _snprintf(b, sizeof(b) - 1, "[load] transfer failed on join -> retry %u/%u name='%s'",
+                          g_loadXferRetries, LOAD_XFER_MAX_RETRIES, g_loadXferLastName.c_str());
+                b[sizeof(b) - 1] = '\0'; coopLog(b);
+            }
+            if (it->pkt.ok) g_loadXferLastName.clear();
         }
     } else {
         // Receiver half: stage, verify, commit, acknowledge (shared pump).
@@ -652,6 +670,7 @@ void driveLoadSync(GameWorld* gw) {
                       it->pkt.loadId, name, it->pkt.fingerprint);
             b[sizeof(b) - 1] = '\0'; coopLog(b);
             g_loadXferPending = name;
+            g_loadXferRetries = 0;   // 新的 NACK：重发计数从头算
         }
         if (!g_loadXferPending.empty() && coop::engine::gameplayLive(gw) &&
             !coop::savexfer::sending()) {
@@ -661,6 +680,7 @@ void driveLoadSync(GameWorld* gw) {
                       g_loadXferPending.c_str());
             b[sizeof(b) - 1] = '\0'; coopLog(b);
             coop::savexfer::beginSend(g_net, g_net.localId(), g_loadXferPending);
+            g_loadXferLastName = g_loadXferPending;
             g_loadXferPending.clear();
         }
         // The chunk pump normally lives in driveSaveSync; keep the fallback

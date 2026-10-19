@@ -415,7 +415,6 @@ void NetLink::threadLoop() {
         if (serverPeer_) serverPeer_->mtu = 1200;
     }
 
-    u32   nextId = 1;
     DWORD lastConnectAttempt = GetTickCount();
 
     // Wall-clock time-sync state (client only). The join pings every ~2 s; each
@@ -495,7 +494,17 @@ void NetLink::threadLoop() {
                                 setNetUiError("Rejected a joiner: version mismatch - update both to the same KenshiCoop build");
                                 enet_peer_disconnect(ev.peer, DISCONNECT_VERSION_MISMATCH);
                             } else {
-                                u32 id = nextId++;
+                                // 取当前未被其他已连接对端占用的最小编号：编号只增不减时，
+                                // 加入方断线重连会拿到 id=2，被误判为“3 人以上”
+                                u32 id = 1;
+                                for (size_t pi = 0; pi < enetHost_->peerCount; ++pi) {
+                                    ENetPeer* op = &enetHost_->peers[pi];
+                                    if (op != ev.peer && op->state == ENET_PEER_STATE_CONNECTED &&
+                                        (u32)(size_t)op->data == id) {
+                                        ++id;
+                                        pi = (size_t)-1; // 编号被占用：从头重新检查
+                                    }
+                                }
                                 // TWO-PLAYER ASSUMPTION (step-6 guard): the sync model
                                 // is host + ONE join. Join-authored events/inventory/
                                 // conservation intents reach only the host and are NOT
