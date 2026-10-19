@@ -34,6 +34,11 @@
 //   dotnet run -- "D:\...\Kenshi"    # same as the first, with a non-default install
 //
 // Then deploy it into the game: scripts\deploy.cmd
+//
+// 本分支（zh-cn-improvements）新增：其余原版开局各生成一个“联机：<中文名>”版本（记录 7 起），
+// 资金、出生地、阵营关系、科技、限定种族、角色模板全部沿用原版，另加一个相同配置的第 2 小队给加入方；
+// 开局界面文字取自游戏 locale\zh_CN\gamedata.po 直接写成中文，原有两个流浪者开局也改为中文显示名。
+// 本机 Kenshi 不在默认路径时：dotnet run -- "G:\SteamLibrary\steamapps\common\Kenshi"
 using OpenConstructionSet.Data;
 using OpenConstructionSet.Mods;
 
@@ -82,6 +87,72 @@ Console.WriteLine("Reading Kenshi base data...");
 var baseData = await new ModFile(Path.Combine(dataDir, "gamedata.base")).ReadDataAsync();
 var rebirth = await new ModFile(Path.Combine(dataDir, "rebirth.mod")).ReadDataAsync();
 Console.WriteLine($"  gamedata.base: {baseData.Items.Count} items | rebirth.mod: {rebirth.Items.Count} items");
+
+// 原版各开局的联机版需要四个基础文件按加载顺序叠加后的有效数据
+var baseLayers = new List<ModFileData> { baseData };
+foreach (var f in new[] { "Newwworld.mod", "Dialogue.mod" })
+    baseLayers.Add(await new ModFile(Path.Combine(dataDir, f)).ReadDataAsync());
+baseLayers.Add(rebirth);
+
+// 开局界面文字的简体中文：新记录不在游戏翻译表里（翻译按 StringId 匹配），生成时直接写入中文。
+// 取自游戏自带的 locale\zh_CN\gamedata.po（NEW_GAME_STARTOFF 条目，英文原文 -> 译文）
+var zhStart = new Dictionary<string, string>();
+string poPath = Path.Combine(kenshiDir, "locale", "zh_CN", "gamedata.po");
+if (File.Exists(poPath))
+{
+    static string PoText(string block, string key)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(block, "\\n" + key + " ((?:\".*\"\\n?)+)");
+        if (!m.Success) return "";
+        var parts = System.Text.RegularExpressions.Regex.Matches(m.Groups[1].Value, "\"(.*)\"").Select(x => x.Groups[1].Value);
+        return System.Text.RegularExpressions.Regex.Unescape(string.Concat(parts));
+    }
+    foreach (var block in File.ReadAllText(poPath).Replace("\r\n", "\n").Split("\n\n"))
+    {
+        if (!block.Contains("msgctxt \"NEW_GAME_STARTOFF,")) continue;
+        string en = PoText(block, "msgid"), zh = PoText(block, "msgstr");
+        if (en.Length > 0 && zh.Length > 0) zhStart[en] = zh;
+    }
+}
+Console.WriteLine($"  zh_CN start texts: {zhStart.Count}");
+string Zh(string en) => zhStart.TryGetValue(en, out var zh) ? zh : en;
+
+// 联机开局说明的统一结尾
+const string CoopNote = "\n\n【联机开局】主机控制第 1 个小队，加入方控制第 2 个小队，两队角色配置相同；资金为双方共用。";
+
+// 某记录在四个基础文件叠加后的有效数据：值逐层覆盖；引用按类别、按目标逐层覆盖，新目标追加在后。
+// 返回最后一层的记录（类型、显示名）和合并后的引用；基础文件里没有删除引用的标记，不处理删除
+(Item? Item, List<ReferenceCategory> Refs) Effective(string sid)
+{
+    Item? last = null;
+    var refs = new List<ReferenceCategory>();
+    foreach (var layer in baseLayers)
+        foreach (var it in layer.Items.Where(i => i.StringId.Equals(sid, StringComparison.OrdinalIgnoreCase)))
+        {
+            last = it;
+            foreach (var cat in it.ReferenceCategories)
+            {
+                var merged = refs.FirstOrDefault(c => c.Name == cat.Name);
+                if (merged is null) refs.Add(merged = new ReferenceCategory(cat.Name));
+                foreach (var r in cat.References)
+                {
+                    int at = merged.References.FindIndex(x => x.TargetId == r.TargetId);
+                    if (at >= 0) merged.References[at] = new Reference(r);
+                    else merged.References.Add(new Reference(r));
+                }
+            }
+        }
+    return (last, refs);
+}
+
+Dictionary<string, object> MergedValues(string sid)
+{
+    var values = new Dictionary<string, object>();
+    foreach (var layer in baseLayers)
+        foreach (var it in layer.Items.Where(i => i.StringId.Equals(sid, StringComparison.OrdinalIgnoreCase)))
+            foreach (var kv in it.Values) values[kv.Key] = kv.Value;
+    return values;
+}
 
 // Lookup by StringId within one file. Duplicates: last wins, as the game does.
 static Item? Find(IEnumerable<Item> items, string stringId) =>
@@ -137,6 +208,9 @@ Item CloneSquad(int id, string name, int leaderId) => new(
 Item MakeStart(int id, string name, string description, int squad2Id, int money)
 {
     var values = new Dictionary<string, object>(startValues) { ["description"] = description };
+    // 难度/风格文字同样不在翻译表里，写入中文
+    foreach (var key in new[] { "difficulty", "style" })
+        if (values.TryGetValue(key, out var text) && text is string s) values[key] = Zh(s);
     // Preserve the field's stored numeric type rather than forcing int.
     values["money"] = values.TryGetValue("money", out var existing) && existing is not null
         ? Convert.ChangeType(money, existing.GetType())!
@@ -157,37 +231,109 @@ Item MakeStart(int id, string name, string description, int squad2Id, int money)
 // ---- 3) The records ----------------------------------------------------------
 // 1-3: the original "Multiplayer (Wanderer x2)" start. Reproduced byte-for-byte in
 // intent - these ids are referenced by saves already in the wild.
-var wanderer2 = CloneWanderer(1, "Wanderer 2");
+var wanderer2 = CloneWanderer(1, "流浪者 2");
 var wandererSquad2 = CloneSquad(2, "startoff- Wanderer squad 2 (co-op)", 1);
-var wandererStart = MakeStart(3, "Multiplayer (Wanderer x2)",
-    "Two lone wanderers with nothing but a few coins, a pair of pants each and a couple of rusty " +
-    "swords, ready to venture out into the world together.  Designed for KenshiCoop: each wanderer " +
-    "starts in their own squad, so the host controls squad 1 and the joining player controls squad 2.",
+// 本分支：显示名与说明改为简体中文（只改显示文字，StringId 不变，不影响已有存档）
+var wandererStart = MakeStart(3, "联机：流浪者",
+    "两个只有几枚硬币、一条裤子和一把生锈旧剑的流浪者，准备一起闯荡世界。" + CoopNote,
     squad2Id: 2, money: Convert.ToInt32(startValues["money"]));
 
 // 4-6: the "Multiplayer+ (Wanderer x2)" start. Record 4 is a SEPARATE Character from
 // record 1 even though both spawn a PC called "Wanderer 2" - the StringId is what tells
 // the two starts apart, and record 4's is the MARKER the plugin matches on to apply the
 // stat floor. Keep it in sync with WPX2_MARKER_SID in src/plugin/Plugin.cpp.
-var plusWanderer = CloneWanderer(4, "Wanderer 2");
+var plusWanderer = CloneWanderer(4, "流浪者 2");
 var plusSquad2 = CloneSquad(5, "startoff- Multiplayer+ squad 2 (co-op)", 4);
-var plusStart = MakeStart(6, "Multiplayer+ (Wanderer x2)",
-    "Two seasoned wanderers setting out together with a small fortune behind them.  The same start " +
-    "as Multiplayer (Wanderer x2) - each wanderer in their own squad, so the host controls squad 1 " +
-    "and the joining player controls squad 2 - but without the early grind.  The 500,000 cats are " +
-    "the shared faction wallet both players spend from, and the KenshiCoop plugin raises every stat " +
-    "on both characters to 50 on the first tick of a new game.",
+var plusStart = MakeStart(6, "联机+：流浪者（50 万资金、全属性 50）",
+    "两个身经百战的流浪者，带着一笔小财富一起出发。与“联机：流浪者”相同，但省去前期练级：" +
+    "50 万开局资金为双方共用，KenshiCoop 插件会在新游戏开始时把两人的所有属性提升到 50。" + CoopNote,
     squad2Id: 5, money: PlusStartMoney);
 
-Item[] items = [wanderer2, wandererSquad2, wandererStart, plusWanderer, plusSquad2, plusStart];
+// 7 起：其余原版开局的联机版（本分支新增）。每个原版开局占三个编号：+0 开局、+1 主机小队模板、
+// +2 加入方小队模板。开局只引用一个小队模板时主机直接用原版模板，+1 空着不用。
+// 编号一经发布永久冻结（存档按 StringId 引用），以后只能追加，不能改动已有编号。
+// 流浪者已有记录 1-6；The Hungover Ninja（5425）不在官方翻译里、开局列表也不显示，不做联机版
+(string VanillaSid, int BaseId)[] coopVariants =
+[
+    ("1981-gamedata.base", 7),     // The Freedom Seekers
+    ("2287-gamedata.base", 10),    // Rock Bottom
+    ("1985-gamedata.base", 13),    // Son of a Captain（直接引用角色）
+    ("2918-gamedata.base", 16),    // The Cannibal Hunters（直接引用角色）
+    ("2060-gamedata.base", 19),    // The Holy Sword（直接引用角色）
+    ("1994-gamedata.base", 22),    // The Wandering Trader
+    ("3062-gamedata.base", 25),    // Nobodies
+    ("47924-rebirth.mod", 28),     // Guy with a dog
+    ("1532934-rebirth.mod", 31),   // The Slaves
+    ("1533582-rebirth.mod", 34),   // Holy Nation Citizen
+    ("1533657-rebirth.mod", 37),   // The Hive Exile
+    ("1533659-rebirth.mod", 40),   // Empire Citizen
+];
+var variantItems = new List<Item>();
+foreach (var (vanillaSid, baseId) in coopVariants)
+{
+    var (start, startRefs) = Effective(vanillaSid);
+    var squadRefs = startRefs.FirstOrDefault(c => c.Name == "squad")?.References ?? [];
+    if (start is null || start.Type != ItemType.NewGameStartoff || squadRefs.Count == 0)
+    {
+        Console.WriteLine($"ERROR: vanilla start {vanillaSid} not found or has no squad");
+        return 1;
+    }
+    string hostSquadSid;
+    List<ReferenceCategory> joinRefs;
+    Dictionary<string, object> joinValues;
+    var (firstTarget, firstRefs) = Effective(squadRefs[0].TargetId);
+    if (squadRefs.Count == 1 && firstTarget?.Type == ItemType.SquadTemplate)
+    {
+        // 只引用一个小队模板：主机用原版模板，加入方用其有效数据的副本（角色模板、数量、动物都相同）
+        hostSquadSid = squadRefs[0].TargetId;
+        joinValues = MergedValues(hostSquadSid);
+        joinRefs = firstRefs;
+    }
+    else
+    {
+        // 直接引用角色：合成小队模板，首个角色为队长，其余入队。原版单角色开局（如船长之子）的数量写 0
+        // 也只生成一个角色，所以数量按至少 1 计。小队参数沿用原版流浪者小队（含 dont multiply）
+        var members = new List<Reference>();
+        foreach (var r in squadRefs)
+        {
+            if (Effective(r.TargetId).Item?.Type != ItemType.Character)
+            {
+                Console.WriteLine($"ERROR: {vanillaSid} mixes squad templates and characters - not supported");
+                return 1;
+            }
+            members.Add(new Reference(r.TargetId, Math.Max(r.Value0, 1), 0, 0));
+        }
+        joinValues = new Dictionary<string, object>(squadValues);
+        joinRefs = [new ReferenceCategory("leader", [new Reference(members[0].TargetId, 1, 0, 0)])];
+        if (members.Count > 1) joinRefs.Add(new ReferenceCategory("squad", members.Skip(1)));
+        hostSquadSid = Sid(baseId + 1);
+        variantItems.Add(new Item(ItemType.SquadTemplate, baseId + 1, $"start- {start.Name} (co-op host)",
+            hostSquadSid, newSave, new Dictionary<string, object>(joinValues),
+            joinRefs.Select(c => new ReferenceCategory(c)), []));
+    }
+    variantItems.Add(new Item(ItemType.SquadTemplate, baseId + 2, $"start- {start.Name} (co-op join)",
+        Sid(baseId + 2), newSave, joinValues, joinRefs.Select(c => new ReferenceCategory(c)), []));
+
+    // 开局本身：资金、出生地、阵营关系、科技、限定种族等全部沿用原版，只把 squad 换成主机 + 加入方两个小队
+    var values = MergedValues(vanillaSid);
+    foreach (var key in new[] { "description", "difficulty", "style" })
+        if (values.TryGetValue(key, out var text) && text is string s) values[key] = Zh(s);
+    values["description"] = (values.TryGetValue("description", out var d) ? d as string : "") + CoopNote;
+    var refs = startRefs.Select(c => c.Name != "squad"
+        ? new ReferenceCategory(c)
+        : new ReferenceCategory("squad",
+            [new Reference(hostSquadSid, 0, 0, 0), new Reference(Sid(baseId + 2), 0, 0, 0)]));
+    variantItems.Add(new Item(ItemType.NewGameStartoff, baseId, "联机：" + Zh(start.Name), Sid(baseId),
+        newSave, values, refs, []));
+}
+
+Item[] items = [wanderer2, wandererSquad2, wandererStart, plusWanderer, plusSquad2, plusStart, .. variantItems];
 
 // ---- 4) Assemble and write ---------------------------------------------------
 var header = new Header(1, "",
-    "The data half of KenshiCoop: two co-op game starts. \"Multiplayer (Wanderer x2)\" is the " +
-    "vanilla Wanderer start with two wanderers, each already in their own squad, so the host plays " +
-    "squad 1 and the joining player takes squad 2. \"Multiplayer+ (Wanderer x2)\" is the same start " +
-    "with 500,000 cats in the shared wallet and both characters levelled to 50 in every stat by the " +
-    "plugin. Data-only mod; requires the KenshiCoop plugin for co-op.")
+    "KenshiCoop 的数据部分：联机开局。每个原版开局都有对应的“联机：”版本，资金、出生地、角色配置与原版相同，" +
+    "另加一个相同配置的第 2 小队给加入方；“联机+：流浪者”另有 50 万共享资金、两人全属性 50。" +
+    "纯数据 mod，联机需要 KenshiCoop 插件。")
 {
     Dependencies = ["gamedata.base", "Newwworld.mod", "rebirth.mod", "Dialogue.mod"],
 };
@@ -281,8 +427,36 @@ foreach (var (sid, squad2Sid, money) in new[]
         errors.Add($"{sid}: money is {(m ?? "null")}, expected {money}");
     // Everything except money and description stays exactly as the vanilla Wanderer start.
     foreach (var key in new[] { "difficulty", "start pos X", "start pos Z", "style", "force start pos" })
-        if (!Equals(st.Values.TryGetValue(key, out var v) ? v : null, startBase.Values[key]))
+        if (!Equals(st.Values.TryGetValue(key, out var v) ? v : null,
+                    key is "difficulty" or "style" ? Zh((string)startBase.Values[key]) : startBase.Values[key]))
             errors.Add($"{sid}: value '{key}' differs from the vanilla Wanderer start");
+}
+
+// 原版各开局的联机版：两个小队、两队内容相同；除 squad 外的引用和资金等数值与原版一致
+foreach (var (vanillaSid, baseId) in coopVariants)
+{
+    var st = verify.Items.FirstOrDefault(i => i.StringId == Sid(baseId));
+    if (st is null || st.Type != ItemType.NewGameStartoff) { errors.Add($"{Sid(baseId)}: missing co-op start for {vanillaSid}"); continue; }
+    var squads = st.ReferenceCategories.FirstOrDefault(c => c.Name == "squad")?.References ?? [];
+    if (squads.Count != 2 || squads[1].TargetId != Sid(baseId + 2)) { errors.Add($"{st.Name}: squad refs are not host + {Sid(baseId + 2)}"); continue; }
+    string Shape(string sid)
+    {
+        var item = verify.Items.FirstOrDefault(i => i.StringId == sid);
+        var cats = item?.ReferenceCategories ?? Effective(sid).Refs;
+        return string.Join(";", cats.SelectMany(c => c.References.Select(r => $"{c.Name}:{r.TargetId}:{r.Value0}:{r.Value1}:{r.Value2}")));
+    }
+    if (Shape(squads[0].TargetId) != Shape(squads[1].TargetId))
+        errors.Add($"{st.Name}: join squad differs from host squad");
+    var (_, vanillaRefs) = Effective(vanillaSid);
+    string Others(IEnumerable<ReferenceCategory> cats) =>
+        string.Join(";", cats.Where(c => c.Name != "squad").SelectMany(c => c.References.Select(r => $"{c.Name}:{r.TargetId}:{r.Value0}:{r.Value1}:{r.Value2}")));
+    if (Others(st.ReferenceCategories) != Others(vanillaRefs))
+        errors.Add($"{st.Name}: non-squad references differ from vanilla");
+    var vanillaValues = MergedValues(vanillaSid);
+    foreach (var kv in vanillaValues.Where(k => k.Key is not ("description" or "difficulty" or "style")))
+        if (!Equals(st.Values.TryGetValue(kv.Key, out var v) ? v : null, kv.Value))
+            errors.Add($"{st.Name}: value '{kv.Key}' differs from vanilla");
+    Console.WriteLine($"  co-op start \"{st.Name}\": money={st.Values["money"]} host={squads[0].TargetId} -> {Shape(squads[1].TargetId)}");
 }
 
 Console.WriteLine();
@@ -292,8 +466,8 @@ if (errors.Count > 0)
     foreach (var e in errors) Console.WriteLine($"  - {e}");
     return 1;
 }
-Console.WriteLine($"VERIFICATION OK: {items.Length} records, both starts wired to two squads, " +
-                  $"legacy StringIds intact, \"Multiplayer+ (Wanderer x2)\" money = {PlusStartMoney}.");
+Console.WriteLine($"VERIFICATION OK: {items.Length} records, {2 + coopVariants.Length} co-op starts wired to two squads, " +
+                  $"legacy StringIds intact, Multiplayer+ money = {PlusStartMoney}.");
 return 0;
 
 // ---- Helpers -----------------------------------------------------------------
