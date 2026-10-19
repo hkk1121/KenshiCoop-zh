@@ -20,7 +20,8 @@ Joining over %s - connecting to host...=正在通过 %s 加入 - 正在连接主
 Offline - will host over %s on Connect=离线 - 上线后将通过 %s 主持
 Offline - will join over %s on Connect=离线 - 上线后将通过 %s 加入
 World transfer=世界传输
-Friend's Steam ID=好友 Steam ID
+Friend Steam IDs=好友 Steam ID（主机可粘贴多人）
+Host's Steam ID=主机 Steam ID
 (clipboard was not a Steam ID - copy theirs and retry)=（剪贴板内容不是 Steam ID，请让好友重新复制后再试）
 (click Paste friend's Steam ID)=（请点击“粘贴好友 Steam ID”）
 Paste friend's Steam ID=粘贴好友 Steam ID
@@ -29,7 +30,7 @@ Your Steam ID=我的 Steam ID
 Copy my Steam ID=复制我的 Steam ID
 
 # 左上角状态条 / 存档传输进度
-Connected - peer joined=已连接 - 好友已加入
+Connected - %u player(s) joined=已连接 - %u 名玩家已加入
 Connected to host=已连接到主机
 Hosting - waiting for peer...=主持中 - 等待好友加入...
 Connecting...=正在连接...
@@ -42,6 +43,24 @@ Version mismatch with host - update both to the same KenshiCoop build=与主机�
 Rejected a joiner: version mismatch - update both to the same KenshiCoop build=已拒绝一名玩家加入：版本不一致 - 请双方更新到相同版本的 KenshiCoop
 No friend's Steam ID - paste it in the F2 panel, then reconnect (using UDP for now)=缺少好友 Steam ID - 请在 F2 面板粘贴后重新连接（当前改用 UDP）
 Steam is not running - start Steam, then reconnect (using UDP for now)=Steam 未运行 - 请启动 Steam 后重新连接（当前改用 UDP）
+
+# 网络发现与小队槽位
+Squad slot: %u    (switch)=小队槽位：%u    （点击切换）
+Scan for hosts (Tailscale / LAN)=扫描主机（Tailscale / 局域网）
+Scan for hosts    (next / rescan)=扫描主机    （下一个 / 重新扫描）
+Found hosts=发现的主机
+Scanning Tailscale + loopback...=正在扫描 Tailscale 与回环地址…
+No hosts found - the host must be ONLINE over UDP=没有发现主机 - 主机必须通过 UDP 在线
+(no tailscale CLI: loopback/LAN only)=（未找到 tailscale 命令：仅扫描回环 / 局域网）
+[%d/%u] %s @ %s:%u  save: %s  %u/%u%s=[%d/%u] %s @ %s:%u  存档：%s  %u/%u%s
+  [PROTOCOL MISMATCH]=  [协议不匹配]
+KenshiCoop  -  play together=KenshiCoop  -  一起玩
+HOST GAME=创建游戏
+JOIN GAME=加入游戏
+Status=状态
+Offline=离线
+Hint=提示
+Host: click, then load your save. Join: just click.=主机：点击后读取存档。加入方：直接点击。
 
 # 帧数上限
 FPS limit: %s    (switch)=帧数上限：%s    （点击切换）

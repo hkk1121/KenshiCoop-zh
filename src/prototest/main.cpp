@@ -76,7 +76,7 @@ static void testSizes() {
     CHECK_EQ("sizeof(HelloPacket)",             sizeof(HelloPacket),             8); // v49: +ownRank
     CHECK_EQ("sizeof(WelcomePacket)",           sizeof(WelcomePacket),           7);
     CHECK_EQ("sizeof(PeerStatusPacket)",        sizeof(PeerStatusPacket),        10); // v49: roster edge
-    CHECK_EQ("sizeof(EventPacket)",             sizeof(EventPacket),             54);
+    CHECK_EQ("sizeof(EventPacket)",             sizeof(EventPacket),             58); // v1003: +target owner
     CHECK_EQ("sizeof(EntityState)",             sizeof(EntityState),             79);
     CHECK_EQ("sizeof(EntityBatchHeader)",       sizeof(EntityBatchHeader),       14); // v35: +sendMs; v44: +epoch
     CHECK_EQ("sizeof(InvItemEntry)",            sizeof(InvItemEntry),            159); // v42: +locked, v48: reserved byte became parentIdx (size unchanged), v51: +level (craft grade)

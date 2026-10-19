@@ -32,6 +32,7 @@ struct CoopPanelState {
     bool               isHost;      // current armed role (seeds the Host toggle)
     int                transportSel;// current armed transport (0 steam, 1 udp)
     const char*        detail;      // one-line status string for the panel/overlay
+    unsigned int       ownRank;     // JOIN 当前配置的小队槽位
     // Join-side save-transfer status (null when not streaming): byte-level
     // progress the one-line detail above has no room for, shown on the F2 panel
     // while a join receives the host's world (e.g. "Streaming host world... 42%
@@ -47,6 +48,7 @@ struct CoopPanelState {
     // currently picked host, or "no hosts found". Rendered as its own white
     // row above the Scan button; the plugin root owns the scan/pick state.
     const char*        discDetail;
+    int                discBusy;    // 1 = scan in progress（用于状态行颜色）
     // True when this tick came from the TITLE SCREEN (no world). Shows the
     // co-op launcher window - native HOST GAME / JOIN GAME buttons on the
     // main menu that open the panel with the role pre-armed (JOIN on UDP
@@ -57,7 +59,7 @@ struct CoopPanelState {
 };
 // The panel's role/transport selections at the moment Connect is hit.
 // peerIds/peerCount are the Steam IDs pasted in-panel this session (protocol
-// 49: a HOST may paste up to two friends; a JOIN pastes the host's). count 0
+// first stage: a HOST may paste up to MAX_PLAYERS - 1 friends; a JOIN pastes the host's). count 0
 // = nothing pasted, the config steamPeer(s) stand. ownRank is the JOIN's
 // squad-slot choice from the panel (0 = keep config/default); the UDP
 // endpoint is re-read from the config in coopUiConnect.

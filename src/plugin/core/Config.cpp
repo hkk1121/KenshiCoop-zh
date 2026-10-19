@@ -4,6 +4,7 @@
 #include "OwnRanks.h"
 #include "SteamId.h"
 #include "../CoopLog.h"
+#include "../../netproto/Wire.h"
 #include <cstdlib>
 #include <cstdio>
 #include <map>
@@ -119,6 +120,10 @@ void parseSteamIdList(const std::string& csv, std::vector<unsigned long long>& o
             if (v != 0 && !dup) out.push_back(v);
         }
         i = j;
+    }
+    if (out.size() > coop::MAX_PLAYERS - 1) {
+        out.resize(coop::MAX_PLAYERS - 1);
+        coop::logErrLine("[config] steamPeers exceeds MAX_PLAYERS - extra IDs ignored");
     }
 }
 
@@ -291,6 +296,10 @@ void loadConfig(Config& c) {
     // host rejects a doubly-claimed slot.
     c.ownRank = (unsigned int)std::atoi(
         envOr("KENSHICOOP_OWN_RANK_CLAIM", fileOr(f, "ownRank", "0").c_str()).c_str());
+    if (c.ownRank >= coop::MAX_PLAYERS) {
+        coop::logErrLine("[config] ownRank exceeds MAX_PLAYERS - using slot 1");
+        c.ownRank = 1;
+    }
 
     // Tailnet/LAN discovery (game browser). Default ON: the responder answers
     // ONLY private-scope sources (loopback/RFC1918/link-local/Tailscale CGNAT),
@@ -564,6 +573,10 @@ void reloadPeerFromFile(Config& c) {
     it = f.find("ownRank");
     if (it != f.end() && !it->second.empty())
         c.ownRank = (unsigned int)std::atoi(it->second.c_str());
+    if (c.ownRank >= coop::MAX_PLAYERS) {
+        coop::logErrLine("[config] ownRank exceeds MAX_PLAYERS - using slot 1");
+        c.ownRank = 1;
+    }
     it = f.find("ip");
     if (it != f.end() && !it->second.empty()) c.ip = it->second;
     it = f.find("port");

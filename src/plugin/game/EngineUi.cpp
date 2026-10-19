@@ -294,19 +294,18 @@ int                     g_menuOpenReq  = 0; // +1 HOST pressed, -1 JOIN pressed
 std::string             g_menuLastStatus;   // rebuild gate for the status row
 std::string             g_selfIdStr;   // self SteamID as digits (set each tick; "" = none)
 
-// Friend SteamIDs pasted in-panel this session (protocol 49: a HOST may hold
-// up to MAX_PASTED = two friends; a JOIN uses slot 0 = the host). Per-session
+// Friend SteamIDs pasted in-panel this session (first stage: a HOST may hold
+// up to MAX_PLAYERS - 1 friends; a JOIN uses slot 0 = the host). Per-session
 // by design: they live only in memory, so relaunching Kenshi clears them and
 // the ids are re-pasted (nothing is written to disk). Passed to onConnect,
 // where a non-empty list overrides the config steamPeer(s). Paste APPENDS;
 // a duplicate paste is a no-op; pasting when full starts the list over with
 // the just-pasted id (the "fix a typo" path without a clear button).
-const unsigned int      MAX_PASTED     = 2;
-unsigned long long      g_pastedPeers[MAX_PASTED] = { 0, 0 };
+const unsigned int      MAX_PASTED     = coop::MAX_PLAYERS - 1;
+unsigned long long      g_pastedPeers[MAX_PASTED] = { 0 };
 unsigned int            g_pastedCount  = 0;
 bool                    g_pasteFailed  = false; // last paste wasn't a valid Steam ID
-// JOIN squad-slot choice (protocol 49): which squad-tab rank this join claims.
-// 1 = the classic second player; 2 = the third player. Rides onConnect.
+// JOIN squad-slot choice: 1 = second player, 2 = third player, 3 = fourth.
 unsigned int            g_slotChoice   = 1;
 
 // Button callbacks (free functions - MyGUI::newDelegate wraps them without any
@@ -330,8 +329,8 @@ void onConnBtn(DataPanelLine*) {
     coop::logLine(g_panel.connectedFlag ? "[coop-ui] connection -> ONLINE"
                                         : "[coop-ui] connection -> OFFLINE");
 }
-// JOIN squad-slot toggle (protocol 49): claim squad tab 1 (second player) or
-// 2 (third player). The host rejects a slot another join already holds.
+// JOIN squad-slot toggle: claim the next squad tab. The host rejects a slot
+// another join already holds.
 void onSlotBtn(DataPanelLine*) {
     ++g_slotChoice;
     if (g_slotChoice >= coop::MAX_PLAYERS) g_slotChoice = 1;
@@ -393,7 +392,6 @@ void onPasteIdBtn(DataPanelLine*) {
             }
         }
         g_pasteFailed = false;
-        coop::saveLastPeer(id);
         coop::saveLastPeer(id); // 最近粘贴的好友 ID 作为下次默认值（上游 PR #25）
         char b[96];
         _snprintf(b, sizeof(b) - 1, "[coop-ui] paste friend id=%llu ok=1 (%u pasted)",
@@ -591,15 +589,15 @@ void coopMenuLauncherTick(ForgottenGUI* g, const CoopPanelState* st) {
         coop::logLine("[coop-ui] menu launcher shown");
     }
     if (!g_menuBuilt || status != g_menuLastStatus) {
-        std::string title   = "KenshiCoop  -  play together";
+        std::string title   = coop::tr("KenshiCoop  -  play together");
         std::string hostKey = "mhost";
-        std::string hostCap = "HOST GAME";
+        std::string hostCap = coop::tr("HOST GAME");
         std::string joinKey = "mjoin";
-        std::string joinCap = "JOIN GAME";
-        std::string statKey = "Status";
-        std::string statVal = status.empty() ? std::string("Offline") : status;
-        std::string hintKey = "Hint";
-        std::string hintVal = "Host: click, then load your save. Join: just click.";
+        std::string joinCap = coop::tr("JOIN GAME");
+        std::string statKey = coop::tr("Status");
+        std::string statVal = status.empty() ? std::string(coop::tr("Offline")) : status;
+        std::string hintKey = coop::tr("Hint");
+        std::string hintVal = coop::tr("Host: click, then load your save. Join: just click.");
         std::string empty   = "";
         MenuStrings ms;
         ms.title = &title;
@@ -653,6 +651,7 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
             g_panel.connectedFlag = st->running;
             g_panel.lastConnected = st->running;
             g_panel.lastChkVal    = st->running;
+            g_slotChoice = st->ownRank ? st->ownRank : 1;
             g_panel.open = true;
             g_panel.needsRebuild = true;
             coop::logLine("[coop-ui] panel opened");
@@ -802,16 +801,13 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
 
         // Friend SteamID(s): prefer the values pasted in-panel this session;
         // fall back to the config (steamPeer, mainly for advanced/back-compat
-        // use). A host shows every pasted id (protocol 49: up to two friends).
+        // use). A host shows every pasted id (up to MAX_PLAYERS - 1 friends).
         std::string peerKey = coop::tr(g_panel.hostFlag ? "Friend Steam IDs" : "Host's Steam ID");
         std::string peerVal;
         if (g_pastedCount > 0) {
             for (unsigned int i = 0; i < g_pastedCount; ++i) {
-                char pb[32];
-                _snprintf(pb, sizeof(pb) - 1, "%llu", g_pastedPeers[i]);
-                pb[sizeof(pb) - 1] = '\0';
                 if (i) peerVal += ", ";
-                peerVal += pb;
+                peerVal += coop::maskSteamId64(g_pastedPeers[i]);
             }
         } else if (st->peerSteamId != 0) {
             char pb[32];
@@ -911,7 +907,7 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         if (g_authRevokeBtn) g_authRevokeBtn->callback = MyGUI::newDelegate(&onAuthRevokeBtn);
         dbgColourSeh(g_debugLine, !transfer.empty()); // amber while streaming
         // Browser row: amber while a scan is in flight, white once it settled.
-        dbgColourSeh(g_discLine, discDetail.compare(0, 8, "Scanning") == 0);
+        dbgColourSeh(g_discLine, st->discBusy != 0);
         dbgColourSeh(g_peerLine, false);
         dbgColourSeh(g_selfLine, false);
         dbgColourSeh(g_authLine, false);

@@ -31,10 +31,9 @@ typedef double         f64;
 // 双方须使用同一改进版，与官方 v0.51 不再互通
 const u16 PROTOCOL_VERSION = 1003;
 
-// Session player cap (protocol 49): the host + up to two joins. The transport
-// and replication code is N-generic; this is the tested policy limit the host
-// enforces at admit time (HELLO), so raising it is a one-line change HERE once
-// a wider session has been soak-tested.
+// Session player cap (four-player first stage): the host + up to three joins.
+// Transport and replication are N-generic; the host enforces this policy limit
+// at HELLO admission.
 const u32 MAX_PLAYERS = 4;
 
 // Packet type tags (first byte of every packet).
@@ -201,6 +200,8 @@ struct EventPacket {
     u32 aIndex;
     u32 aSerial;
     f32 arg;     // event-specific payload (damage, etc.); 0 for KO/death
+    // 协议 1003：授权等点名事件的目标玩家。普通广播事件为 OWNER_ID_ALL。
+    u32 targetOwnerId;
 };
 
 // ObjectHand - the canonical identity of a Kenshi engine object (the game's

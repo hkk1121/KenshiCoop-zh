@@ -378,12 +378,13 @@ bool NetLink::isRelayedType(u8 type) {
         case PKT_WORLD_DROP:
         case PKT_WORLD_PICKUP:
         case PKT_INV_XFER:
+        case PKT_INV_XFER_ACK:
         case PKT_MEDICAL:
         case PKT_TREATMENT:
-        case PKT_COMBAT_HIT:
         case PKT_STATS:
         case PKT_MONEY:
         case PKT_CAM_HINT:
+        case PKT_CELL_CLAIM:
             return true;
         default:
             return false;
@@ -664,7 +665,7 @@ void NetLink::threadLoop() {
                                 // out for ~30 s.
                                 u32 rank = h.ownRank;
                                 u32 ghostId = 0;
-                                bool taken = (rank == 0);
+                                bool taken = (rank == 0 || rank >= MAX_PLAYERS);
                                 for (std::map<u32, u32>::iterator it = rankById_.begin();
                                      it != rankById_.end(); ++it) {
                                     if (it->second != rank) continue;

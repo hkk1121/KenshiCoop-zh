@@ -201,7 +201,7 @@ bool cameraFocusOn(GameWorld* gw, Character* c);
 // hint stale). Since protocol 49 every participant holds one peer-hint SLOT per
 // possible counterparty (PEER_CAM_SLOTS); the sync layer assigns slots.
 // Main-thread only.
-const unsigned int PEER_CAM_SLOTS = 3; // MAX_PLAYERS - 1 (Wire.h)
+const unsigned int PEER_CAM_SLOTS = coop::MAX_PLAYERS - 1;
 void setLocalCamAnchor(bool valid, float x, float y, float z);
 void setPeerCamHint(unsigned int slot, bool valid, float x, float y, float z);
 // Read one peer's camera hint back out, for predicates that must reason about

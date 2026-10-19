@@ -139,6 +139,8 @@ struct SessionController {
     // (protocol 49: each transfer streams to ITS join only; they run
     // sequentially through the single SaveXfer sender).
     std::vector<std::pair<std::string, coop::u32> > loadXferPending;
+    // 好友带入自己角色后，只给该 owner 安排一次延迟存档重推。
+    std::map<coop::u32, DWORD> peerBodyRepushDue;
     std::string  loadAfterCommit;  // join: save to load once its transfer commits
     coop::u32    loadCommitBase;   // join: savexfer::commitSeq() at NACK time
     // Deferred-signal backstop: SaveManager::load only SETS the LOADGAME signal;
@@ -174,6 +176,7 @@ coop::u32&   g_loadIdSeen      = g_session.loadIdSeen;
 coop::u32&   g_loadReqId       = g_session.loadReqId;
 std::vector<std::pair<std::string, coop::u32> >& g_loadXferPending =
     g_session.loadXferPending;
+std::map<coop::u32, DWORD>& g_peerBodyRepushDue = g_session.peerBodyRepushDue;
 std::string& g_loadAfterCommit = g_session.loadAfterCommit;
 coop::u32&   g_loadCommitBase  = g_session.loadCommitBase;
 DWORD&       g_loadPumpArmTick  = g_session.loadPumpArmTick;
@@ -182,9 +185,6 @@ std::string  g_loadXferLastName;
 coop::u32    g_loadXferLastOwner = 0;
 unsigned int g_loadXferRetries  = 0;
 const unsigned int LOAD_XFER_MAX_RETRIES = 2;
-// 好友带自己的角色加入：最近一次对端连上的时间（主机据此只在连上后不久重新推送存档）
-DWORD        g_peerConnectTick  = 0;
-
 // Scenario harness state. Harness/Debug builds only - the shipped Release DLL
 // excludes test/Scenario*.cpp and does not define KENSHICOOP_HARNESS (Phase 1).
 #ifdef KENSHICOOP_HARNESS
@@ -285,6 +285,10 @@ void warnIfNoPortraits(const std::string& name) {
 // into the next save. Falls back to a plain map reset if no world has ticked yet.
 void sessionResetForUi() {
     g_peersPresent.clear();
+    g_peerBodyRepushDue.clear();
+    g_loadXferLastName.clear();
+    g_loadXferLastOwner = 0;
+    g_loadXferRetries = 0;
     if (g_lastGw) g_repl.clearPeerReplicationState(g_lastGw);
     else          g_repl.resetSession();
     g_inbound.flushWorldState();
@@ -297,6 +301,7 @@ void sessionResetForUi() {
 // OWN reload edge, and the synchronous-swap backstop reuses it, so the reset
 // order (repl maps, then inbound queues) is defined in exactly one place.
 void sessionResetForWorldReload() {
+    g_peerBodyRepushDue.clear();
     g_repl.resetSession();
     g_inbound.flushWorldState();
     g_net.bumpSessionEpoch(); // v44: post-reload batches supersede the old session
@@ -342,6 +347,7 @@ void armConnectPush(coop::u32 targetId) {
 // reached the game thread cleanly (and is where later stages spawn/sweep).
 void processNetEvents(GameWorld* gw) {
     std::deque<coop::u32> conns, leaves;
+    g_repl.setLocalId(g_net.localId());
     g_inbound.drainConnects(conns);
     g_inbound.drainLeaves(leaves);
     for (std::deque<coop::u32>::iterator it = conns.begin(); it != conns.end(); ++it) {
@@ -359,10 +365,10 @@ void processNetEvents(GameWorld* gw) {
         // the host relay.
         if (g_cfg.latejoinSync) g_repl.onPeerConnected(g_net, g_net.localId());
         else coopLog("[latejoin] connect edge seen, resync OFF (gate)");
-        g_peerConnectTick = GetTickCount();
         coop::clearNetUiError(); // 好友已连上，此前的拒绝原因作废
         g_toastText = coop::tr("Peer connected"); g_toastState = 2; g_toastArmMs = GetTickCount();
         g_peersPresent.insert(*it);
+        g_peerBodyRepushDue.erase(*it);
         // Coordinated save (protocol 31): while connected TO THE HOST under
         // save-sync, the JOIN never writes a save locally - the host's save
         // is authoritative and a local save press forwards as PKT_SAVE_REQ.
@@ -404,6 +410,10 @@ void processNetEvents(GameWorld* gw) {
         // session continues for everyone else.
         if (*it == coop::OWNER_ID_ALL) {
             g_peersPresent.clear();
+            g_peerBodyRepushDue.clear();
+            g_loadXferLastName.clear();
+            g_loadXferLastOwner = 0;
+            g_loadXferRetries = 0;
             g_bootstrapTargets.clear();
             g_loadXferPending.clear();
             g_repl.clearPeerReplicationState(gw);
@@ -415,6 +425,7 @@ void processNetEvents(GameWorld* gw) {
             }
         } else {
             g_peersPresent.erase(*it);
+            g_peerBodyRepushDue.erase(*it);
             g_bootstrapTargets.erase(*it);
             if (*it == g_loadXferLastOwner) {
                 g_loadXferLastName.clear();
@@ -1041,26 +1052,29 @@ void tickDiscovery() {
         }
     }
     if (coop::disc::scanBusy()) {
-        g_discDetail = "Scanning Tailscale + loopback...";
+        g_discDetail = coop::tr("Scanning Tailscale + loopback...");
     } else if (g_discSeenGen == 0) {
         g_discDetail.clear(); // never scanned - the button caption is the hint
     } else {
         unsigned int n = coop::disc::foundCount();
         if (n == 0) {
-            g_discDetail = "No hosts found - the host must be ONLINE over UDP";
-            if (!coop::disc::lastScanSawTailscale())
-                g_discDetail += " (no tailscale CLI: loopback/LAN only)";
+            g_discDetail = coop::tr("No hosts found - the host must be ONLINE over UDP");
+            if (!coop::disc::lastScanSawTailscale()) {
+                g_discDetail += " ";
+                g_discDetail += coop::tr("(no tailscale CLI: loopback/LAN only)");
+            }
         } else {
             coop::disc::FoundHost fh;
             if (g_discPick >= 0 && coop::disc::foundGet((unsigned int)g_discPick, &fh)) {
                 char b[192];
-                _snprintf(b, sizeof(b) - 1, "[%d/%u] %s @ %s:%u  save=%s  %u/%u%s",
+                _snprintf(b, sizeof(b) - 1,
+                          coop::tr("[%d/%u] %s @ %s:%u  save: %s  %u/%u%s"),
                           g_discPick + 1, n, fh.info.hostName, fh.ip,
                           (unsigned)fh.info.gamePort,
                           fh.info.saveName[0] ? fh.info.saveName : "?",
                           fh.info.players, fh.info.maxPlayers,
                           fh.info.protocol == coop::PROTOCOL_VERSION
-                              ? "" : "  [PROTOCOL MISMATCH]");
+                              ? "" : coop::tr("  [PROTOCOL MISMATCH]"));
                 b[sizeof(b) - 1] = '\0';
                 g_discDetail = b;
             }
@@ -1105,6 +1119,14 @@ void coopPanelDrive(GameWorld* gw) {
     ps.peerPresent  = !g_peersPresent.empty();
     ps.isHost       = g_cfg.isHost;
     ps.transportSel = (g_cfg.transport == "steam") ? 0 : 1;
+    ps.ownRank      = g_cfg.ownRank;
+    if (ps.ownRank == 0) {
+        ps.ownRank = 1;
+        for (std::set<unsigned int>::const_iterator ri = g_cfg.ownRanks.begin();
+             ri != g_cfg.ownRanks.end(); ++ri) {
+            if (*ri != 0) { ps.ownRank = *ri; break; }
+        }
+    }
     // 小队控制授权（第 3 批）：面板要显示的授权状态 + 按钮可用性
     ps.authRequestable = g_repl.squadAuthHasRequestable() ? 1 : 0;
     ps.authRequesting  = g_repl.squadAuthRequesting();
@@ -1136,10 +1158,10 @@ void coopPanelDrive(GameWorld* gw) {
     int ostate;
     if (!g_peersPresent.empty()) {
         if (g_cfg.isHost) {
-            char db[64];
-            _snprintf(db, sizeof(db) - 1, "Connected - %u player%s joined",
-                      (unsigned)g_peersPresent.size(),
-                      g_peersPresent.size() == 1 ? "" : "s");
+            char db[96];
+            _snprintf(db, sizeof(db) - 1,
+                      coop::tr("Connected - %u player(s) joined"),
+                      (unsigned)g_peersPresent.size());
             db[sizeof(db) - 1] = '\0';
             detail = db;
         } else {
@@ -1191,6 +1213,7 @@ void coopPanelDrive(GameWorld* gw) {
 
     // Tailnet/LAN browser line (join+UDP): scan progress / the picked host.
     ps.discDetail = g_discDetail.empty() ? (const char*)0 : g_discDetail.c_str();
+    ps.discBusy = coop::disc::scanBusy() ? 1 : 0;
 
     // Title screen == no world (the title hook drives this with gw=0; the
     // in-game mainLoop hook always has a world). Shows the menu launcher.
@@ -2123,26 +2146,30 @@ void mainLoop_hook(GameWorld* gw, float dt) {
     // 不含对方角色”。worldLive 门控，避免世界切换时碰旧指针。
     if (worldLive) coop::engine::enforcePeerSelection(gw);
 
-    // 好友带自己的角色加入：开局那次推送早于他的角色进来，读档后他会没有角色。他的角色在本端
-    // 铸造成新的小队（判给对方）后，等 2 秒让整队到齐，再重新推送一次存档。每次连接只触发
-    // 一次，避免之后对方招募等情况让好友中途重新读档。
-    if (worldLive && g_cfg.isHost && g_cfg.saveSync && !g_peersPresent.empty()) {
-        static unsigned int s_seenPeerTabs = 0;
-        static DWORD        s_peerTabTick  = 0;
-        static DWORD        s_repushedFor  = 0;   // 已为哪次连接重推过（g_peerConnectTick）
-        unsigned int nTabs = g_repl.peerBodyTabCount();
-        if (nTabs != s_seenPeerTabs) {
-            s_seenPeerTabs = nTabs;
-            s_peerTabTick = (s_repushedFor != g_peerConnectTick) ? GetTickCount() : 0;
+    // 好友带自己的角色加入：只给带入角色的 owner 延迟重推一次存档。不同玩家的
+    // 角色到达时间可以不同，不能因为其中一个的新标签把所有人一起拉回读档。
+    if (worldLive && g_cfg.isHost && g_cfg.saveSync) {
+        coop::u32 owner = 0;
+        DWORD now = GetTickCount();
+        while (g_repl.takePeerBodyTabOwner(&owner)) {
+            if (g_peersPresent.count(owner) == 0) continue;
+            if (g_peerBodyRepushDue.find(owner) == g_peerBodyRepushDue.end())
+                g_peerBodyRepushDue[owner] = now;
         }
-        if (s_peerTabTick && GetTickCount() - s_peerTabTick >= 2000 &&
-            !g_bootstrapArmed && !coop::savexfer::sending()) {
-            s_peerTabTick = 0;
-            s_repushedFor = g_peerConnectTick;
-            coopLog("[boot] peer brought its own squad -> re-push save");
-            for (std::set<coop::u32>::iterator pi = g_peersPresent.begin();
-                 pi != g_peersPresent.end(); ++pi)
-                armConnectPush(*pi);
+        for (std::map<coop::u32, DWORD>::iterator pi = g_peerBodyRepushDue.begin();
+             pi != g_peerBodyRepushDue.end(); ) {
+            if (g_peersPresent.count(pi->first) == 0) {
+                pi = g_peerBodyRepushDue.erase(pi);
+                continue;
+            }
+            if ((now - pi->second) < 2000) { ++pi; continue; }
+            char b[128];
+            _snprintf(b, sizeof(b) - 1,
+                      "[boot] peer body arrived -> re-push save target=%u",
+                      (unsigned)pi->first);
+            b[sizeof(b) - 1] = '\0'; coopLog(b);
+            armConnectPush(pi->first);
+            pi = g_peerBodyRepushDue.erase(pi);
         }
     }
 

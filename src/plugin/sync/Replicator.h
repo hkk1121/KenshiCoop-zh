@@ -2713,13 +2713,19 @@ private:
 
     // ---- 小队控制授权（协议 1002，第 2 批） ------------------------------------
     // 归属 = 小队标签（container, containerSerial；两端加载同一份存档，键一致）。
-    // tabAuth_：授权关系（值 1 = 本端已把控制权交给对方，2 = 对方授权给本端）。tabReq_：挂起的申请，
-    // 值 1 = 本端申请中，2 = 对方申请中（等面板 [同意]/[拒绝]），3 = 本端正在收回
+    // tabAuth_：授权关系（mode 1 = 本端已把控制权交给 ownerId，2 = ownerId 授权给本端）。
+    // tabReq_：挂起的申请，mode 1 = 本端申请中，2 = ownerId 申请中（等面板 [同意]/[拒绝]），
+    // 3 = 本端正在向 ownerId 收回。
     // （已发 REVOKE，等对方 RETURN）。tabOutbox_ 是接收半与面板动作攒下的待发消息
     // （接收半拿不到 NetLink，统一由 squadAuthTick 发出）。
-    std::map<std::pair<u32, u32>, unsigned char> tabAuth_;
-    std::map<std::pair<u32, u32>, unsigned char> tabReq_;
-    struct SquadAuthMsg { unsigned char kind; u32 c; u32 cs; };
+    struct AuthPeer {
+        u32 ownerId;
+        unsigned char mode;
+        AuthPeer() : ownerId(OWNER_ID_ALL), mode(0) {}
+    };
+    std::map<std::pair<u32, u32>, AuthPeer> tabAuth_;
+    std::map<std::pair<u32, u32>, AuthPeer> tabReq_;
+    struct SquadAuthMsg { unsigned char kind; u32 targetId; u32 c; u32 cs; };
     std::vector<SquadAuthMsg> tabOutbox_;
     unsigned long tabReqMs_;  // 挂起申请的时间戳（超时清理用）
     unsigned int  tabNotice_; // 供 UI 取用的一次性提示（0 = 无）
@@ -2729,12 +2735,12 @@ private:
     // 切换某标签的归属并清掉会压过它的 per-hand pin（见设计说明 4.3）。
     void reassignTab(GameWorld* gw, const std::pair<u32, u32>& tab, bool owned);
     // 发一条授权事件（唯一出口）。
-    void sendSquadAuth(NetLink& net, u32 ownerId, unsigned char kind,
+    void sendSquadAuth(NetLink& net, u32 ownerId, u32 targetId, unsigned char kind,
                        const std::pair<u32, u32>& tab);
     // 收到 EVT_SQUAD_AUTH（接收半只改状态，发送走 tabOutbox_）。
     void applySquadAuth(GameWorld* gw, const EventPacket& ev);
-    // 该标签是否正由对方驱动（targets_ 里有该标签成员的新鲜流）。只有这样的标签才能申请
-    bool peerDrivesTab(const std::pair<u32, u32>& tab) const;
+    // 该标签正由哪个远端 owner 驱动（targets_ 里该标签成员的最新鲜流）。
+    u32 driverOwnerForTab(const std::pair<u32, u32>& tab) const;
     enum { TAB_AUTH_TIMEOUT_MS = 20000 };
 
     // ---- 好友带自己的角色加入 / 掉线期间的控制权 ---------------------------------
@@ -2742,14 +2748,18 @@ private:
     // 也不放开控制（未授权不得操控）；纯单人（网络未运行）不受影响。由插件每帧写入。
     bool         sessionLive_;
     // 会话中新出现、且因成员是“对方的身体”（铸造的代理 / 正由对方流驱动）而判给对方的
-    // 标签计数（单调递增）。主机据此在好友的角色进来后重新推送存档。
+    // 标签计数（单调递增）和按 owner 待通知队列。主机据此只向带入角色的玩家重推存档。
     unsigned int peerBodyTabs_;
-    // 该标签是否属于对方：不归本端，且是存档原有的“对方默认标签”（主机看 rank 1、加入方看
-    // rank 0），或会话中判给对方的标签。rank 2 以后的原有标签不属于任何一方，不算。
+    std::map<u32, unsigned int> peerBodyOwnerCounts_;
+    std::vector<u32> peerBodyOwnerQueue_;
+    // 该标签是否锁定：联机会话中，只要标签不归本端就锁定；owner 可以是任一其他玩家，
+    // 掉线后 tabOwned_ 仍保留该判断。
     bool peerTabLocked(const std::pair<u32, u32>& tab) const;
 public:
     void setSessionLive(bool v) { sessionLive_ = v; }
+    void setLocalId(u32 id) { localId_ = id; }
     unsigned int peerBodyTabCount() const { return peerBodyTabs_; }
+    bool takePeerBodyTabOwner(u32* ownerId);
 };
 
 } // namespace coop

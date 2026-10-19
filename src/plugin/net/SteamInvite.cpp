@@ -405,16 +405,17 @@ bool init(ConnectFn onConnect) {
 bool ready() { return g_ready; }
 
 namespace {
-// Kick off the async friends-only lobby if we don't have one yet. Capacity 3
-// (protocol 49: MAX_PLAYERS in Wire.h) so a second friend can enter; the
+// Kick off the async friends-only lobby if we don't have one yet. Capacity 4
+// (project stage one: MAX_PLAYERS in Wire.h) so three friends can enter; the
 // automated hosting hand-off still fires on the FIRST arrival - a third
 // player over Steam rides the host's steamPeers list (F2 panel / config),
 // not the invite hand-off.
 void createLobbyIfNeeded() {
     if (g_lobby != 0 || g_creating) return;
     g_creating = true;
-    steamLog("creating friends-only 3-player lobby...");
-    SteamAPICall_t call = g_createLobby(g_mm, k_ELobbyTypeFriendsOnly, 3);
+    steamLog("creating friends-only 4-player lobby...");
+    SteamAPICall_t call = g_createLobby(g_mm, k_ELobbyTypeFriendsOnly,
+                                        (int)coop::MAX_PLAYERS);
     if (call == 0) {
         g_creating = false;
         steamLog("CreateLobby returned no call handle");
