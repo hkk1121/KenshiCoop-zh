@@ -1811,11 +1811,15 @@ void startNetworking() {
     // ENet protocol unchanged. Requires the partner's steamid64; falls back to
     // UDP loudly when Steam is unavailable so a misconfigured session still
     // behaves like the stock build instead of silently doing nothing.
+    // 回退 UDP 的原因同时显示在状态栏（startHost/startClient 会清空，须在其后设置）
+    const char* steamFallback = 0;
     if (g_cfg.transport == "steam") {
         if (g_cfg.steamPeer == 0) {
             coopErr("[steam] KENSHICOOP_TRANSPORT=steam requires KENSHICOOP_STEAM_PEER=<partner steamid64>; falling back to UDP");
+            steamFallback = "No friend's Steam ID - paste it in the F2 panel, then reconnect (using UDP for now)";
         } else if (!coop::steamp2p::init()) {
             coopErr("[steam] init failed (Steam not running / offline?); falling back to UDP");
+            steamFallback = "Steam is not running - start Steam, then reconnect (using UDP for now)";
         } else {
             coop::steamp2p::setPeer(g_cfg.steamPeer);
             g_net.setSteamTransport(g_cfg.steamPeer);
@@ -1832,6 +1836,7 @@ void startNetworking() {
         ok = g_net.startClient(g_cfg.ip, g_cfg.port, &g_inbound);
     }
     if (!ok) coopErr("KenshiCoop: networking failed to start");
+    if (steamFallback) coop::setNetUiError(steamFallback);
 }
 
 // In-game panel handlers. coopUiConnect tears down any live session, re-arms the

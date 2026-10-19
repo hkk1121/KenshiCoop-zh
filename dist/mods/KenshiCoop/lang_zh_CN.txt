@@ -40,3 +40,5 @@ Peer connected=好友已连接
 Peer disconnected=好友已断开连接
 Version mismatch with host - update both to the same KenshiCoop build=与主机版本不一致 - 请双方更新到相同版本的 KenshiCoop
 Rejected a joiner: version mismatch - update both to the same KenshiCoop build=已拒绝一名玩家加入：版本不一致 - 请双方更新到相同版本的 KenshiCoop
+No friend's Steam ID - paste it in the F2 panel, then reconnect (using UDP for now)=缺少好友 Steam ID - 请在 F2 面板粘贴后重新连接（当前改用 UDP）
+Steam is not running - start Steam, then reconnect (using UDP for now)=Steam 未运行 - 请启动 Steam 后重新连接（当前改用 UDP）
