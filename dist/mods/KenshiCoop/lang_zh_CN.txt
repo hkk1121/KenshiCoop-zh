@@ -46,3 +46,20 @@ Steam is not running - start Steam, then reconnect (using UDP for now)=Steam 未
 # 帧数上限
 FPS limit: %s    (switch)=帧数上限：%s    （点击切换）
 Unlimited=不限
+
+# 小队控制授权（申请 / 同意 / 拒绝 / 收回）
+This is your friend's squad - ask them for control=这是好友的小队 - 需要对方授权
+Your friend asks for control of your squad=好友申请控制你的小队
+Waiting for your friend to answer...=等待好友回应…
+Your friend controls your squad=好友正在控制你的小队
+Each player controls their own squad=双方各自操控自己的小队
+No squad to hand over=没有可交接的小队
+Squad control=小队控制
+Ask to control your friend's squad=申请控制好友的小队
+Grant control=同意授权
+Refuse=拒绝
+Take control back=收回控制权
+Squad control granted=已授权对方控制小队
+Your friend refused the request=好友拒绝了申请
+Squad control returned=小队控制权已归还
+No answer - the request timed out=对方没有回应 - 申请已超时

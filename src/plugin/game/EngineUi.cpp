@@ -244,10 +244,15 @@ struct CoopPanelUi {
     bool          f2Down;        // F2 held last tick (rising-edge toggle)
     std::string   lastStatus;    // last status text shown (refresh gate)
     std::string   lastTransfer;  // last save-transfer line shown (refresh gate)
+    int           lastAuthReq;   // 上次的授权状态（第 3 批；任一项变化即重建面板）
+    int           lastAuthReqable;
+    int           lastAuthPending;
+    int           lastAuthGranted;
     CoopPanelUi()
         : panel(0), open(false), built(false), hostFlag(true), steamFlag(true),
           connectedFlag(false), lastConnected(false), lastChkVal(false),
-          needsRebuild(false), f2Down(false) {}
+          needsRebuild(false), f2Down(false), lastAuthReq(0), lastAuthReqable(0),
+          lastAuthPending(0), lastAuthGranted(0) {}
 };
 
 CoopPanelUi             g_panel;
@@ -257,6 +262,13 @@ DataPanelLine_Button*   g_connBtn      = 0; // Online/Offline toggle (replaces t
 DataPanelLine_Button*   g_copyIdBtn    = 0;
 DataPanelLine_Button*   g_pasteIdBtn   = 0; // "Paste friend's Steam ID" from clipboard
 DataPanelLine_Button*   g_fpsBtn       = 0; // 帧数上限切换
+DataPanelLine_Button*   g_authReqBtn   = 0; // 申请控制好友的小队（第 3 批）
+DataPanelLine_Button*   g_authYesBtn   = 0; // 同意对方申请
+DataPanelLine_Button*   g_authNoBtn    = 0; // 拒绝对方申请
+DataPanelLine_Button*   g_authRevokeBtn = 0; // 收回控制权
+DataPanelLine*          g_authLine     = 0; // 授权状态行
+// 面板把授权动作交回插件（= coopPanelTick 的 onAuth 参数；0 表示未接线）
+CoopAuthFn              g_authFn       = 0;
 DataPanelLine*          g_debugLine    = 0; // white connection-status debug row
 DataPanelLine*          g_peerLine     = 0; // white "Friend's Steam ID" row
 DataPanelLine*          g_selfLine     = 0; // white "Your Steam ID" row
@@ -329,6 +341,24 @@ void onFpsBtn(DataPanelLine*) {
     g_panel.needsRebuild = true;
 }
 
+// 小队控制授权按钮（第 3 批）：把动作码交回插件，由插件调用 Replicator。
+void onAuthReqBtn(DataPanelLine*) {
+    if (g_authFn) g_authFn(0);
+    g_panel.needsRebuild = true;
+}
+void onAuthYesBtn(DataPanelLine*) {
+    if (g_authFn) g_authFn(1);
+    g_panel.needsRebuild = true;
+}
+void onAuthNoBtn(DataPanelLine*) {
+    if (g_authFn) g_authFn(2);
+    g_panel.needsRebuild = true;
+}
+void onAuthRevokeBtn(DataPanelLine*) {
+    if (g_authFn) g_authFn(3);
+    g_panel.needsRebuild = true;
+}
+
 // POD-only pointer bundle so the row-build SEH frame constructs no std::string.
 struct PanelStrings {
     const std::string *title, *roleKey, *roleCap, *transKey, *transCap;
@@ -337,6 +367,10 @@ struct PanelStrings {
     const std::string *peerKey, *peerVal, *pasteKey, *pasteCap;
     const std::string *selfKey, *selfVal, *copyKey, *copyCap;
     const std::string *fpsKey, *fpsCap;
+    const std::string *authKey, *authVal, *authReqCap;
+    const std::string *authYesCap, *authNoCap, *authRevokeCap;
+    const std::string *authReqKey, *authYesKey, *authNoKey, *authRevokeKey;
+    int showAuthYes, showAuthNo, showAuthRevoke; // 1 = 该按钮行要出现
     const std::string *empty;
 };
 
@@ -359,6 +393,13 @@ void panelBuildSeh(DatapanelGUI* p, const PanelStrings* s) {
         g_copyIdBtn = p->setLineButton(*s->copyKey, *s->copyCap, 0);
         p->addSpace(0, 0.35f);
         g_fpsBtn = p->setLineButton(*s->fpsKey, *s->fpsCap, 0);
+        p->addSpace(0, 0.35f);
+        // 小队控制授权（第 3 批）：状态行 + 申请按钮（+ 条件出现的同意/拒绝/收回）
+        g_authLine   = p->setLine(*s->authKey, *s->authVal, *s->empty, 0, false, true);
+        g_authReqBtn = p->setLineButton(*s->authReqKey, *s->authReqCap, 0);
+        if (s->showAuthYes)    g_authYesBtn    = p->setLineButton(*s->authYesKey, *s->authYesCap, 0);
+        if (s->showAuthNo)     g_authNoBtn     = p->setLineButton(*s->authNoKey,  *s->authNoCap, 0);
+        if (s->showAuthRevoke) g_authRevokeBtn = p->setLineButton(*s->authRevokeKey, *s->authRevokeCap, 0);
         p->_NV_update();
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
@@ -404,8 +445,9 @@ void panelDestroySeh(ForgottenGUI* g, DatapanelGUI* p) {
 } // namespace
 
 void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
-                   CoopDisconnectFn onDisconnect) {
+                   CoopDisconnectFn onDisconnect, CoopAuthFn onAuth) {
     if (!st) return;
+    g_authFn = onAuth;
     ForgottenGUI* g = ::gui; // KenshiLib data export (spike 46)
     { static void* s_last = (void*)-1;
       if ((void*)g != s_last) { s_last = (void*)g;
@@ -444,6 +486,8 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
             g_roleBtn = 0; g_transBtn = 0; g_connBtn = 0; g_copyIdBtn = 0;
             g_pasteIdBtn = 0; g_fpsBtn = 0;
             g_debugLine = 0; g_peerLine = 0; g_selfLine = 0;
+            g_authReqBtn = 0; g_authYesBtn = 0; g_authNoBtn = 0;
+            g_authRevokeBtn = 0; g_authLine = 0;
             g_panel.open = false;
             coop::logLine("[coop-ui] panel closed");
         }
@@ -472,13 +516,26 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
                                                : std::string();
     if (transfer != g_panel.lastTransfer) g_panel.needsRebuild = true;
 
+    // 小队控制授权状态变化（第 3 批）：申请出现 / 消失、授权成立 / 收回，都要重建面板，
+    // 让状态行与 [同意]/[拒绝]/[收回] 按钮即时出现或消失。
+    if (st->authRequesting  != g_panel.lastAuthReq ||
+        st->authRequestable != g_panel.lastAuthReqable ||
+        st->authPendingPeer != g_panel.lastAuthPending ||
+        st->authGrantedMine != g_panel.lastAuthGranted) {
+        g_panel.lastAuthReq     = st->authRequesting;
+        g_panel.lastAuthReqable = st->authRequestable;
+        g_panel.lastAuthPending = st->authPendingPeer;
+        g_panel.lastAuthGranted = st->authGrantedMine;
+        g_panel.needsRebuild = true;
+    }
+
     // Create the window once (outside SEH - see the header note on C2712).
     // Layer MUST be "Info": spike 48 proved createFloatingLabel renders non-null
     // there. "Windows" is not a visible MyGUI layer here - the panel is minted
     // and armed but attaches to nothing, so F2 logs open/close yet nothing draws.
     if (!g_panel.panel) {
         std::string layer = "Info";
-        g_panel.panel = g->createDatapanel(0.22f, 0.30f, 0.30f, 0.50f, false, layer, true);
+        g_panel.panel = g->createDatapanel(0.22f, 0.30f, 0.30f, 0.58f, false, layer, true);
         g_panel.built = false;
         if (!g_panel.panel) {
             coop::logErrLine("[coop-ui] createDatapanel FAILED");
@@ -555,6 +612,27 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
                                                              : std::string(coop::tr("Unlimited"));
         _snprintf(fb, sizeof(fb) - 1, coop::tr("FPS limit: %s    (switch)"), fpsVal.c_str());
         std::string fpsCap   = fb;
+        // 小队控制授权（第 3 批）：状态行文字 + 按钮文案 + 条件显示标志
+        std::string authKey = coop::tr("Squad control");
+        std::string authVal;
+        if (st->authPendingPeer)
+            authVal = coop::tr("Your friend asks for control of your squad");
+        else if (st->authRequesting)
+            authVal = coop::tr("Waiting for your friend to answer...");
+        else if (st->authGrantedMine)
+            authVal = coop::tr("Your friend controls your squad");
+        else if (!st->authRequestable)
+            authVal = coop::tr("No squad to hand over");
+        else
+            authVal = coop::tr("Each player controls their own squad");
+        std::string authReqCap    = coop::tr("Ask to control your friend's squad");
+        std::string authYesCap    = coop::tr("Grant control");
+        std::string authNoCap     = coop::tr("Refuse");
+        std::string authRevokeCap = coop::tr("Take control back");
+        std::string authReqKey    = "authreq";
+        std::string authYesKey    = "authyes";
+        std::string authNoKey     = "authno";
+        std::string authRevokeKey = "authrev";
         std::string empty    = "";
 
         PanelStrings ps;
@@ -567,7 +645,18 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         ps.selfKey = &selfKey; ps.selfVal = &selfVal;
         ps.copyKey = &copyKey; ps.copyCap = &copyCap;
         ps.fpsKey = &fpsKey; ps.fpsCap = &fpsCap;
+        ps.authKey = &authKey; ps.authVal = &authVal; ps.authReqCap = &authReqCap;
+        ps.authYesCap = &authYesCap; ps.authNoCap = &authNoCap;
+        ps.authRevokeCap = &authRevokeCap;
+        ps.authReqKey = &authReqKey; ps.authYesKey = &authYesKey;
+        ps.authNoKey = &authNoKey; ps.authRevokeKey = &authRevokeKey;
+        ps.showAuthYes = st->authPendingPeer ? 1 : 0;
+        ps.showAuthNo  = st->authPendingPeer ? 1 : 0;
+        ps.showAuthRevoke = st->authGrantedMine ? 1 : 0;
         ps.empty = &empty;
+        // 条件行会在重建中消失，先把上一轮的指针清掉，避免指向已释放的行
+        g_authReqBtn = 0; g_authYesBtn = 0; g_authNoBtn = 0;
+        g_authRevokeBtn = 0; g_authLine = 0;
         panelBuildSeh(g_panel.panel, &ps);
 
         // Delegate assignment + white-colouring live OUTSIDE the SEH frame (pointer
@@ -579,9 +668,14 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         if (g_copyIdBtn)  g_copyIdBtn->callback  = MyGUI::newDelegate(&onCopyIdBtn);
         if (g_pasteIdBtn) g_pasteIdBtn->callback = MyGUI::newDelegate(&onPasteIdBtn);
         if (g_fpsBtn)     g_fpsBtn->callback     = MyGUI::newDelegate(&onFpsBtn);
+        if (g_authReqBtn)    g_authReqBtn->callback    = MyGUI::newDelegate(&onAuthReqBtn);
+        if (g_authYesBtn)    g_authYesBtn->callback    = MyGUI::newDelegate(&onAuthYesBtn);
+        if (g_authNoBtn)     g_authNoBtn->callback     = MyGUI::newDelegate(&onAuthNoBtn);
+        if (g_authRevokeBtn) g_authRevokeBtn->callback = MyGUI::newDelegate(&onAuthRevokeBtn);
         dbgColourSeh(g_debugLine, !transfer.empty()); // amber while streaming
         dbgColourSeh(g_peerLine, false);
         dbgColourSeh(g_selfLine, false);
+        dbgColourSeh(g_authLine, false);
 
         g_panel.built = true;
         g_panel.needsRebuild = false;

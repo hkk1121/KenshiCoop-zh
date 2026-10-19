@@ -223,6 +223,8 @@ void (*g_titleUpdate_orig)(TitleScreen*)   = 0;
 void startNetworking();
 void coopUiConnect(bool isHost, bool useSteam, unsigned long long peerId);
 void coopUiDisconnect();
+// 小队控制授权（第 3 批）：F2 面板按钮 → Replicator 动作（0 申请 / 1 同意 / 2 拒绝 / 3 收回）
+void coopUiAuth(int action);
 
 // Log to BOTH our dedicated per-line-flushed file (what the test runner reads)
 // and the engine's kenshi.log (handy when attached live).
@@ -773,6 +775,32 @@ void coopPanelDrive() {
     ps.peerPresent  = g_peerPresent;
     ps.isHost       = g_cfg.isHost;
     ps.transportSel = (g_cfg.transport == "steam") ? 0 : 1;
+    // 小队控制授权（第 3 批）：面板要显示的授权状态 + 按钮可用性
+    ps.authRequestable = g_repl.squadAuthHasRequestable() ? 1 : 0;
+    ps.authRequesting  = g_repl.squadAuthRequesting();
+    ps.authPendingPeer = g_repl.squadAuthPendingPeer();
+    ps.authGrantedMine = g_repl.squadAuthGrantedMine();
+    // 授权事件的一次性提示（收到申请 / 同意 / 拒绝 / 收回 / 超时）→ 状态栏 4 秒。
+    // 分支里直接写 tr("字面量")，让 check_lang.py 能扫到（与连接/断开提示同一写法）。
+    {
+        unsigned int notice = g_repl.takeSquadAuthNotice();
+        if (notice == 5) {
+            g_toastText = coop::tr("Your friend asks for control of your squad");
+            g_toastState = 1; g_toastArmMs = GetTickCount();
+        } else if (notice == 3) {
+            g_toastText = coop::tr("Squad control granted");
+            g_toastState = 2; g_toastArmMs = GetTickCount();
+        } else if (notice == 2) {
+            g_toastText = coop::tr("Your friend refused the request");
+            g_toastState = 0; g_toastArmMs = GetTickCount();
+        } else if (notice == 4) {
+            g_toastText = coop::tr("Squad control returned");
+            g_toastState = 2; g_toastArmMs = GetTickCount();
+        } else if (notice == 1) {
+            g_toastText = coop::tr("No answer - the request timed out");
+            g_toastState = 0; g_toastArmMs = GetTickCount();
+        }
+    }
     std::string detail;
     int ostate;
     if (g_peerPresent) {
@@ -825,7 +853,7 @@ void coopPanelDrive() {
     // US) can fire coopUiConnect; the outbound invite/picker UI is gone.
     coop::steaminvite::tick();
 
-    coop::engine::coopPanelTick(&ps, &coopUiConnect, &coopUiDisconnect);
+    coop::engine::coopPanelTick(&ps, &coopUiConnect, &coopUiDisconnect, &coopUiAuth);
     coop::engine::coopOverlayTick(detail.c_str(), ostate, g_net.isRunning());
 }
 
@@ -1916,6 +1944,19 @@ void coopUiDisconnect() {
     // World stays live on a manual disconnect: despawn minted proxies before
     // clearing maps so nothing lingers as a duplicate or gets baked into a save.
     sessionResetForUi();
+}
+
+// 小队控制授权（第 3 批）：面板按钮的动作。归属切换需要 GameWorld 做 pin 清扫，所以传
+// g_lastGw（面板在主菜单按下的那一刻没有世界，此时清扫是 no-op，本来就没人发布）。
+void coopUiAuth(int action) {
+    char b[64];
+    _snprintf(b, sizeof(b) - 1, "[coop-ui] squad auth action=%d", action);
+    b[sizeof(b) - 1] = '\0';
+    coopLog(b);
+    if (action == 0)      g_repl.requestSquadAuth(g_net, g_net.localId());
+    else if (action == 1) g_repl.grantSquadAuth(g_lastGw, g_net, g_net.localId());
+    else if (action == 2) g_repl.denySquadAuth(g_net, g_net.localId());
+    else if (action == 3) g_repl.revokeSquadAuth(g_lastGw, g_net, g_net.localId());
 }
 
 } // namespace
