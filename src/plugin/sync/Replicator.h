@@ -2814,9 +2814,11 @@ public:
     u32 ownershipEpoch() const { return ownersAuthEpoch_; }
     u32 characterConnection(u32 owner) const;
     bool characterRequestCurrent(const CharacterRequestHeader& h) const;
+    bool createdCharacterArrived(u32 author, const unsigned int hand[5]) const;
     bool applyCreatedAppearance(GameWorld* gw, const unsigned int hand[5], const CharacterDraft& draft);
 private:
     std::map<Key, Character*> createdAppearanceApplied_;
+    u32 characterWorldEpoch_;
 public:
     const std::map<Tab, OwnerRow>& owners() const { return owners_; }
 };

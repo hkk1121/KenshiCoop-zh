@@ -1663,7 +1663,7 @@ struct CharacterRequestHeader {
     f32 position[3];
     u32 bytes;
 };
-enum CharacterResult { CHARACTER_CREATED = 1, CHARACTER_INVALID, CHARACTER_DENIED, CHARACTER_FAILED, CHARACTER_SAVE_FAILED };
+enum CharacterResult { CHARACTER_CREATED = 1, CHARACTER_INVALID, CHARACTER_DENIED, CHARACTER_FAILED, CHARACTER_SAVE_FAILED, CHARACTER_SAVED };
 struct CharacterReplyPacket {
     u8 type;
     u32 targetOwnerId;

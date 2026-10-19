@@ -12,7 +12,7 @@ bool characterCreationHooks();
 void characterChoices(GameWorld* gw, std::vector<CharacterChoice>& out);
 bool beginCharacterCreation(GameWorld* gw, const CharacterChoice& choice);
 int pollCharacterCreation(GameWorld* gw, CharacterDraft& out);
-void cancelCharacterCreation(bool worldAlive, bool resumeSave = true);
+bool cancelCharacterCreation(bool worldAlive, bool resumeSave = true);
 bool characterPreview(const Character* c = 0);
 bool deferCharacterSave(const std::string* name, bool autosave);
 unsigned int playerTabSize(GameWorld* gw, unsigned int container, unsigned int serial);

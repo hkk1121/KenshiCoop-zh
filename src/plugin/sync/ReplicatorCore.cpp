@@ -102,6 +102,7 @@ Replicator::Replicator()
       tabNotice_(0), playerIdentity_(0), ownersWorld_(0), ownersFileWorld_(0),
       ownersRevision_(0), ownersAuthEpoch_(1), ownersLoaded_(false), ownersAttached_(false),
       ownersDirty_(false), ownersHaveSnapshot_(false), ownersInvalid_(false), ownersResetPending_(false) {
+    characterWorldEpoch_ = ownersAuthEpoch_;
 }
 
 // ---- Phase 3: unified entity lifecycle ---------------------------------------
@@ -1427,7 +1428,7 @@ void Replicator::resetOwnersForWorld() {
     ownersResetPending_ = true;
     if (isHostRole()) {
         owners_.clear(); ownersWorld_ = 0; ownersHaveSnapshot_ = false;
-        ++ownersAuthEpoch_; ownersDirty_ = true;
+        ++ownersAuthEpoch_; characterWorldEpoch_ = ownersAuthEpoch_; ownersDirty_ = true;
     }
 }
 
@@ -1638,7 +1639,7 @@ u32 Replicator::characterConnection(u32 owner) const {
 }
 
 bool Replicator::characterRequestCurrent(const CharacterRequestHeader& h) const {
-    return h.worldId && h.worldId == ownershipWorld() && h.authEpoch == ownersAuthEpoch_ &&
+    return h.worldId && h.worldId == ownershipWorld() && h.authEpoch >= characterWorldEpoch_ && h.authEpoch <= ownersAuthEpoch_ &&
         h.playerId && h.playerId == identityForOwner(h.ownerId) &&
         h.connectionId && h.connectionId == characterConnection(h.ownerId);
 }
@@ -1647,13 +1648,20 @@ bool Replicator::applyCreatedAppearance(GameWorld* gw, const unsigned int h[5], 
     Key key; key.t = h[0]; key.c = h[1]; key.cs = h[2]; key.i = h[3]; key.s = h[4];
     std::map<Key, Character*>::const_iterator proxy = proxyByKey_.find(key);
     Character* c = proxy != proxyByKey_.end() ? proxy->second : engine::resolveCharByHand(h[3], h[4], h[0], h[1], h[2]);
-    if (!c) { createdAppearanceApplied_.erase(key); return false; }
+    unsigned int local[5] = { 0, 0, 0, 0, 0 };
+    if (!c || !engine::readObjectHand(reinterpret_cast<RootObject*>(c), local)) { createdAppearanceApplied_.erase(key); return false; }
     std::map<Key, Character*>::const_iterator applied = createdAppearanceApplied_.find(key);
     if (applied != createdAppearanceApplied_.end() && applied->second == c) return true;
     if (!engine::applyCharacterDraft(gw, c, draft)) return false;
     createdAppearanceApplied_[key] = c;
     coop::logLine("[chargen] host appearance applied to resolved native or proxy character");
     return true;
+}
+
+bool Replicator::createdCharacterArrived(u32 author, const unsigned int h[5]) const {
+    Key key; key.t = h[0]; key.c = h[1]; key.cs = h[2]; key.i = h[3]; key.s = h[4];
+    std::map<Key, Driven>::const_iterator stream = targets_.find(key);
+    return stream != targets_.end() && stream->second.owner == author && stream->second.lastSeenMs != 0;
 }
 
 } // namespace coop

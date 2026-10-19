@@ -208,6 +208,8 @@
     <ClInclude Include="net\NetLink.h" />
     <ClInclude Include="net\SteamP2P.h" />
     <ClInclude Include="game\Engine.h" />
+    <ClInclude Include="game\EngineChargen.h" />
+    <ClInclude Include="..\netproto\CharacterCreation.h" />
     <ClInclude Include="sync\Interp.h" />
     <ClInclude Include="sync\Replicator.h" />
     <ClInclude Include="sync\SaveXfer.h" />

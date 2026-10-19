@@ -46,12 +46,15 @@ inline bool validCharacterDraft(const CharacterDraft& d) {
         d.startSid.find('\0') != std::string::npos || d.templateSid.find('\0') != std::string::npos ||
         d.name.find('\0') != std::string::npos) return false;
     std::set<std::pair<u8, std::string> > seen;
+    unsigned int total = 10 + (unsigned int)(d.startSid.size() + d.templateSid.size() + d.name.size());
     bool race = false;
     for (size_t i = 0; i < d.values.size(); ++i) {
         const AppearanceValue& v = d.values[i];
         if (v.key.empty() || v.key.size() > 96 || v.key.find('\0') != std::string::npos || v.bytes.size() > 4096 ||
             !seen.insert(std::make_pair(v.kind, v.key)).second) return false;
         unsigned int n = (unsigned int)v.bytes.size();
+        total += 5 + (unsigned int)v.key.size() + n;
+        if (total > CHARACTER_DRAFT_MAX) return false;
         if (v.kind == AV_BOOL) { if (n != 1 || v.bytes[0] > 1) return false; }
         else if (v.kind == AV_INT) { if (n != 4) return false; }
         else if (v.kind == AV_FLOAT || v.kind == AV_VECTOR || v.kind == AV_QUATERNION) {

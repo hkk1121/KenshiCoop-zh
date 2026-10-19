@@ -53,22 +53,26 @@ Character* createBody(GameWorld* gw, GameData* data, const float* at) {
         return body ? static_cast<Character*>(body) : 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
-bool showEditor(GameWorld* gw, const lektor<Character*>* chars, GameData* start) {
+bool showEditor(GameWorld* gw, const lektor<Character*>* chars, const Ogre::vector<GameDataReference>::type* races) {
+    __try {
         if (!::gui || ::gui->characterEditor) return false;
-        const Ogre::vector<GameDataReference>::type* races = start->getReferenceListIfExists("force race");
-        if (races && races->empty()) races = 0;
-        ::gui->showCharacterEditor(*chars, EDIT_NEWGAME, races);
+        typedef void (__fastcall* ShowFn)(ForgottenGUI*, const lektor<Character*>*, CharacterEditMode, const Ogre::vector<GameDataReference>::type*);
+        ShowFn show = (ShowFn)KenshiLib::GetRealAddress(&ForgottenGUI::showCharacterEditor);
+        if (!show) return false;
+        show(::gui, chars, EDIT_NEWGAME, races);
         editor = ::gui->characterEditor;
         gw->userPause(true);
         return editor != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 GameDataCopyStandalone* appearanceOf(Character* c) {
     __try { return c ? c->getAppearanceData() : 0; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
-bool setDraftAppearance(Character* c, GameDataCopyStandalone* data, GameData* race, const std::string* name) {
+bool setDraftAppearance(Character* c, GameDataCopyStandalone* data, GameData* race, const std::string* name, bool* handed) {
     __try {
         c->setRace(race);
+        *handed = true;
         c->setAppearanceData(data);
         c->setName(*name);
         if (c->getAppearance()) c->getAppearance()->reload();
@@ -143,7 +147,7 @@ void characterChoices(GameWorld* gw, std::vector<CharacterChoice>& out) {
 }
 
 bool beginCharacterCreation(GameWorld* gw, const CharacterChoice& choice) {
-    if (preview || !gw || !characterCreationHooks() || !::gui || ::gui->characterEditor) return false;
+    if (preview || !gw || saveMgrSignal(0) != 0 || !characterCreationHooks() || !::gui || ::gui->characterEditor) return false;
     GameData* tmpl = findItemTemplateImpl(gw, choice.templateSid.c_str(), CHARACTER);
     GameData* start = findItemTemplateImpl(gw, choice.startSid.c_str(), NEW_GAME_STARTOFF);
     if (!tmpl || !start || !cameraCenter(gw, previousCamera)) return false;
@@ -160,7 +164,8 @@ bool beginCharacterCreation(GameWorld* gw, const CharacterChoice& choice) {
     if (!preview) { previewWorld = 0; return false; }
     detachFromTownAI(preview); clearGoals(preview);
     lektor<Character*> chars; chars.stuff = &preview; chars.count = chars.maxSize = 1;
-    if (!showEditor(gw, &chars, start)) { cancelCharacterCreation(true); return false; }
+    const Ogre::vector<GameDataReference>::type* races = start->getReferenceListIfExists("force race");
+    if (!showEditor(gw, &chars, races && !races->empty() ? races : 0)) { cancelCharacterCreation(true); return false; }
     coop::logLine("[chargen] native NEWGAME editor opened; preview excluded from replication");
     return true;
 }
@@ -168,8 +173,8 @@ bool beginCharacterCreation(GameWorld* gw, const CharacterChoice& choice) {
 int pollCharacterCreation(GameWorld* gw, CharacterDraft& out) {
     if (preview && gw != previewWorld) { cancelCharacterCreation(false); return -1; }
     if (preview && editor && (!::gui || ::gui->characterEditor != editor)) { editor = 0; editResult = -1; }
+    if (preview && editor) writeGameSpeed(previewWorld, previousSpeed, true);
     if (!preview || editor || !editResult) return 0;
-    if (gw != previewWorld) { cancelCharacterCreation(false); return -1; }
     int result = editResult;
     if (result > 0) {
         GameDataCopyStandalone* data = appearanceOf(preview);
@@ -206,15 +211,19 @@ int pollCharacterCreation(GameWorld* gw, CharacterDraft& out) {
             else result = -2;
         }
     }
-    cancelCharacterCreation(true);
+    if (!cancelCharacterCreation(true)) return -3;
     return result;
 }
 
-void cancelCharacterCreation(bool worldAlive, bool resumeSave) {
+bool cancelCharacterCreation(bool worldAlive, bool resumeSave) {
     if (worldAlive && previewWorld) {
         if (editor && ::gui && ::gui->characterEditor == editor) ::gui->closeCharacterEditor();
         restoreEditorWorld();
-        if (preview && !despawnProxyNpc(previewWorld, preview)) coop::logErrLine("[chargen] preview destruction failed");
+        if (preview && !despawnProxyNpc(previewWorld, preview)) {
+            editResult = -2;
+            coop::logErrLine("[chargen] preview destruction failed; keeping save and replication exclusion until retry");
+            return false;
+        }
     }
     preview = 0; editor = 0; previewWorld = 0; editResult = 0; confirming = false;
     if (worldAlive && resumeSave && !deferredSave.empty()) {
@@ -222,6 +231,7 @@ void cancelCharacterCreation(bool worldAlive, bool resumeSave) {
         coop::logLine("[chargen] resuming deferred save after preview cleanup");
         saveGameAs(name);
     } else deferredSave.clear();
+    return true;
 }
 
 bool characterPreview(const Character* c) { return preview && (!c || c == preview); }
@@ -237,8 +247,9 @@ unsigned int playerTabSize(GameWorld* gw, unsigned int container, unsigned int s
     __try {
         if (!gw || !gw->player || !gw->player->getFaction()) return 0xFFFFFFFFu;
         Faction* f = gw->player->getFaction();
-        for (unsigned int i = 0; i < f->activePlatoons.size(); ++i) {
-            Platoon* p = f->activePlatoons[i];
+        const lektor<Platoon*>* lists[2] = { &f->activePlatoons, &f->unloadedPlatoons };
+        for (int list = 0; list < 2; ++list) for (unsigned int i = 0; i < lists[list]->size(); ++i) {
+            Platoon* p = (*lists[list])[i];
             if (p && p->getHandle().container == container && p->getHandle().containerSerial == serial)
                 return (unsigned int)p->getCharacterCount();
         }
@@ -252,7 +263,7 @@ bool applyCharacterDraft(GameWorld* gw, Character* c, const CharacterDraft& draf
     bool allowed = false;
     for (size_t i = 0; i < choices.size(); ++i)
         if (choices[i].startSid == draft.startSid && choices[i].templateSid == draft.templateSid) { allowed = true; break; }
-    if (!allowed) return false;
+    if (!allowed) { coop::logErrLine("[chargen] draft template is not referenced by a game start"); return false; }
     GameDataCopyStandalone* data = new GameDataCopyStandalone();
     data->initialise(CHARACTER_APPEARANCE, false);
     for (size_t i = 0; i < draft.values.size(); ++i) {
@@ -267,6 +278,7 @@ bool applyCharacterDraft(GameWorld* gw, Character* c, const CharacterDraft& draf
         else if (v.kind == AV_REFS) {
             const u8* p = bytes; const u8* end = p + v.bytes.size(); u16 count;
             draftRead(p, end, &count, 2);
+            data->objectReferences[v.key].clear();
             for (u16 j = 0; j < count; ++j) {
                 std::string sid; int vals[3]; draftReadString(p, end, sid, 127); draftRead(p, end, vals, 12);
                 data->addToList(v.key, sid, vals[0], vals[1], vals[2]);
@@ -291,9 +303,13 @@ bool applyCharacterDraft(GameWorld* gw, Character* c, const CharacterDraft& draf
         AppearanceManager* manager = AppearanceManager::getInstance();
         if (validRace && manager) manager->cleanValidateAppearanceData(data);
     }
-    if (!validRace) { delete data; return false; }
+    if (!validRace) { delete data; coop::logErrLine("[chargen] draft race is not playable or violates game-start filter"); return false; }
     // setAppearanceData接管指针；即使后续reload失败，也不能再次释放。
-    return setDraftAppearance(c, data, race, &draft.name);
+    bool handed = false;
+    bool applied = setDraftAppearance(c, data, race, &draft.name, &handed);
+    if (!handed) delete data;
+    if (!applied) coop::logErrLine("[chargen] native appearance apply failed");
+    return applied;
 }
 
 bool createDraftCharacter(GameWorld* gw, const CharacterDraft& draft, const float* position, unsigned int out[5]) {
@@ -302,6 +318,7 @@ bool createDraftCharacter(GameWorld* gw, const CharacterDraft& draft, const floa
     float at[3] = { 0, 0, 0 };
     Character* ld = leader(gw);
     if ((!ld || !readPos(ld, &at[0], &at[1], &at[2])) && !cameraCenter(gw, at)) return false;
+    if (!_finite(at[0]) || !_finite(at[1]) || !_finite(at[2]) || !isZoneLoadedAt(gw, at[0], at[1], at[2])) return false;
     if (position && _finite(position[0]) && _finite(position[2])) {
         float dx = position[0] - at[0], dz = position[2] - at[2];
         if (dx * dx + dz * dz < 40000.0f && isZoneLoadedAt(gw, position[0], at[1], position[2])) { at[0] = position[0]; at[2] = position[2]; }
@@ -312,7 +329,7 @@ bool createDraftCharacter(GameWorld* gw, const CharacterDraft& draft, const floa
     unsigned int tab[2] = { 0, 0 };
     if (!createPlayerSquad(gw, tab)) { despawnProxyNpc(gw, c); return false; }
     unsigned int target[5] = { 0, tab[0], tab[1], 0, 0 };
-    if (!joinPlayerSquadAt(gw, c, target) || !readObjectHand(static_cast<RootObject*>(c), out)) {
+    if (!joinPlayerSquadAt(gw, c, target) || !readObjectHand(static_cast<RootObject*>(c), out) || out[1] != tab[0] || out[2] != tab[1]) {
         despawnProxyNpc(gw, c); return false;
     }
     coop::logLine("[chargen] authoritative character created in new player squad");

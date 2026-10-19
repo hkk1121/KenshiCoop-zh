@@ -1953,6 +1953,25 @@ void testCharacterDraft() {
         v.bytes.assign(4096, 'x'); bad.values.push_back(v);
     }
     CHECK("chargen total size bound", !encodeCharacterDraft(bad, bytes));
+    CHECK("chargen validation shares total size bound", !validCharacterDraft(bad));
+    const u8 kinds[] = { AV_BOOL, AV_INT, AV_STRING, AV_FILE, AV_VECTOR, AV_QUATERNION };
+    const char* keys[] = { "sex female", "skin", "head", "texture", "scale", "rotation" };
+    const unsigned int lengths[] = { 1, 4, 4, 4, 12, 16 };
+    for (unsigned int i = 0; i < 6; ++i) {
+        AppearanceValue v; v.kind = kinds[i]; v.key = keys[i]; v.bytes.assign(lengths[i], i == 2 || i == 3 ? 'x' : 0);
+        d.values.push_back(v);
+    }
+    CHECK("chargen all eight kinds encode", encodeCharacterDraft(d, bytes));
+    CHECK("chargen all eight kinds decode", decodeCharacterDraft(&bytes[0], (unsigned)bytes.size(), out) && out.values.size() == d.values.size());
+    bool exact = out.values.size() == d.values.size();
+    for (size_t i = 0; exact && i < d.values.size(); ++i)
+        exact = out.values[i].kind == d.values[i].kind && out.values[i].key == d.values[i].key && out.values[i].bytes == d.values[i].bytes;
+    CHECK("chargen preserves all eight kinds byte for byte", exact);
+    bad = d; bad.values[2].bytes[0] = 2; CHECK("chargen reject invalid boolean", !validCharacterDraft(bad));
+    bad = d; bad.values[1].bytes.resize(3); CHECK("chargen reject wrong scalar size", !validCharacterDraft(bad));
+    bad = d; bad.values[0].bytes.pop_back(); CHECK("chargen reject truncated reference triple", !validCharacterDraft(bad));
+    CHECK_EQ("chargen request payload length offset", offsetof(CharacterRequestHeader, bytes), 45);
+    CHECK_EQ("chargen host appearance hand offset", offsetof(CharacterAppearanceHeader, hand), 9);
 }
 
 

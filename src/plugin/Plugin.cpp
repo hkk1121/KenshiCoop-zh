@@ -259,6 +259,7 @@ void coopUiDisconnect();
 void coopUiAuth(int action);
 void coopUiCharacter(int action);
 void driveCharacterCreation(GameWorld* gw, bool worldLive);
+void completeCharacterSave(bool saved);
 std::vector<coop::engine::CharacterChoice> g_characterChoices;
 unsigned int g_characterChoice = 0;
 int g_characterAction = -1;
@@ -272,7 +273,12 @@ float g_characterPosition[3] = { 0, 0, 0 };
 std::deque<coop::InboundCharacterRequest> g_characterRequests;
 std::map<coop::u64, coop::CharacterReplyPacket> g_characterResults;
 std::vector<coop::InboundCharacterAppearance> g_characterAppearances;
-std::string g_characterStatus;
+std::string g_characterStatus, g_characterNotified;
+bool g_characterSaveInFlight = false;
+coop::CharacterReplyPacket g_characterSaveReply = { 0 };
+coop::CharacterReplyPacket g_characterPush = { 0 };
+coop::u64 g_characterEditWorld = 0;
+coop::u32 g_characterEditConnection = 0;
 GameWorld* g_characterChoiceWorld = 0;
 
 // Log to BOTH our dedicated per-line-flushed file (what the test runner reads)
@@ -309,6 +315,7 @@ void sessionResetForUi() {
     coop::engine::cancelCharacterCreation(g_lastGw && coop::engine::gameplayLive(g_lastGw));
     g_characterPending = false; g_characterChoiceWorld = 0; g_characterAction = -1;
     g_characterRequests.clear(); g_characterAppearances.clear(); g_characterResults.clear(); g_characterWorld = 0;
+    g_characterSaveInFlight = false; g_characterPush.result = 0;
     std::deque<coop::CharacterReplyPacket> characterReplies; g_inbound.drainCharacterReplies(characterReplies);
     g_peersPresent.clear();
     g_peerBodyRepushDue.clear();
@@ -335,9 +342,10 @@ void sessionResetForWorldReload() {
     coop::engine::cancelCharacterCreation(false);
     g_characterPending = false; g_characterChoiceWorld = 0; g_characterAction = -1;
     g_characterRequests.clear(); g_characterAppearances.clear(); g_characterResults.clear(); g_characterWorld = 0;
-    std::deque<coop::CharacterReplyPacket> characterReplies; g_inbound.drainCharacterReplies(characterReplies);
+    g_characterSaveInFlight = false; g_characterPush.result = 0;
     g_peerBodyRepushDue.clear();
     g_repl.resetSession();
+    g_repl.resetOwnersForWorld();
     g_inbound.flushWorldState();
     g_net.bumpSessionEpoch(); // v44: post-reload batches supersede the old session
     coopLog("[load] inbound world-state queues flushed");
@@ -605,11 +613,18 @@ void driveSaveSync() {
                           rc == 1 ? "settled" : "timeout", g_savePending.c_str(),
                           files, bytes, waited);
                 b[sizeof(b) - 1] = '\0'; coopLog(b);
+                if (g_characterSaveInFlight && rc != 1) {
+                    coopErr("[chargen] save did not settle; targeted push cancelled");
+                    completeCharacterSave(false);
+                    g_bootstrapArmed = false; g_bootstrapTargets.clear(); g_savePending.clear(); return;
+                }
                 if (!g_repl.writeOwners(g_savePending) && g_net.isRunning()) {
+                    completeCharacterSave(false);
                     coopErr("[owners] save transfer cancelled: ownership file write failed");
                     g_bootstrapArmed = false; g_bootstrapTargets.clear(); g_savePending.clear();
                     return;
                 }
+                completeCharacterSave(true);
                 if (!g_cfg.saveSync) { g_savePending.clear(); return; }
                 if (g_bootstrapArmed && g_savePending == g_bootstrapName) {
                     // Connect-push: announce the freshly-baked save with a
@@ -2230,6 +2245,10 @@ void mainLoop_hook(GameWorld* gw, float dt) {
     g_repl.setSessionLive(g_net.isRunning());
     if (worldLive && g_net.isRunning()) g_repl.syncOwners(gw, g_net, g_inbound, g_cfg.isHost);
     driveCharacterCreation(gw, worldLive);
+    if (!g_characterStatus.empty() && g_characterStatus != g_characterNotified) {
+        g_characterNotified = g_characterStatus; g_toastText = g_characterNotified.c_str();
+        g_toastState = 1; g_toastArmMs = GetTickCount();
+    }
     tickReplicatePublish(gw, worldLive);
 
     // Coordinated save + load (protocols 31/32): run under g_gameStarted (NOT
@@ -3132,6 +3151,14 @@ __declspec(dllexport) void startPlugin() {
 
 
 namespace {
+void coopRecruitOwnSquad(Character* c) {
+    g_repl.placeRecruit(g_lastGw, c);
+}
+
+void coopCreatedSquad(unsigned int container, unsigned int serial) {
+    g_repl.claimLocalTab(std::make_pair((coop::u32)container, (coop::u32)serial));
+}
+
 void coopUiCharacter(int action) { g_characterAction = action; }
 
 void replyCharacterCreation(const coop::CharacterReplyPacket& reply) {
@@ -3142,6 +3169,17 @@ void replyCharacterCreation(const coop::CharacterReplyPacket& reply) {
         g_net.queueCharacterPacket(reply.targetOwnerId, bytes);
     }
 }
+
+void completeCharacterSave(bool saved) {
+    if (!g_characterSaveInFlight) return;
+    g_characterSaveInFlight = false;
+    if (!saved) g_characterPush.result = 0;
+    g_characterSaveReply.result = saved ? coop::CHARACTER_SAVED : coop::CHARACTER_SAVE_FAILED;
+    g_characterResults[g_characterSaveReply.playerId] = g_characterSaveReply;
+    replyCharacterCreation(g_characterSaveReply);
+    coopLog(saved ? "[chargen] character save settled with ownership sidecar" : "[chargen] character remains in world; coordinated save failed");
+}
+
 
 void publishCharacterAppearance(const coop::InboundCharacterAppearance& appearance) {
     std::vector<coop::u8> bytes;
@@ -3170,22 +3208,41 @@ void driveCharacterCreation(GameWorld* gw, bool worldLive) {
         coop::engine::characterChoices(gw, g_characterChoices); g_characterChoice = 0; g_characterChoiceWorld = gw;
     }
     g_characterAvailable = g_cfg.saveSync && !g_characterPending && !coop::engine::characterPreview() &&
+        !g_bootstrapArmed && !coop::savexfer::watching() && !coop::savexfer::sending() && coop::engine::saveMgrSignal(0) == 0 &&
         g_repl.characterConnection(g_net.localId()) && g_repl.canCreateCharacter(gw, g_net.localId());
+    if (coop::engine::characterPreview() && (world != g_characterEditWorld ||
+        g_repl.characterConnection(g_net.localId()) != g_characterEditConnection)) {
+        coop::engine::cancelCharacterCreation(true);
+        g_characterStatus = coop::tr("Session changed; character creation cancelled");
+    }
     int action = g_characterAction; g_characterAction = -1;
     if (coop::engine::characterPreview() && action == 1) {
-        coop::engine::cancelCharacterCreation(true); g_characterStatus = coop::tr("Character creation cancelled");
+        g_characterStatus = coop::engine::cancelCharacterCreation(true) ? coop::tr("Character creation cancelled") :
+            coop::tr("Preview cleanup failed; saving is deferred until cleanup succeeds");
+        action = -1;
     } else if (g_characterAvailable && !g_characterChoices.empty()) {
         if (action == 0) g_characterChoice = (g_characterChoice + 1) % (unsigned int)g_characterChoices.size();
         else if (action == 1) {
+            g_characterEditWorld = world; g_characterEditConnection = g_repl.characterConnection(g_net.localId());
             coop::engine::cameraCenter(gw, g_characterPosition);
             if (coop::engine::beginCharacterCreation(gw, g_characterChoices[g_characterChoice]))
                 g_characterStatus = coop::tr("Edit your character, confirm in the editor; F2 to cancel");
             else g_characterStatus = coop::tr("Cannot open character editor");
         }
     }
+    if (action == 1 && !g_characterAvailable && !coop::engine::characterPreview()) {
+        if (g_characterPending) g_characterStatus = coop::tr("A character creation request is already pending");
+        else if (!g_cfg.saveSync) g_characterStatus = coop::tr("Enable save sync before creating a character");
+        else if (g_bootstrapArmed || coop::savexfer::watching() || coop::savexfer::sending() || coop::engine::saveMgrSignal(0) != 0)
+            g_characterStatus = coop::tr("Wait for the current save or transfer to finish");
+        else if (!world) g_characterStatus = coop::tr("Load the host save and wait for ownership synchronization");
+        else g_characterStatus = coop::tr("Creating a character requires that you own no characters");
+    }
+    if (action == 1 && g_characterAvailable && g_characterChoices.empty()) g_characterStatus = coop::tr("No character templates found in loaded game starts");
     coop::CharacterDraft draft;
     int result = coop::engine::pollCharacterCreation(gw, draft);
-    if (result < 0) g_characterStatus = result == -1 ? coop::tr("Character creation cancelled") : coop::tr("Invalid character appearance");
+    if (result < 0) g_characterStatus = result == -3 ? coop::tr("Preview cleanup failed; saving is deferred until cleanup succeeds") :
+        result == -1 ? coop::tr("Character creation cancelled") : coop::tr("Invalid character appearance");
     if (result == 1) {
         coop::InboundCharacterRequest request; memset(&request.header, 0, sizeof(request.header));
         coop::CharacterRequestHeader& h = request.header;
@@ -3212,15 +3269,16 @@ void driveCharacterCreation(GameWorld* gw, bool worldLive) {
         if (p.requestId != g_characterWait.requestId || p.playerId != g_repl.playerIdentity() ||
             p.connectionId != g_repl.characterConnection(g_net.localId()) || p.worldId != g_characterWait.worldId) continue;
         g_characterPending = false;
-        if (p.result == coop::CHARACTER_CREATED) g_characterStatus = coop::tr("Character created and save requested");
-        else if (p.result == coop::CHARACTER_SAVE_FAILED) g_characterStatus = coop::tr("Character created, but saving failed");
+        if (p.result == coop::CHARACTER_SAVED) g_characterStatus = coop::tr("Character saved with permanent ownership");
+        else if (p.result == coop::CHARACTER_CREATED) g_characterStatus = coop::tr("Character created and save requested");
+        else if (p.result == coop::CHARACTER_SAVE_FAILED) g_characterStatus = coop::tr("Character exists, but saving failed; save on host, then reconnect");
         else if (p.result == coop::CHARACTER_DENIED) g_characterStatus = coop::tr("Host refused: character already owned or session changed");
         else if (p.result == coop::CHARACTER_INVALID) g_characterStatus = coop::tr("Invalid character appearance");
         else g_characterStatus = coop::tr("Character creation failed");
         coopLog("[chargen] authoritative creation reply received");
     }
     if (g_characterPending && GetTickCount() - g_characterWaitTick > 120000) {
-        g_characterPending = false; g_characterStatus = coop::tr("Host response timed out; check connection and ownership before retrying");
+        g_characterStatus = coop::tr("Host response timed out; wait or reconnect to check character ownership");
     }
     std::deque<coop::InboundCharacterRequest> requests; g_inbound.drainCharacterRequests(requests);
     if (g_cfg.isHost) for (size_t i = 0; i < requests.size(); ++i) {
@@ -3235,7 +3293,12 @@ void driveCharacterCreation(GameWorld* gw, bool worldLive) {
             if (g_characterRequests[j].header.playerId == h.playerId) pending = true;
         if (!pending && g_characterRequests.size() < coop::MAX_PLAYERS) g_characterRequests.push_back(requests[i]);
     }
-    if (g_cfg.isHost && !g_characterRequests.empty() && !g_bootstrapArmed && !coop::savexfer::watching() &&
+    if (g_characterPush.result && (g_repl.characterConnection(g_characterPush.targetOwnerId) != g_characterPush.connectionId ||
+        g_repl.createdCharacterArrived(g_characterPush.targetOwnerId, g_characterPush.hand))) {
+        g_characterPush.result = 0;
+        coopLog("[chargen] targeted load completed or requester disconnected; creation queue resumed");
+    }
+    if (g_cfg.isHost && !g_characterPush.result && !g_characterRequests.empty() && !g_bootstrapArmed && !coop::savexfer::watching() &&
         !coop::savexfer::sending() && g_loadXferPending.empty() && g_loadXferSent.empty() &&
         coop::engine::saveMgrSignal(0) == 0 && !coop::engine::characterPreview()) {
         coop::InboundCharacterRequest request = g_characterRequests.front(); g_characterRequests.pop_front();
@@ -3244,7 +3307,7 @@ void driveCharacterCreation(GameWorld* gw, bool worldLive) {
         reply.type = (coop::u8)coop::PKT_CHARACTER_REPLY; reply.targetOwnerId = h.ownerId;
         reply.playerId = h.playerId; reply.worldId = h.worldId; reply.connectionId = h.connectionId; reply.requestId = h.requestId;
         reply.result = coop::CHARACTER_DENIED;
-        if (g_cfg.saveSync && g_repl.characterRequestCurrent(h) && g_repl.canCreateCharacter(gw, h.ownerId)) {
+        if (g_cfg.saveSync && g_characterAppearances.size() < 32 && g_repl.characterRequestCurrent(h) && g_repl.canCreateCharacter(gw, h.ownerId)) {
             coop::CharacterDraft decoded;
             reply.result = coop::CHARACTER_INVALID;
             if (!request.data.empty() && coop::decodeCharacterDraft(&request.data[0], (unsigned int)request.data.size(), decoded)) {
@@ -3267,6 +3330,10 @@ void driveCharacterCreation(GameWorld* gw, bool worldLive) {
                             saved = coop::engine::saveGameAs(cur[0] ? cur : "coopresume");
                         }
                         reply.result = saved ? coop::CHARACTER_CREATED : coop::CHARACTER_SAVE_FAILED;
+                        if (saved) {
+                            g_characterSaveInFlight = true; g_characterSaveReply = reply;
+                            if (h.ownerId != g_net.localId()) g_characterPush = reply;
+                        }
                         coopLog("[chargen] character registered to permanent owner; fresh coordinated save requested");
                     }
                 }
@@ -3298,14 +3365,6 @@ void driveCharacterCreation(GameWorld* gw, bool worldLive) {
         }
     }
     if (g_cfg.isHost && GetTickCount() - g_characterAppearanceTick >= 5000) g_characterAppearanceTick = GetTickCount();
-}
-
-void coopRecruitOwnSquad(Character* c) {
-    g_repl.placeRecruit(g_lastGw, c);
-}
-
-void coopCreatedSquad(unsigned int container, unsigned int serial) {
-    g_repl.claimLocalTab(std::make_pair((coop::u32)container, (coop::u32)serial));
 }
 
 } // namespace

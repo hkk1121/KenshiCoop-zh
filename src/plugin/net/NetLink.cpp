@@ -829,7 +829,7 @@ void NetLink::threadLoop() {
                         if (!isHost_ && inbound_ && ev.peer == serverPeer_ && ev.channelID == CH_RELIABLE &&
                             ev.packet->dataLength == sizeof(p) && readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &p) &&
                             p.targetOwnerId == localId() && p.playerId == playerId_ &&
-                            p.result >= CHARACTER_CREATED && p.result <= CHARACTER_SAVE_FAILED)
+                            p.result >= CHARACTER_CREATED && p.result <= CHARACTER_SAVED)
                             inbound_->pushCharacterReply(p);
                     } else if (type == PKT_CHARACTER_APPEARANCE) {
                         CharacterAppearanceHeader h;
