@@ -604,7 +604,7 @@ void Replicator::syncSpawns(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerI
         // force-REQ. Only force-REQ hands become members: an ordinary world-NPC
         // census mint must NOT be dropped into the player squad.
         if (forceReqHands_.erase(k))
-            insertPeerMember(gw, proxy, k, "recruit");
+            insertPeerMember(gw, p.ownerId, proxy, k, "recruit");
     }
 
     // Force-REQ injection (protocol 23 interest-split recruit fix): a recruit/
@@ -889,7 +889,7 @@ void Replicator::applyEvents(GameWorld* gw, Inbound& in) {
                 if (!recruitSync_) break;
                 Key nk; nk.t = ev.aType; nk.c = ev.aContainer;
                 nk.cs = ev.aContainerSerial; nk.i = ev.aIndex; nk.s = ev.aSerial;
-                rekeyPeerBody(gw, k, nk, "recruit");
+                rekeyPeerBody(gw, ev.ownerId, k, nk, "recruit");
                 break;
             }
             case EVT_SQUAD_MOVE: {
@@ -919,7 +919,7 @@ void Replicator::applyEvents(GameWorld* gw, Inbound& in) {
                     xb[sizeof(xb) - 1] = '\0'; coop::logLine(xb);
                     break;
                 }
-                rekeyPeerBody(gw, k, nk, "squad");
+                rekeyPeerBody(gw, ev.ownerId, k, nk, "squad");
                 break;
             }
             case EVT_SQUAD_AUTH: {
@@ -947,8 +947,8 @@ void Replicator::applyEvents(GameWorld* gw, Inbound& in) {
 // damage guard, latches) inherit it with no duplicate proxy mint. If the old
 // hand doesn't resolve here (runtime-born subject), the bidirectional
 // describe/mint channel covers it instead.
-void Replicator::rekeyPeerBody(GameWorld* gw, const Key& oldK, const Key& newK,
-                               const char* tag) {
+void Replicator::rekeyPeerBody(GameWorld* gw, u32 authorId, const Key& oldK,
+                               const Key& newK, const char* tag) {
     // A hand WE authored must never enter pinPeer_ (that set vetoes
     // publishing): an echo - or both sides recruiting the SAME baked NPC,
     // which lands on the SAME new hand (run 120738) - would otherwise
@@ -977,8 +977,9 @@ void Replicator::rekeyPeerBody(GameWorld* gw, const Key& oldK, const Key& newK,
     }
     // The author owns a peer-tab hand even if a local tab census would rank it
     // into a tab we own; but a transfer INTO a tab we own is exactly the control
-    // hand-off, so we claim it instead of pinning it peer.
-    if (!destOwned) pinPeer_.insert(newK);
+    // hand-off, so we claim it instead of pinning it peer. The pin records the
+    // AUTHORING owner (protocol 49) so its leave un-pins exactly its hands.
+    if (!destOwned) pinPeer_[newK] = authorId;
     // A chained edge (recruit then move, move then move) leaves the OLD key's
     // pin dead - drop it so the pin sets track only live hands.
     pinPeer_.erase(oldK);
@@ -1132,7 +1133,7 @@ void Replicator::rekeyPeerBody(GameWorld* gw, const Key& oldK, const Key& newK,
                 (tag ? tag : "squad"), newK.t, newK.c, newK.cs, newK.i, newK.s);
             sk[sizeof(sk) - 1] = '\0'; coop::logLine(sk);
         } else {
-            insertPeerMember(gw, c, newK, tag, destOwned);
+            insertPeerMember(gw, authorId, c, newK, tag, destOwned);
         }
         if (destOwned) {
             // Control hand-off: drop every residual DRIVE artifact so publishOwned
@@ -1194,8 +1195,8 @@ void Replicator::rekeyPeerBody(GameWorld* gw, const Key& oldK, const Key& newK,
     rb[sizeof(rb) - 1] = '\0'; coop::logLine(rb);
 }
 
-void Replicator::insertPeerMember(GameWorld* gw, Character* c, const Key& newK,
-                                  const char* tag, bool ownIt) {
+void Replicator::insertPeerMember(GameWorld* gw, u32 authorId, Character* c,
+                                  const Key& newK, const char* tag, bool ownIt) {
     if (!c) return;
     unsigned int nh[5] = { newK.t, newK.c, newK.cs, newK.i, newK.s };
     bool ok = engine::joinPlayerSquadAt(gw, c, nh);
@@ -1228,7 +1229,7 @@ void Replicator::insertPeerMember(GameWorld* gw, Character* c, const Key& newK,
     bool pinnedLocal = false;
     if (haveLh && (lh[0] | lh[1] | lh[2] | lh[3] | lh[4]) && !sameAsNew) {
         if (ownIt) { pinPeer_.erase(lk); pinOwned_.insert(lk); }
-        else       { pinOwned_.erase(lk); pinPeer_.insert(lk); }
+        else       { pinOwned_.erase(lk); pinPeer_[lk] = authorId; }
         if (ok) moveEcho_[lk.s] = nowMs();  // the engine may renumber the serial
         pinnedLocal = true;
     }

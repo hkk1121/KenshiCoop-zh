@@ -322,9 +322,9 @@ void Replicator::enforceHostAuthority(GameWorld* gw, u32 localId) {
     // That misreading is the whole ghost mechanism: a legitimate local NPC in
     // a place only this client cares about, hidden because the other client
     // never mentioned it.
-    float rawAnch[12];
+    float rawAnch[18];
     unsigned int nRawAnch = engine::interestAnchors(gw, rawAnch);
-    float attnAnch[12];
+    float attnAnch[18];
     unsigned int nAttnAnch = attentionAnchors(gw, rawAnch, nRawAnch, attnAnch);
     unsigned int authSkip = 0;   // bodies left alone because we author them
 
@@ -1015,7 +1015,7 @@ unsigned int Replicator::attentionAnchors(GameWorld* gw, const float* raw,
     }
     unsigned int nOut = 0;
     unsigned int vetoMask = 0;   // which raw indices were dropped
-    for (unsigned int a = 0; a < nRaw && nOut < 4; ++a) {
+    for (unsigned int a = 0; a < nRaw && nOut < 6; ++a) {
         if (a < 8 && !(keepMask & (1u << a))) { vetoMask |= (1u << a); continue; }
         const float* p = raw + a * 3;
         out[nOut * 3 + 0] = p[0];
@@ -1388,7 +1388,9 @@ unsigned int Replicator::peerAnchors(GameWorld* gw, float* out) {
         }
     }
     float pc[3];
-    if (nOut < 4 && engine::peerCamAnchor(pc)) {
+    for (unsigned int slot = 0;
+         slot < engine::PEER_CAM_SLOTS && nOut < 3 + engine::PEER_CAM_SLOTS &&
+         engine::peerCamAnchor(slot, pc); ++slot) {
         out[nOut * 3 + 0] = pc[0];
         out[nOut * 3 + 1] = pc[1];
         out[nOut * 3 + 2] = pc[2];

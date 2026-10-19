@@ -371,6 +371,7 @@ AddGoalFn     g_addGoalFn     = 0;
 AddOrderFn      g_addOrderFn      = 0;
 AddJobFn        g_addJobFn        = 0;
 SeparateSquadFn g_separateSquadFn = 0;
+SetCharNameFn g_setCharNameFn = 0;
 EndActionFn     g_endActionFn     = 0;
 RagdollModeFn   g_ragdollModeFn   = 0;
 MoveRestoreFn   g_moveRestoreFn   = 0;
@@ -1565,6 +1566,8 @@ void resolve() {
     g_addJobFn   = (AddJobFn)KenshiLib::GetRealAddress(&Character::addJob);
     g_separateSquadFn = (SeparateSquadFn)KenshiLib::GetRealAddress(
         &Character::separateIntoMyOwnSquad);
+    g_setCharNameFn = (SetCharNameFn)KenshiLib::GetRealAddress(
+        &Character::_NV_setName);
     g_endActionFn = (EndActionFn)KenshiLib::GetRealAddress(&CharBody::endAction);
     g_ragdollModeFn = (RagdollModeFn)KenshiLib::GetRealAddress(&Character::ragdollMode);
     // Protocol 53: re-create a driven crawler's physics side. The engine DESTROYS

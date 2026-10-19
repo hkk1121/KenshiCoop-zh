@@ -4,7 +4,7 @@ REM machine that has only "Windows SDK 7.1 + VC2010 SP1 compiler update" (no ful
 REM VS2010). We hand MSBuild a complete PATH/INCLUDE/LIB and UseEnv=true so it does
 REM not rely on VS2010 registry/SDK auto-detection.
 REM
-REM Prereqs (see resources/BUILD_SETUP.md):
+REM Prereqs (see docs/BUILD_SETUP.md):
 REM   - VC++ 2010 (v100) x64 compiler  (SDK 7.1 + KB2519277)
 REM   - VS2022 Build Tools (for MSBuild.exe)
 REM   - third_party/KenshiLib_deps (deps + Boost) and env vars set

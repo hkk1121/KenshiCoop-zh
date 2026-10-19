@@ -16,7 +16,11 @@ automatically.
 
 > **Status: work in progress.** This is a hobby project under active
 > development. Expect rough edges, desyncs, and crashes. Two players is the
-> current design target.
+> validated configuration; **three players (host + 2 joins) is supported as
+> of protocol 49** (host-relayed star - see
+> [docs/THREE_PLAYER.md](docs/THREE_PLAYER.md)) and is still being soak
+> tested. The shipped release kit predates protocol 49; three-player needs a
+> build from source until the next release.
 
 ## How it works
 
@@ -31,7 +35,6 @@ automatically.
 ```
 src/plugin/       The KenshiCoop plugin (net, sync/replication, engine facade, scenarios)
 src/netproto/     Shared wire-protocol headers (plain C++03, compiled by everything)
-src/nettest/      Standalone ENet console app (transport de-risking)
 src/netsim/       Protocol simulator
 src/prototest/    Wire-protocol unit tests
 src/tunneltest/   Steam-tunnel socket-hook tests
@@ -70,7 +73,34 @@ Kenshi `mods` directory so you end up with
 `C:\Program Files (x86)\Steam\steamapps\common\Kenshi\mods\`). Then launch
 Kenshi and enable **KenshiCoop** in the Mods menu.
 
-### 2. Connect in-game (press F2)
+### 2a. The two-click way (recommended: Tailscale + the menu buttons)
+
+Put everyone in one [tailscale](https://tailscale.com) network once (free for
+3 users; it's LAN-grade UDP over the internet with no port forwarding). After
+that, a session is:
+
+- **Host:** launch Kenshi, click **HOST GAME** on the main menu, then load
+  your save (or start a new game). Done.
+- **Everyone else:** launch Kenshi, click **JOIN GAME**. Done. It finds the
+  host on your tailnet/LAN by itself, picks your squad slot by itself (second
+  clicker gets squad 2, third gets squad 3), connects, and streams the host's
+  world in. The status row on the launcher narrates the whole thing.
+
+No IDs, no addresses, no settings. If JOIN says "No hosts found", the host
+isn't ONLINE yet (or isn't on your tailnet/LAN) - click it again once they
+are. The buttons use the UDP transport; for Steam transport use the panel
+(below).
+
+**Friends who are bad at computers:** make them a self-contained kit -
+`scripts\make_friend_kit.ps1 -AuthKey tskey-auth-...` packages the mod plus a
+double-click `SETUP.cmd` that installs everything AND joins them to your
+tailscale network with a pre-auth key (generate one at
+login.tailscale.com/admin/settings/keys - reusable, short expiry). They never
+make a Tailscale account or see a login: unzip, double-click, click Yes,
+launch Kenshi, JOIN GAME. Treat the zip like a password and revoke the key
+once they're in (their machines stay joined).
+
+### 2b. The full panel (press F2 - Steam transport / manual setup)
 
 The Co-op panel works at the **main menu** (before you load a game) as well as
 in-game, so the joining player doesn't need to load anything first.
@@ -102,6 +132,17 @@ the host's address in `"ip"` / `"port"`. Then in the panel set **Transport: UDP*
 and go ONLINE. The `ip`/`port` are re-read whenever you go ONLINE, so no restart
 is needed after an edit.
 
+**Host browser in the panel:** with **Role: JOIN** and **Transport: UDP**, the
+**"Scan for hosts (Tailscale / LAN)"** button probes every machine in your
+tailnet (plus the local network) and lists whoever is hosting - name, address,
+save, player count. Click again to step through multiple found hosts; the
+picked one is what ONLINE connects to. (This is the same scan JOIN GAME runs -
+the panel version just lets you pick when several hosts are up.) Scanning uses
+the `tailscale` CLI if installed; without it you can still join by pasting the
+host's `100.x.y.z` address into the config as above. The host answers scan
+probes only from private/tailnet addresses - it never advertises to the open
+internet.
+
 ### Good to know
 
 - **You each control your own squad.** With one squad tab per player, the host
@@ -127,6 +168,13 @@ is needed after an edit.
   one shared save on both machines, streamed to the other side automatically.
   To resume next time, the host loads that save and goes online, and the join
   can reconnect straight from the main menu again.
+
+### Good to know (cosmetics)
+
+- **RE_Kenshi's settings window opens on every launch** by default. Untick
+  *"Open RE_Kenshi settings on startup"* in that window (or set
+  `"OpenSettingOnStart": false` in `<Kenshi>\RE_Kenshi.ini`) and the title
+  screen stays clean - just the game menu and the co-op launcher.
 
 ### If something goes wrong
 

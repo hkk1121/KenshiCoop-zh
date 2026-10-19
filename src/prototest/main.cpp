@@ -1,4 +1,4 @@
-// prototest - the asserting unit layer for the KenshiCoop wire protocol.
+﻿// prototest - the asserting unit layer for the KenshiCoop wire protocol.
 //
 // Runs in milliseconds, before any game launch, as step 0 of every regression
 // tier (scripts/regress.ps1). Locks three things:
@@ -24,6 +24,7 @@
 #include <cstring>
 
 #include "../netproto/Wire.h"
+#include "../netproto/Discovery.h"
 #include "../netproto/ContentHash.h"
 #include "../plugin/sync/Interp.h"
 #include "../plugin/core/OwnRanks.h"
@@ -72,8 +73,9 @@ static int g_total  = 0;
 
 static void testSizes() {
     std::printf("== wire struct sizes (the packed contract both clients memcpy) ==\n");
-    CHECK_EQ("sizeof(HelloPacket)",             sizeof(HelloPacket),             4);
+    CHECK_EQ("sizeof(HelloPacket)",             sizeof(HelloPacket),             8); // v49: +ownRank
     CHECK_EQ("sizeof(WelcomePacket)",           sizeof(WelcomePacket),           7);
+    CHECK_EQ("sizeof(PeerStatusPacket)",        sizeof(PeerStatusPacket),        10); // v49: roster edge
     CHECK_EQ("sizeof(EventPacket)",             sizeof(EventPacket),             54);
     CHECK_EQ("sizeof(EntityState)",             sizeof(EntityState),             79);
     CHECK_EQ("sizeof(EntityBatchHeader)",       sizeof(EntityBatchHeader),       14); // v35: +sendMs; v44: +epoch
@@ -329,6 +331,9 @@ static void testSizes() {
         CHECK("pool total carries ack", total.ackSeq == 7u && total.money == 4000);
         CHECK("pool delta is signed", d.delta < 0 && d.seq == 8u);
     }
+    // 多人阶段合并：同步代码上限为 3，协议 1003 会在下一批提交中启用。
+    CHECK_EQ("MAX_PLAYERS (three-player merge)", (int)MAX_PLAYERS, 3);
+    CHECK_EQ("PKT_PEER_STATUS after fork packets", (int)PKT_PEER_STATUS, 49);
 
     // Protocol 48: the parent reference. A worn backpack owns a PRIVATE inventory, so a bagged
     // item is described by no snapshot unless it can name its container. The byte was already
@@ -463,6 +468,7 @@ static void testRoundTrips() {
     std::printf("== readPacket round-trips + truncation rejection ==\n");
     roundTrip<HelloPacket>("HelloPacket", (u8)PKT_HELLO);
     roundTrip<WelcomePacket>("WelcomePacket", (u8)PKT_WELCOME);
+    roundTrip<PeerStatusPacket>("PeerStatusPacket", (u8)PKT_PEER_STATUS);
     roundTrip<EventPacket>("EventPacket", (u8)PKT_EVENT);
     roundTrip<WorldDropPacket>("WorldDropPacket", (u8)PKT_WORLD_DROP);
     roundTrip<WorldPickupPacket>("WorldPickupPacket", (u8)PKT_WORLD_PICKUP);
@@ -509,16 +515,22 @@ static void testRoundTrips() {
 static void testFraming() {
     std::printf("== field offsets + batch framing ==\n");
 
-    // HELLO: [u8 type][u16 version][u8 nameLen] - the version check that rejects
-    // mismatched builds depends on this exact layout.
-    unsigned char hello[4];
+    // HELLO: [u8 type][u16 version][u32 ownRank][u8 nameLen] (v49) - the
+    // version check that rejects mismatched builds and the squad-slot claim
+    // the host admits on both depend on this exact layout.
+    unsigned char hello[8];
     hello[0] = (unsigned char)PKT_HELLO;
     hello[1] = (unsigned char)(PROTOCOL_VERSION & 0xFF);
     hello[2] = (unsigned char)((PROTOCOL_VERSION >> 8) & 0xFF);
-    hello[3] = 0;
+    hello[3] = 2; // ownRank = 2 (little-endian u32)
+    hello[4] = 0;
+    hello[5] = 0;
+    hello[6] = 0;
+    hello[7] = 0; // nameLen
     HelloPacket h;
-    CHECK("HELLO parses from raw bytes", readPacket(hello, 4, &h));
+    CHECK("HELLO parses from raw bytes", readPacket(hello, 8, &h));
     CHECK_EQ("HELLO version field offset", h.version, PROTOCOL_VERSION);
+    CHECK_EQ("HELLO ownRank field offset", h.ownRank, 2);
     CHECK("HELLO version mismatch detectable", ((u16)(PROTOCOL_VERSION + 1)) != h.version);
 
     // Entity batch framing: [EntityBatchHeader][EntityState*count], the exact
@@ -1731,6 +1743,19 @@ static void testChangeGate() {
     CHECK("seq drop equal",          !gateSeqAccept(5, 5));
     CHECK("seq drop older",          !gateSeqAccept(5, 4));
 
+    // --- gateSeqAcceptFrom (protocol 49): per-(sender,row) form. Two senders'
+    // independent counters on ONE row must never judge each other - this is
+    // the 3-player fix for the shared-row spurious-drop bug.
+    {
+        std::map<unsigned int, unsigned int> seen;
+        CHECK("seqFrom sender1 first",       gateSeqAcceptFrom(seen, 1, 100));
+        CHECK("seqFrom sender2 lower ok",    gateSeqAcceptFrom(seen, 2, 3));
+        CHECK("seqFrom sender1 stale drops",!gateSeqAcceptFrom(seen, 1, 99));
+        CHECK("seqFrom sender1 dup drops",  !gateSeqAcceptFrom(seen, 1, 100));
+        CHECK("seqFrom sender2 newer ok",    gateSeqAcceptFrom(seen, 2, 4));
+        CHECK("seqFrom sender1 newer ok",    gateSeqAcceptFrom(seen, 1, 101));
+    }
+
     // --- gateShouldSend, MONEY flavor (minSend=1000, resend=5000, unsent=1) ---
     // A never-sent row streams once even unchanged (no silent seed).
     CHECK("money unsent unchanged sends",
@@ -1766,6 +1791,106 @@ static void testChangeGate() {
           gateShouldSend(true, 80001, 80000, 0, 10000, false));
 }
 
+static void testDiscovery() {
+    std::printf("\n== discovery datagrams + tailnet extraction ==\n");
+    using namespace coop::disc;
+
+    // --- probe round trip + rejects ------------------------------------------
+    {
+        coop::u8 buf[64];
+        unsigned int n = encodeProbe(buf);
+        CHECK_EQ("probe size", n, sizeof(DiscProbe));
+        coop::u32 proto = 0;
+        CHECK("probe parses", parseProbe(buf, n, &proto));
+        CHECK_EQ("probe carries protocol", proto, PROTOCOL_VERSION);
+        CHECK("probe short rejected", !parseProbe(buf, n - 1, &proto));
+        buf[0] ^= 0xFF;
+        CHECK("probe bad magic rejected", !parseProbe(buf, n, &proto));
+    }
+
+    // --- reply round trip: truncation + forced NULs ---------------------------
+    {
+        coop::u8 buf[128];
+        unsigned int n = encodeReply(buf, 27800, 2, (coop::u8)coop::MAX_PLAYERS,
+                                     "BENS-PC", "squad3");
+        CHECK_EQ("reply size", n, sizeof(DiscReply));
+        DiscReply r;
+        CHECK("reply parses", parseReply(buf, n, &r));
+        CHECK_EQ("reply protocol", r.protocol, PROTOCOL_VERSION);
+        CHECK_EQ("reply gamePort", r.gamePort, 27800);
+        CHECK_EQ("reply players", r.players, 2);
+        CHECK_EQ("reply maxPlayers", r.maxPlayers, coop::MAX_PLAYERS);
+        CHECK("reply hostName", std::strcmp(r.hostName, "BENS-PC") == 0);
+        CHECK("reply saveName", std::strcmp(r.saveName, "squad3") == 0);
+        CHECK("reply short rejected", !parseReply(buf, n - 1, &r));
+        buf[0] ^= 0xFF;
+        CHECK("reply bad magic rejected", !parseReply(buf, n, &r));
+
+        // An oversized name truncates and stays NUL-terminated.
+        const char* longName =
+            "this-name-is-way-longer-than-thirty-two-characters-total";
+        n = encodeReply(buf, 27800, 1, 3, longName, "");
+        CHECK("long-name reply parses", parseReply(buf, n, &r));
+        CHECK_EQ("long name truncated", std::strlen(r.hostName), DISC_NAME_MAX - 1);
+        CHECK("empty save ok", r.saveName[0] == '\0');
+
+        // A sender that fills the name field with no NUL must not overrun:
+        // hostName sits at offset 12 (4+4+2+1+1); stomp all 32 bytes with 'A'.
+        std::memset(buf + 12, 'A', DISC_NAME_MAX);
+        CHECK("reply forces name NUL", parseReply(buf, (unsigned)sizeof(DiscReply), &r) &&
+                                       std::strlen(r.hostName) == DISC_NAME_MAX - 1);
+    }
+
+    // --- source-address gate: private scopes only -----------------------------
+    {
+        // helper: dotted quad -> host-order u32
+        #define IP4(a,b,c,d) ((coop::u32)(((a)<<24)|((b)<<16)|((c)<<8)|(d)))
+        CHECK("allow loopback",      ipv4SourceAllowed(IP4(127,0,0,1)));
+        CHECK("allow 10/8",          ipv4SourceAllowed(IP4(10,1,2,3)));
+        CHECK("allow 172.16/12 low", ipv4SourceAllowed(IP4(172,16,0,1)));
+        CHECK("allow 172.16/12 high",ipv4SourceAllowed(IP4(172,31,255,1)));
+        CHECK("deny 172.32",        !ipv4SourceAllowed(IP4(172,32,0,1)));
+        CHECK("allow 192.168/16",    ipv4SourceAllowed(IP4(192,168,1,50)));
+        CHECK("deny 192.169",       !ipv4SourceAllowed(IP4(192,169,1,50)));
+        CHECK("allow tailscale low", ipv4SourceAllowed(IP4(100,64,0,1)));
+        CHECK("allow tailscale high",ipv4SourceAllowed(IP4(100,127,255,254)));
+        CHECK("deny 100.128",       !ipv4SourceAllowed(IP4(100,128,0,1)));
+        CHECK("deny 100.63",        !ipv4SourceAllowed(IP4(100,63,255,254)));
+        CHECK("allow link-local",    ipv4SourceAllowed(IP4(169,254,10,10)));
+        CHECK("deny public 8.8",    !ipv4SourceAllowed(IP4(8,8,8,8)));
+        CHECK("deny public 51.x",   !ipv4SourceAllowed(IP4(51,15,20,25)));
+        #undef IP4
+    }
+
+    // --- tailscale status --json IPv4 extraction ------------------------------
+    {
+        // Shape of the real CLI output: Self + Peer objects, each with a
+        // TailscaleIPs array holding one v4 and one v6 address.
+        std::string json =
+            "{\"Version\":\"1.66.0\",\"Self\":{\"HostName\":\"my-pc\","
+            "\"TailscaleIPs\":[\"100.101.102.103\",\"fd7a:115c:a1e0::1\"]},"
+            "\"Peer\":{\"key1\":{\"HostName\":\"buddy-1\","
+            "\"TailscaleIPs\":[\"100.90.80.70\",\"fd7a:115c:a1e0::2\"]},"
+            "\"key2\":{\"HostName\":\"buddy-2\","
+            "\"TailscaleIPs\":[\"100.90.80.70\",\"100.66.5.4\"]}}}";
+        std::vector<std::string> ips;
+        extractTailscaleIPv4(json, ips);
+        CHECK_EQ("extract count (v6 skipped, dup dropped)", ips.size(), 3);
+        CHECK("extract self",  ips.size() > 0 && ips[0] == "100.101.102.103");
+        CHECK("extract peer1", ips.size() > 1 && ips[1] == "100.90.80.70");
+        CHECK("extract peer2", ips.size() > 2 && ips[2] == "100.66.5.4");
+
+        std::vector<std::string> none;
+        extractTailscaleIPv4("{\"BackendState\":\"NeedsLogin\"}", none);
+        CHECK_EQ("extract none from loginless json", none.size(), 0);
+        extractTailscaleIPv4("", none);
+        CHECK_EQ("extract none from empty", none.size(), 0);
+        // Malformed tail (no closing bracket) must not loop or crash.
+        extractTailscaleIPv4("\"TailscaleIPs\":[\"100.1.2.3\"", none);
+        CHECK_EQ("extract tolerates unterminated array", none.size(), 0);
+    }
+}
+
 int main() {
     std::printf("prototest: KenshiCoop wire/hash/interp unit layer (protocol v%u)\n",
                 (unsigned)PROTOCOL_VERSION);
@@ -1775,6 +1900,7 @@ int main() {
     testEngineCaps();
     testChangeGate();
     testRoundTrips();
+    testDiscovery();
     testFraming();
     testSaveCrc();
     testFolderFingerprint();

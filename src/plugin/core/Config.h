@@ -8,6 +8,7 @@
 
 #include <string>
 #include <set>
+#include <vector>
 
 namespace coop {
 
@@ -15,6 +16,22 @@ struct Config {
     bool          isHost;          // KENSHICOOP_MODE != "join"
     std::string   ip;              // KENSHICOOP_IP   (join target)
     int           port;            // KENSHICOOP_PORT
+    // Tailnet/LAN game discovery (KENSHICOOP_DISC / json "discovery", default
+    // ON): a UDP-transport host answers browser probes on discPort
+    // (KENSHICOOP_DISC_PORT / "discPort", default 27815 - deliberately NOT
+    // gamePort+1, where the harness parks its netsim WAN proxies); a JOIN's
+    // panel Scan probes loopback + every tailscale peer. The responder only
+    // ever answers private-scope sources (netproto/Discovery.h gate).
+    bool          discovery;
+    int           discPort;
+    bool          discAutoScan;    // KENSHICOOP_DISC_AUTOSCAN (harness): a JOIN
+                                   // fires one scan on its own shortly after
+                                   // startup and logs the results - lets the
+                                   // loopback rig prove probe->reply end to end.
+    std::string   uiAuto;          // KENSHICOOP_UI_AUTO ("host"|"join", rehearsal
+                                   // only): auto-press the title-screen launcher
+                                   // button ~15 s in - the one-click flow test
+                                   // (synthetic clicks never reach Kenshi).
     std::string   save;            // KENSHICOOP_SAVE (auto-load; empty = manual)
     int           testSeconds;     // KENSHICOOP_TEST_SECONDS (0 = no self-exit)
     std::string   logPath;         // KENSHICOOP_LOG
@@ -114,8 +131,8 @@ struct Config {
     float        adoptRadius;       // KENSHICOOP_ADOPT_RADIUS         (250 u)
 
     // Attention gate (attention-gated reconciliation): how close an interest
-    // anchor - either client's tab leaders, either client's camera - must be
-    // to a body before the two worlds are reconciled there. A body no anchor
+    // anchor - any participant's tab leaders or camera - must be to a body
+    // before the replicated worlds are reconciled there. A body no anchor
     // is within this radius of is DORMANT: the host leaves it out of the
     // census, and the join never suppresses it for being census-absent. That
     // makes "the join sees an NPC the host doesn't" the intended outcome in a
@@ -155,9 +172,9 @@ struct Config {
     bool         censusFreezeAi;     // KENSHICOOP_CENSUS_FREEZE_AI     (on)
 
     // Camera-anchored interest (KENSHICOOP_CAM_INTEREST, DEFAULT ON,
-    // protocol 43): interestCenters grows from the two squad-tab-leader
-    // spheres to up to FOUR anchors - + the local camera center + the peer's
-    // ~1 Hz camera hint (PKT_CAM_HINT), deduped within ~100 u. NPCs where a
+    // protocol 43): interestCenters grows from up to three squad-tab-leader
+    // spheres to up to SIX anchors - + the local camera center + two peers'
+    // ~1 Hz camera hints (PKT_CAM_HINT), deduped within ~100 u. NPCs where a
     // player is LOOKING (but no PC stands) stay streamed/listed. A/B hatch.
     bool         camInterest;        // KENSHICOOP_CAM_INTEREST         (on)
 
@@ -223,6 +240,14 @@ struct Config {
     // that never connects / host-only diagnostics). 0 = arm immediately at
     // gameplay start (the legacy behaviour; spike runs use this).
     unsigned long scenarioArmTimeoutMs;
+
+    // Scenario arm gate width (KENSHICOOP_ARM_MIN_PEERS, default 1): how many
+    // DISTINCT peers must have streamed us an owned-entity batch before the
+    // scenario clock arms (the timeout above still applies as the fallback).
+    // A 3-player run sets 2 on every instance so all three clocks arm together
+    // once the LAST participant is live - with the default 1, join 1's window
+    // could end before join 2 even reaches gameplay. 2-player runs keep 1.
+    unsigned int  scenarioArmMinPeers;
 
     // Bidirectional ownership partition (KENSHICOOP_OWN_SQUAD, CSV of unsigned ints;
     // KENSHICOOP_OWN_RANK accepted as an alias). Both clients load the SAME save and
@@ -581,10 +606,26 @@ struct Config {
     // steamPeer below; falls back to UDP (loudly) when Steam is unavailable.
     std::string   transport;
 
-    // The co-op partner's steamid64 (KENSHICOOP_STEAM_PEER). Two-code
-    // exchange: EACH side is configured with the OTHER's SteamID (sending to
-    // a SteamID implicitly accepts its session - no Steam callback plumbing).
+    // The co-op partner's steamid64 (KENSHICOOP_STEAM_PEER). Code exchange:
+    // EACH side is configured with the OTHER's SteamID (sending to a SteamID
+    // implicitly accepts its session - no Steam callback plumbing). A JOIN
+    // sets the HOST's id here.
     unsigned long long steamPeer;
+
+    // Protocol 49 (3-player): the HOST's full friend list - every join's
+    // steamid64 (KENSHICOOP_STEAM_PEERS / config "steamPeers", comma
+    // separated). When empty, steamPeer above is the whole list (the classic
+    // 2-player setup). Joins ignore this (their one counterparty is the
+    // host).
+    std::vector<unsigned long long> steamPeers;
+
+    // Protocol 49 (3-player): the squad-tab rank a JOIN claims at HELLO
+    // (KENSHICOOP_OWN_RANK_CLAIM / config "ownRank"). 0 = unset (role
+    // default: rank 1, the classic join). Player 3 sets 2. An explicit
+    // KENSHICOOP_OWN_SQUAD env override still wins the resolved set; this is
+    // the user-facing single-slot form of the same choice, and it also rides
+    // HelloPacket.ownRank so the host enforces slot uniqueness.
+    unsigned int ownRank;
 
     // Steam reachability spike (KENSHICOOP_STEAM_PING=<steamid64>): ping/echo
     // that peer on P2P channel 1 every 2 s and log RTT + punch-vs-relay,

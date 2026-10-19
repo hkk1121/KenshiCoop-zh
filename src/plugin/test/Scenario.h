@@ -37,6 +37,12 @@ struct ScenarioContext {
     bool        (*pickMintedProxy)(const unsigned int refHand[5],
                                    unsigned int outLocal[5],
                                    unsigned int outCanon[5], float* outDist);
+    // The squad-tab rank this client OWNS (lowest of Config.ownRanks - the same
+    // partition the Replicator streams by). Protocol 49: a third player claims
+    // rank 2, so scenarios must NOT hardcode isHost ? 0 : 1 - a join-2 instance
+    // would try to drive join-1's member. 2-player behavior is unchanged (host
+    // resolves to 0, the classic join to 1).
+    unsigned int  ownRank;
 };
 
 class Scenario {

@@ -43,16 +43,42 @@ struct CoopPanelState {
     int                authPendingPeer; // 1 = 对方申请中，需要 [同意]/[拒绝]
     int                authGrantedMine; // >0 = 本端已授权出去的标签数（可 [收回]）
     int                authBorrowed;    // >0 = 对方授权给本端的标签数（可 [归还]）
+    // Tailnet/LAN browser status (null = never scanned): scan progress, the
+    // currently picked host, or "no hosts found". Rendered as its own white
+    // row above the Scan button; the plugin root owns the scan/pick state.
+    const char*        discDetail;
+    // True when this tick came from the TITLE SCREEN (no world). Shows the
+    // co-op launcher window - native HOST GAME / JOIN GAME buttons on the
+    // main menu that open the panel with the role pre-armed (JOIN on UDP
+    // also kicks a discovery scan), so multiplayer is discoverable without
+    // knowing the F2 shortcut. The launcher hides while the panel is open
+    // and never exists in-game.
+    bool               atTitle;
 };
-// The panel's role/transport selections at the moment Connect is hit. peerId is the
-// Steam ID pasted in-panel this session (0 if none), and overrides the config
-// steamPeer in coopUiConnect; the UDP endpoint is re-read from the config there.
-typedef void (*CoopConnectFn)(bool isHost, bool useSteam, unsigned long long peerId);
+// The panel's role/transport selections at the moment Connect is hit.
+// peerIds/peerCount are the Steam IDs pasted in-panel this session (protocol
+// 49: a HOST may paste up to two friends; a JOIN pastes the host's). count 0
+// = nothing pasted, the config steamPeer(s) stand. ownRank is the JOIN's
+// squad-slot choice from the panel (0 = keep config/default); the UDP
+// endpoint is re-read from the config in coopUiConnect.
+typedef void (*CoopConnectFn)(bool isHost, bool useSteam,
+                              const unsigned long long* peerIds,
+                              unsigned int peerCount, unsigned int ownRank);
 typedef void (*CoopDisconnectFn)();
 // 小队控制授权动作（第 3 批）：0 = 申请控制，1 = 同意，2 = 拒绝，3 = 收回 / 归还控制权。
 typedef void (*CoopAuthFn)(int action);
+// Scan button (JOIN + UDP): first press scans loopback + the tailnet for
+// hosts; further presses step through the results (the plugin root cycles the
+// pick and re-arms the connect endpoint).
+typedef void (*CoopScanFn)();
+// Title-screen launcher buttons - the ONE-CLICK flow (host=true for HOST
+// GAME): the plugin root goes ONLINE as a UDP host, or scans + auto-picks a
+// host + auto-claims the next free squad slot + connects. No panel involved;
+// F2 stays the advanced path (Steam transport, manual slot, host cycling).
+typedef void (*CoopMenuActionFn)(bool host);
 void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
-                   CoopDisconnectFn onDisconnect, CoopAuthFn onAuth);
+                   CoopDisconnectFn onDisconnect, CoopScanFn onScan,
+                    CoopMenuActionFn onMenuAction, CoopAuthFn onAuth);
 
 // Persistent co-op connection-status banner: a single screen-space label fixed 10
 // px in from the top-left corner (a createFloatingLabel MyGUI::Window on the
