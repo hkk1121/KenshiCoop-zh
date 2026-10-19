@@ -1978,6 +1978,18 @@ void coopUiDisconnect() {
     sessionResetForUi();
 }
 
+// 退出游戏时游戏会调用 SteamAPI_Shutdown，随后 steamclient 被卸载；网络线程若还在经 Steam P2P
+// 收包（enet_host_service → hookReceive），就会读到已卸载的地址而崩溃（双方退出时都出现过）。
+// 先停网络线程、离开大厅、关闭 P2P 会话，再放行原函数。
+void (*g_steamShutdown_orig)() = 0;
+void steamShutdown_hook() {
+    coopLog("[steam] SteamAPI_Shutdown: stopping net thread before Steam unloads");
+    if (g_net.isRunning()) g_net.stop();
+    coop::steaminvite::reset();
+    coop::steamp2p::shutdown();
+    g_steamShutdown_orig();
+}
+
 // 小队控制授权（第 3 批）：面板按钮的动作。归属切换需要 GameWorld 做 pin 清扫，所以传
 // g_lastGw（面板在主菜单按下的那一刻没有世界，此时清扫是 no-op，本来就没人发布）。
 void coopUiAuth(int action) {
@@ -2474,6 +2486,16 @@ __declspec(dllexport) void startPlugin() {
 
     installTitleHook();
 
+    // 退出时先停网络线程，再让 Steam 卸载（见 steamShutdown_hook）
+    {
+        HMODULE steamApi = GetModuleHandleA("steam_api64.dll");
+        FARPROC shutdownFn = steamApi ? GetProcAddress(steamApi, "SteamAPI_Shutdown") : 0;
+        if (shutdownFn && KenshiLib::SUCCESS ==
+                KenshiLib::AddHook((intptr_t)shutdownFn, &steamShutdown_hook, &g_steamShutdown_orig))
+            coopLog("[steam] SteamAPI_Shutdown hook installed (net thread stops before Steam unloads)");
+        else
+            coopLog("[steam] FAILED to hook SteamAPI_Shutdown; quitting may crash in the net thread");
+    }
     // 帧数上限（F2 面板切换），未设置时不限
     coop::fpslimit::install();
 
