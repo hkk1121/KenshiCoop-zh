@@ -2477,9 +2477,13 @@ public:
     // 面板状态查询。
     int  squadAuthPendingPeer() const;    // 1 = 有对方申请待处理（要 [同意]/[拒绝]）
     int  squadAuthGrantedMine() const;    // 本端已授权出去的标签数（可 [收回]）
+    int  squadAuthBorrowed() const;       // 本端借到（对方授权给本端）的标签数（可 [归还]）
     int  squadAuthRequesting() const;     // 1 = 本端申请中 / 正在收回
-    bool squadAuthHasRequestable() const; // 是否存在不归本端的标签（可申请）
+    bool squadAuthHasRequestable() const; // 是否存在对方正在控制、可申请的标签
     unsigned int takeSquadAuthNotice();   // 一次性提示码（见 applySquadAuth 注释）
+    // 命令拦截用的分类：在 ownerClassForHand 基础上，只有对方此刻正在驱动（流新鲜）
+    // 才算对方控制（2）。单人游戏、双方都不拥有的小队不拦
+    int  orderClassForHand(const unsigned int h[5]) const;
 private:
     // Recompute claimedCells_ from claimSlots_. Host wins a contested cell.
     void rebuildClaimedCells();
@@ -2679,7 +2683,7 @@ private:
 
     // ---- 小队控制授权（协议 1002，第 2 批） ------------------------------------
     // 归属 = 小队标签（container, containerSerial；两端加载同一份存档，键一致）。
-    // tabAuth_：本端已把控制权交给对方的标签（值 1 = 已授权）。tabReq_：挂起的申请，
+    // tabAuth_：授权关系（值 1 = 本端已把控制权交给对方，2 = 对方授权给本端）。tabReq_：挂起的申请，
     // 值 1 = 本端申请中，2 = 对方申请中（等面板 [同意]/[拒绝]），3 = 本端正在收回
     // （已发 REVOKE，等对方 RETURN）。tabOutbox_ 是接收半与面板动作攒下的待发消息
     // （接收半拿不到 NetLink，统一由 squadAuthTick 发出）。
@@ -2699,6 +2703,8 @@ private:
                        const std::pair<u32, u32>& tab);
     // 收到 EVT_SQUAD_AUTH（接收半只改状态，发送走 tabOutbox_）。
     void applySquadAuth(GameWorld* gw, const EventPacket& ev);
+    // 该标签是否正由对方驱动（targets_ 里有该标签成员的新鲜流）。只有这样的标签才能申请
+    bool peerDrivesTab(const std::pair<u32, u32>& tab) const;
     enum { TAB_AUTH_TIMEOUT_MS = 20000 };
 };
 

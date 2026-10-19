@@ -248,11 +248,12 @@ struct CoopPanelUi {
     int           lastAuthReqable;
     int           lastAuthPending;
     int           lastAuthGranted;
+    int           lastAuthBorrowed;
     CoopPanelUi()
         : panel(0), open(false), built(false), hostFlag(true), steamFlag(true),
           connectedFlag(false), lastConnected(false), lastChkVal(false),
           needsRebuild(false), f2Down(false), lastAuthReq(0), lastAuthReqable(0),
-          lastAuthPending(0), lastAuthGranted(0) {}
+          lastAuthPending(0), lastAuthGranted(0), lastAuthBorrowed(0) {}
 };
 
 CoopPanelUi             g_panel;
@@ -370,7 +371,7 @@ struct PanelStrings {
     const std::string *authKey, *authVal, *authReqCap;
     const std::string *authYesCap, *authNoCap, *authRevokeCap;
     const std::string *authReqKey, *authYesKey, *authNoKey, *authRevokeKey;
-    int showAuthYes, showAuthNo, showAuthRevoke; // 1 = 该按钮行要出现
+    int showAuthReq, showAuthYes, showAuthNo, showAuthRevoke; // 1 = 该按钮行要出现
     const std::string *empty;
 };
 
@@ -396,7 +397,7 @@ void panelBuildSeh(DatapanelGUI* p, const PanelStrings* s) {
         p->addSpace(0, 0.35f);
         // 小队控制授权（第 3 批）：状态行 + 申请按钮（+ 条件出现的同意/拒绝/收回）
         g_authLine   = p->setLine(*s->authKey, *s->authVal, *s->empty, 0, false, true);
-        g_authReqBtn = p->setLineButton(*s->authReqKey, *s->authReqCap, 0);
+        if (s->showAuthReq)    g_authReqBtn    = p->setLineButton(*s->authReqKey, *s->authReqCap, 0);
         if (s->showAuthYes)    g_authYesBtn    = p->setLineButton(*s->authYesKey, *s->authYesCap, 0);
         if (s->showAuthNo)     g_authNoBtn     = p->setLineButton(*s->authNoKey,  *s->authNoCap, 0);
         if (s->showAuthRevoke) g_authRevokeBtn = p->setLineButton(*s->authRevokeKey, *s->authRevokeCap, 0);
@@ -521,11 +522,13 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
     if (st->authRequesting  != g_panel.lastAuthReq ||
         st->authRequestable != g_panel.lastAuthReqable ||
         st->authPendingPeer != g_panel.lastAuthPending ||
-        st->authGrantedMine != g_panel.lastAuthGranted) {
+        st->authGrantedMine != g_panel.lastAuthGranted ||
+        st->authBorrowed    != g_panel.lastAuthBorrowed) {
         g_panel.lastAuthReq     = st->authRequesting;
         g_panel.lastAuthReqable = st->authRequestable;
         g_panel.lastAuthPending = st->authPendingPeer;
         g_panel.lastAuthGranted = st->authGrantedMine;
+        g_panel.lastAuthBorrowed = st->authBorrowed;
         g_panel.needsRebuild = true;
     }
 
@@ -621,6 +624,8 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
             authVal = coop::tr("Waiting for your friend to answer...");
         else if (st->authGrantedMine)
             authVal = coop::tr("Your friend controls your squad");
+        else if (st->authBorrowed)
+            authVal = coop::tr("You control your friend's squad");
         else if (!st->authRequestable)
             authVal = coop::tr("No squad to hand over");
         else
@@ -628,7 +633,8 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         std::string authReqCap    = coop::tr("Ask to control your friend's squad");
         std::string authYesCap    = coop::tr("Grant control");
         std::string authNoCap     = coop::tr("Refuse");
-        std::string authRevokeCap = coop::tr("Take control back");
+        std::string authRevokeCap = st->authGrantedMine ? std::string(coop::tr("Take control back"))
+                                                        : std::string(coop::tr("Give control back"));
         std::string authReqKey    = "authreq";
         std::string authYesKey    = "authyes";
         std::string authNoKey     = "authno";
@@ -650,9 +656,10 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         ps.authRevokeCap = &authRevokeCap;
         ps.authReqKey = &authReqKey; ps.authYesKey = &authYesKey;
         ps.authNoKey = &authNoKey; ps.authRevokeKey = &authRevokeKey;
+        ps.showAuthReq = (st->authRequestable && !st->authRequesting) ? 1 : 0;
         ps.showAuthYes = st->authPendingPeer ? 1 : 0;
         ps.showAuthNo  = st->authPendingPeer ? 1 : 0;
-        ps.showAuthRevoke = st->authGrantedMine ? 1 : 0;
+        ps.showAuthRevoke = (st->authGrantedMine || st->authBorrowed) ? 1 : 0;
         ps.empty = &empty;
         // 条件行会在重建中消失，先把上一轮的指针清掉，避免指向已释放的行
         g_authReqBtn = 0; g_authYesBtn = 0; g_authNoBtn = 0;

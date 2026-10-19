@@ -205,6 +205,13 @@ const char*  g_toastText        = 0;     // 已翻译的提示文字，0 = 无
 int          g_toastState       = 0;     // 状态栏颜色（2 = 绿，0 = 红）
 DWORD        g_toastArmMs       = 0;
 
+// 小队控制授权：命令拦截的归属分类（engine OrderOwnerClassFn）。只有对方此刻正在驱动的
+// 角色才算对方控制，单人游戏和双方都不拥有的小队不拦（ownerClassForHand 在单人时也会把
+// 第 2 个以后的小队判为“非本端”）。
+static int coopOrderOwnerClass(const unsigned int h[5]) {
+    return g_repl.orderClassForHand(h);
+}
+
 // 小队控制授权（第 1 批）：本地命令被拦下时的状态栏提示（engine OrderBlockedFn）。
 // 与 coopInvOwnerClass 同一模式：引擎层不认识面板与 Replicator，只回调。
 static void coopOrderBlocked() {
@@ -223,7 +230,7 @@ void (*g_titleUpdate_orig)(TitleScreen*)   = 0;
 void startNetworking();
 void coopUiConnect(bool isHost, bool useSteam, unsigned long long peerId);
 void coopUiDisconnect();
-// 小队控制授权（第 3 批）：F2 面板按钮 → Replicator 动作（0 申请 / 1 同意 / 2 拒绝 / 3 收回）
+// 小队控制授权（第 3 批）：F2 面板按钮 → Replicator 动作（0 申请 / 1 同意 / 2 拒绝 / 3 收回或归还）
 void coopUiAuth(int action);
 
 // Log to BOTH our dedicated per-line-flushed file (what the test runner reads)
@@ -780,6 +787,7 @@ void coopPanelDrive() {
     ps.authRequesting  = g_repl.squadAuthRequesting();
     ps.authPendingPeer = g_repl.squadAuthPendingPeer();
     ps.authGrantedMine = g_repl.squadAuthGrantedMine();
+    ps.authBorrowed    = g_repl.squadAuthBorrowed();
     // 授权事件的一次性提示（收到申请 / 同意 / 拒绝 / 收回 / 超时）→ 状态栏 4 秒。
     // 分支里直接写 tr("字面量")，让 check_lang.py 能扫到（与连接/断开提示同一写法）。
     {
@@ -1949,6 +1957,7 @@ void coopUiDisconnect() {
 // 小队控制授权（第 3 批）：面板按钮的动作。归属切换需要 GameWorld 做 pin 清扫，所以传
 // g_lastGw（面板在主菜单按下的那一刻没有世界，此时清扫是 no-op，本来就没人发布）。
 void coopUiAuth(int action) {
+    if (!g_peerPresent) return; // 好友不在线：没有可交接的对象
     char b[64];
     _snprintf(b, sizeof(b) - 1, "[coop-ui] squad auth action=%d", action);
     b[sizeof(b) - 1] = '\0';
@@ -2254,8 +2263,8 @@ void installEngineDetours() {
     }
 
     // 小队控制授权（第 1 批，默认 ON）：本地玩家对“对方控制的角色”下达的命令被拦下。
-    // 分类器复用跨归属拖拽否决那一个（Replicator::ownerClassForHand）。
-    coop::engine::setOrderGuard(&coopInvOwnerClass, &coopOrderBlocked);
+    // 分类器只认对方正在驱动的角色（Replicator::orderClassForHand）。
+    coop::engine::setOrderGuard(&coopOrderOwnerClass, &coopOrderBlocked);
     if (coop::engine::installPlayerOrderGuardHook())
         coopLog("[order] player-command guard installed; commands on the peer's squad are blocked");
     else

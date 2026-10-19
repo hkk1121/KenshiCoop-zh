@@ -2087,7 +2087,9 @@ void Replicator::publishSquadMoves(GameWorld* gw, NetLink& net, u32 ownerId) {
                                 ? ownsTabEffective(newTab, nit->second) : false;
             if (!oldOwned && newOwned) {
                 Character* mc = engine::resolveCharByHand(nk.i, nk.s, nk.t, nk.c, nk.cs);
-                if (mc) {
+                // 只拦对方此刻正在驱动的队员：单人游戏（没有对端流）和双方都不拥有的
+                // 第 3 个以后的小队，本地拖拽照常生效
+                if (mc && peerStreamFresh(ok, nowSq)) {
                     unsigned int oh[5] = { ok.t, ok.c, ok.cs, ok.i, ok.s };
                     unsigned int rh[5] = { 0, 0, 0, 0, 0 };
                     bool reverted = engine::joinPlayerSquadAt(gw, mc, oh);

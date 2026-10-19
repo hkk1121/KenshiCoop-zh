@@ -63,3 +63,5 @@ Squad control granted=已授权对方控制小队
 Your friend refused the request=好友拒绝了申请
 Squad control returned=小队控制权已归还
 No answer - the request timed out=对方没有回应 - 申请已超时
+You control your friend's squad=你正在控制好友的小队
+Give control back=归还控制权
