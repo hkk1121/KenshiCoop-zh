@@ -1434,7 +1434,10 @@ void Replicator::syncOwners(GameWorld* gw, NetLink& net, Inbound& in, bool host)
     std::deque<InboundOwners> snapshots;
     in.drainOwners(snapshots);
     for (std::deque<InboundOwners>::const_iterator it = snapshots.begin(); !host && it != snapshots.end(); ++it) {
-        if (ownersHaveSnapshot_ && it->header.worldId == ownersWorld_ && it->header.revision < ownersRevision_) continue;
+        if (ownersHaveSnapshot_ && it->header.worldId == ownersWorld_) {
+            if (it->header.authEpoch < ownersAuthEpoch_) continue;
+            if (it->header.authEpoch == ownersAuthEpoch_ && it->header.revision < ownersRevision_) continue;
+        }
         std::map<Tab, OwnerRow> rows;
         bool valid = it->rows.size() <= OWNERS_MAX;
         for (size_t i = 0; valid && i < it->rows.size(); ++i) {
@@ -1477,9 +1480,10 @@ void Replicator::syncOwners(GameWorld* gw, NetLink& net, Inbound& in, bool host)
             ownersWorld_ = ((u64)time.dwHighDateTime << 32 | time.dwLowDateTime) ^ playerIdentity_;
             if (!ownersWorld_) ownersWorld_ = 1;
             owners_.clear(); ownersRevision_ = 1; ownersAttached_ = true; ownersDirty_ = true;
-            unsigned int tabs[OWNERS_MAX][2]; unsigned int n = engine::listPlayerTabs(gw, tabs, OWNERS_MAX);
+            static EntityState legacy[160];
+            unsigned int n = engine::captureSquad(gw, false, legacy, 160);
             std::vector<Tab> sorted;
-            for (unsigned int i = 0; i < n; ++i) sorted.push_back(Tab(tabs[i][0], tabs[i][1]));
+            for (unsigned int i = 0; i < n; ++i) sorted.push_back(Tab(legacy[i].hContainer, legacy[i].hContainerSerial));
             std::sort(sorted.begin(), sorted.end());
             sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
             for (unsigned int i = 0; i < sorted.size(); ++i) {
@@ -1524,6 +1528,17 @@ void Replicator::syncOwners(GameWorld* gw, NetLink& net, Inbound& in, bool host)
         if (it->worldId && it->worldId != ownersWorld_) { ownersDirty_ = true; continue; }
         registerPeerTab(gw, it->ownerId, Tab(it->container, it->containerSerial), it->worldId == 0);
         ownersDirty_ = true;
+    }
+    // 身体可能先于整表到达；表落地后补登记，避免它在断线清理中仍被当作临时代理。
+    for (std::map<Key, Character*>::const_iterator p = proxyByKey_.begin(); p != proxyByKey_.end(); ++p) {
+        if (!p->second || !mintedBodies_.count(p->second)) continue;
+        std::map<Key, Driven>::const_iterator stream = targets_.find(p->first);
+        if (stream == targets_.end()) continue;
+        u32 author = stream->second.owner;
+        Tab tab = canonicalTab(Tab(p->first.c, p->first.cs), author);
+        std::map<Tab, OwnerRow>::const_iterator owner = owners_.find(tab);
+        if (owner != owners_.end() && owner->second.playerId == identityForOwner(author))
+            insertPeerMember(gw, author, p->second, p->first, "recruit", false);
     }
     if (host) {
         unsigned int tabs[OWNERS_MAX][2]; unsigned int n = engine::listPlayerTabs(gw, tabs, OWNERS_MAX);

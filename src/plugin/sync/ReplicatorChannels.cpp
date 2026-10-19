@@ -1657,8 +1657,19 @@ void Replicator::applyBuilds(const SyncContext& ctx) {
         pb.ann = p;
         // Mint INCOMPLETE always: the placer's STATE rows drive progress from
         // here (a real UI placement starts at 0 anyway).
-        int rc = engine::placeBuildingAt(gw, p.sid, p.x, p.y, p.z, p.yaw,
-                                         /*completed*/false, pb.localHand);
+        int rc = 0;
+        unsigned int saved[5]; engine::BuildRead existing;
+        // 晚加入可能已从主机存档载入同一建筑，先绑定它，避免重发 PLACE 再铸一份。
+        if (engine::findFixtureByPosSid(gw, p.x, p.y, p.z, p.sid, -1, saved) &&
+            engine::readBuildingByHand(saved, &existing) &&
+            (existing.x - p.x) * (existing.x - p.x) +
+            (existing.y - p.y) * (existing.y - p.y) +
+            (existing.z - p.z) * (existing.z - p.z) <= 0.04f) {
+            memcpy(pb.localHand, saved, sizeof(saved)); rc = 1;
+        } else {
+            rc = engine::placeBuildingAt(gw, p.sid, p.x, p.y, p.z, p.yaw,
+                                        /*completed*/false, pb.localHand);
+        }
         pb.minted = (rc == 1) ? 1 : 0;
         if (pb.minted) {
             // Reverse translation (protocol 28): the door sampler and the
