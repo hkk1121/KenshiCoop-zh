@@ -2630,7 +2630,7 @@ void setOrderGuard(OrderOwnerClassFn fn, OrderBlockedFn blocked) {
 // 目标：分类器判为“对方正在驱动”（= 2）的角色
 //   * 单选上下文（selectObject / _selectPlayerCharacter 的 modifier==false 路径，引擎自己
 //     先 clearSelection 再 objectSelected）→ 放行，结果就是单独选中它，可查看属性 / 背包；
-//   * 其它加入路径（框选、Ctrl+A、Shift 加选、引擎自己的零散调用）→ 跳过，不加入；
+//   * 其它加入路径（框选、Ctrl+A、Shift 加选、引擎自己的零散调用）→ 静默跳过，不加入；
 //   * 加入“自己 / 无主”对象前，先把选中集合里已有的对方角色移出，再加入；
 //   * 每帧兜底 enforcePeerSelection：选中集合 size>1 且含对方角色时把它们移出。
 // 关键约束：绝不自己 insert/erase `selectedCharacters`（它的 hash_value 定制点在游戏自己的
@@ -2706,7 +2706,7 @@ static void __fastcall objectSelected_hook(PlayerInterface* self, RootObject* ob
             g_selSkipLogMs = now;
             coop::logLine("[select] skip peer char in multi-select");
         }
-        if (g_orderBlocked) g_orderBlocked();
+        // 静默跳过，不弹状态栏（框选 / Ctrl+A 经常圈到好友角色，提示会反复出现）
         return;
     }
     // 加入的是自己 / 无主的对象：先把已有的对方角色移出（保持“>1 个就不含对方角色”）
