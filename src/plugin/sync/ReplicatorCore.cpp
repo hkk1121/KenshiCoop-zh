@@ -552,6 +552,9 @@ void Replicator::ingest(Inbound& in) {
         d.owner = it->ownerId; // protocol 49: scope a leave teardown to this owner
         d.interp.push(it->e, t, now);
         d.lastSeenMs = now;
+        // 临时补丁（第二阶段归属表之前）：记下被其他玩家驱动过的小队标签，用于锁定
+        std::pair<u32, u32> tab(it->e.hContainer, it->e.hContainerSerial);
+        if (tabRank_.count(tab)) peerDrivenTabs_.insert(tab);
     }
 }
 
@@ -865,6 +868,7 @@ bool Replicator::ownsTabEffective(const std::pair<u32, u32>& tab, unsigned int r
 // AI 挂起、伤害保护由 applyTargets 每帧重建，不需要手工清理。
 void Replicator::reassignTab(GameWorld* gw, const std::pair<u32, u32>& tab, bool owned) {
     tabOwned_[tab] = owned;
+    if (!owned) peerDrivenTabs_.insert(tab); // 交给其他玩家的标签：会话内保持锁定
     tabAuth_.erase(tab);
     tabReq_.erase(tab);
     // 只扫本帧的小队名单（captureSquad 自带 SEH；本 TU 不接触 GameWorld 内部结构）。
@@ -957,8 +961,17 @@ void Replicator::applySquadAuth(GameWorld* gw, const EventPacket& ev) {
     }
     if (kind == 2) {                      // GRANT：对方同意，控制权转到本端
         std::map<std::pair<u32, u32>, AuthPeer>::iterator rq = tabReq_.find(tab);
-        if (mine || rq == tabReq_.end() || rq->second.mode != 1 ||
-            rq->second.ownerId != ev.ownerId) return;
+        if (mine) return;                 // 已经拥有（重复投递）：忽略
+        if (rq == tabReq_.end() || rq->second.mode != 1 ||
+            rq->second.ownerId != ev.ownerId) {
+            // 申请已超时（或没向它申请过）：同意方已先停发，回 RETURN 让它收回，
+            // 否则该小队两边都不驱动，且同意方之后的 [收回] 也得不到确认
+            SquadAuthMsg m; m.kind = 5; m.targetId = ev.ownerId;
+            m.c = tab.first; m.cs = tab.second;
+            tabOutbox_.push_back(m);
+            coop::logLine("[auth] late GRANT without pending request -> RETURN");
+            return;
+        }
         tabReq_.erase(rq);
         reassignTab(gw, tab, true);
         tabAuth_[tab].ownerId = ev.ownerId;
@@ -1178,12 +1191,15 @@ int Replicator::orderClassForHand(const unsigned int h[5]) const {
 
 bool Replicator::peerTabLocked(const std::pair<u32, u32>& tab) const {
     if (!sessionLive_) return false;
-    std::map<std::pair<u32, u32>, bool>::const_iterator ot = tabOwned_.find(tab);
-    if (ot != tabOwned_.end()) return !ot->second;
     std::map<std::pair<u32, u32>, unsigned int>::const_iterator rt = tabRank_.find(tab);
-    if (rt == tabRank_.end()) return true;
-    // 尚未经过 decideTabs 的首帧按同一归属规则判断；会话中不属于本端的任何标签都锁。
-    return !ownsTabEffective(tab, rt->second);
+    unsigned int rank = (rt == tabRank_.end()) ? 0xFFFFFFFFu : rt->second;
+    // 归本端的不锁（尚未经过 decideTabs 的首帧按同一归属规则判断）
+    if (ownsTabEffective(tab, rank)) return false;
+    // 未 latch 的标签、会话中新出现且判给其他玩家的标签
+    if (rt == tabRank_.end() || !rankIsShared(rank)) return true;
+    // 临时补丁：存档原有的标签只锁“其他玩家驱动过 / 交给其他玩家”的，
+    // 无人认领的排位（如两人联机时的第 3、4 个小队）照常可控
+    return peerDrivenTabs_.count(tab) != 0;
 }
 
 bool Replicator::takePeerBodyTabOwner(u32* ownerId) {

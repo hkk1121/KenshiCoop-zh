@@ -2754,11 +2754,17 @@ private:
     unsigned int peerBodyTabs_;
     std::map<u32, unsigned int> peerBodyOwnerCounts_;
     std::vector<u32> peerBodyOwnerQueue_;
-    // 该标签是否锁定：联机会话中，只要标签不归本端就锁定；owner 可以是任一其他玩家，
-    // 掉线后 tabOwned_ 仍保留该判断。
+    // 该标签是否锁定：联机会话中、不归本端，且是会话中判给其他玩家的新标签，或
+    // peerDrivenTabs_ 记录过的存档原有标签；owner 可以是任一其他玩家，掉线后仍锁定。
     bool peerTabLocked(const std::pair<u32, u32>& tab) const;
+    // 临时补丁（第二阶段归属表之前）：联机期间被其他玩家驱动过、或本端交给其他玩家的
+    // 存档原有标签。读档 / 有人离开都保留，网络停止时清空。
+    std::set<std::pair<u32, u32> > peerDrivenTabs_;
 public:
-    void setSessionLive(bool v) { sessionLive_ = v; }
+    void setSessionLive(bool v) {
+        sessionLive_ = v;
+        if (!v) peerDrivenTabs_.clear();
+    }
     void setLocalId(u32 id) { localId_ = id; }
     unsigned int peerBodyTabCount() const { return peerBodyTabs_; }
     bool takePeerBodyTabOwner(u32* ownerId);
