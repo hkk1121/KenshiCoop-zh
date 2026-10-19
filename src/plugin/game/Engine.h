@@ -201,7 +201,7 @@ bool cameraFocusOn(GameWorld* gw, Character* c);
 // hint stale). Since protocol 49 every participant holds one peer-hint SLOT per
 // possible counterparty (PEER_CAM_SLOTS); the sync layer assigns slots.
 // Main-thread only.
-const unsigned int PEER_CAM_SLOTS = 2; // MAX_PLAYERS - 1 (Wire.h)
+const unsigned int PEER_CAM_SLOTS = 3; // MAX_PLAYERS - 1 (Wire.h)
 void setLocalCamAnchor(bool valid, float x, float y, float z);
 void setPeerCamHint(unsigned int slot, bool valid, float x, float y, float z);
 // Read one peer's camera hint back out, for predicates that must reason about
@@ -213,11 +213,11 @@ bool peerCamAnchor(unsigned int slot, float out[3]);
 void setCamInterest(bool on);
 
 // SEH-guarded: expose the current interest anchors (up to 6 x,y,z triples
-// into out[18]: three tab leaders + the local camera + two peer hints) to
+// into out[24]: four tab leaders + the local camera + three peer hints) to
 // the sync layer - the mid-band nearest-first ordering prioritizes by
 // distance to the closest ANCHOR (tab leaders + cameras), so camera-watched
 // NPCs get mid-band drive slots too. Returns the anchor count.
-unsigned int interestAnchors(GameWorld* gw, float out[18]);
+unsigned int interestAnchors(GameWorld* gw, float out[24]);
 
 // ---- Stage 4 NPC replication primitives ------------------------------------
 

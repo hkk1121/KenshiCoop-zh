@@ -322,9 +322,9 @@ void Replicator::enforceHostAuthority(GameWorld* gw, u32 localId) {
     // That misreading is the whole ghost mechanism: a legitimate local NPC in
     // a place only this client cares about, hidden because the other client
     // never mentioned it.
-    float rawAnch[18];
+    float rawAnch[24];
     unsigned int nRawAnch = engine::interestAnchors(gw, rawAnch);
-    float attnAnch[18];
+    float attnAnch[24];
     unsigned int nAttnAnch = attentionAnchors(gw, rawAnch, nRawAnch, attnAnch);
     unsigned int authSkip = 0;   // bodies left alone because we author them
 
@@ -1011,7 +1011,7 @@ unsigned int Replicator::attentionAnchors(GameWorld* gw, const float* raw,
         attnVetoMs_   = nowV;
         attnVetoRawN_ = nRaw;
         attnVetoMask_ = keepMask;
-        for (unsigned int i = 0; i < nRaw * 3 && i < 12; ++i) attnVetoRaw_[i] = raw[i];
+        for (unsigned int i = 0; i < nRaw * 3 && i < 24; ++i) attnVetoRaw_[i] = raw[i];
     }
     unsigned int nOut = 0;
     unsigned int vetoMask = 0;   // which raw indices were dropped

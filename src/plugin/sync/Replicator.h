@@ -1350,7 +1350,7 @@ private:
     // ages slowly, since zones are 4608 u across and the jump check bounds how
     // far an anchor can drift before we ask again.
     unsigned long             attnVetoMs_;     // last query stamp (0 = never)
-    float                     attnVetoRaw_[18];// anchors the verdict was for
+    float                     attnVetoRaw_[24];// anchors the verdict was for
     unsigned int              attnVetoRawN_;
     unsigned int              attnVetoMask_;   // bit a = raw anchor a survived
     bool                      auditRows_;     // travel_parity worldstate rows
@@ -2406,13 +2406,13 @@ private:
     // today's behaviour - the degradation is toward doing what we did before,
     // not toward silence.
     //
-    // Writes up to six centers into out[18]; returns the count.
+    // Writes up to eight centers into out[24]; returns the count.
     unsigned int attentionAnchors(GameWorld* gw, const float* raw,
                                   unsigned int nRaw, float* out);
     // Attention gate predicate: is anyone watching (x,y,z)? True if any
     // interest anchor is within attentionRadius_. Anchors come from the
     // caller because they are computed once per tick (engine::interestAnchors
-    // writes up to six centers into a float[18]).
+    // writes up to eight centers into a float[24]).
     //
     // Hysteresis is asymmetric and latched per hand in attnObs_: a body
     // becomes observed at attentionRadius_ but stays observed out to

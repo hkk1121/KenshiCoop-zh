@@ -233,7 +233,7 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
         // because those are the peer's window into what we are DOING and it must
         // never depend on where their camera happens to point.
         if (cellAuth_) {
-            float peerAnch[18];
+            float peerAnch[24];
             unsigned int nPeerAnch = peerAnchors(gw, peerAnch);
             unsigned long cNow = nowMs();
             unsigned int kept = 0;
@@ -867,7 +867,7 @@ void Replicator::notePlatoons(GameWorld* gw, const EntityState* sts,
     if (!sts) return;
     unsigned long now = nowMs();
     if (platoonT0_ == 0) platoonT0_ = now;
-    float anch[18];
+    float anch[24];
     unsigned int nAnch = engine::interestAnchors(gw, anch);
     for (unsigned int i = 0; i < n; ++i) {
         std::pair<unsigned int, unsigned int> p(sts[i].hContainer,
@@ -946,7 +946,7 @@ void Replicator::publishNpcCensus(GameWorld* gw, NetLink& net, u32 ownerId) {
     // and now lives on the stream instead (see the captureNpcs gate); the history
     // of trying to put it here is in the loop comment, along with the measurement
     // that settled it.
-    float rawAnch[18];
+    float rawAnch[24];
     unsigned int nRawAnch = engine::interestAnchors(gw, rawAnch);
     // A proxy's own hand is one WE minted and no other client has ever heard of,
     // so censusing it under that hand vouches for nothing: the peer looks for the
@@ -1041,7 +1041,7 @@ void Replicator::publishNpcCensus(GameWorld* gw, NetLink& net, u32 ownerId) {
         // Attention, for MEMBERSHIP (not for the distance tiering above): the
         // mid band exists purely to spend bandwidth driving far bodies, so it is
         // the clearest case of work worth skipping when the peer is not watching.
-        float peerAnch[18];
+        float peerAnch[24];
         unsigned int nPeerAnch = peerAnchors(gw, peerAnch);
         midBand_.clear();
         for (unsigned int i = 0; i < n; ++i) {

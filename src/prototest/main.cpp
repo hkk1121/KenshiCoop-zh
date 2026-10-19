@@ -312,8 +312,8 @@ static void testSizes() {
     CHECK_EQ("EVT_SQUAD_MOVE id", (int)EVT_SQUAD_MOVE, 11);
     CHECK("EVT_SQUAD_MOVE distinct", EVT_SQUAD_MOVE != EVT_RECRUIT &&
           EVT_SQUAD_MOVE != EVT_NONE && EVT_SQUAD_MOVE != EVT_EXIT_FURNITURE);
-    CHECK_EQ("PROTOCOL_VERSION (v1002: zh-cn fork, name + animal age + squad auth)",
-             (int)PROTOCOL_VERSION, 1002);
+    CHECK_EQ("PROTOCOL_VERSION (v1003: four-player first stage)",
+             (int)PROTOCOL_VERSION, 1003);
 
     // Protocol 52: the shared money pool. The two players spend from ONE wallet,
     // so the join reports CHANGES and the host the authoritative TOTAL - swap
@@ -331,8 +331,7 @@ static void testSizes() {
         CHECK("pool total carries ack", total.ackSeq == 7u && total.money == 4000);
         CHECK("pool delta is signed", d.delta < 0 && d.seq == 8u);
     }
-    // 多人阶段合并：同步代码上限为 3，协议 1003 会在下一批提交中启用。
-    CHECK_EQ("MAX_PLAYERS (three-player merge)", (int)MAX_PLAYERS, 3);
+    CHECK_EQ("MAX_PLAYERS (four-player first stage)", (int)MAX_PLAYERS, 4);
     CHECK_EQ("PKT_PEER_STATUS after fork packets", (int)PKT_PEER_STATUS, 49);
 
     // Protocol 48: the parent reference. A worn backpack owns a PRIVATE inventory, so a bagged

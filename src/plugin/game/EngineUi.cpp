@@ -26,6 +26,7 @@
 #include "../core/SteamId.h" // parseSteamId64 (paste button) + maskSteamId64 (id rows)
 #include "../core/Config.h"  // coop::tr (UI text localization)
 #include "../core/FpsLimit.h" // 帧数上限切换按钮
+#include "../../netproto/Wire.h" // MAX_PLAYERS（小队槽位切换上限）
 
 namespace coop {
 namespace engine {
@@ -332,7 +333,8 @@ void onConnBtn(DataPanelLine*) {
 // JOIN squad-slot toggle (protocol 49): claim squad tab 1 (second player) or
 // 2 (third player). The host rejects a slot another join already holds.
 void onSlotBtn(DataPanelLine*) {
-    g_slotChoice = (g_slotChoice == 1) ? 2 : 1;
+    ++g_slotChoice;
+    if (g_slotChoice >= coop::MAX_PLAYERS) g_slotChoice = 1;
     g_panel.needsRebuild = true;
     char b[64];
     _snprintf(b, sizeof(b) - 1, "[coop-ui] squad slot -> %u", g_slotChoice);

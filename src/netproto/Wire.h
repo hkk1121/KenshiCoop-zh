@@ -27,14 +27,15 @@ typedef double         f64;
 // and a mismatch is rejected (no back-compat).
 // 本分支（zh-cn-improvements）自有协议号：基于上游 55，加入名字同步与动物年龄同步（上游 PR #28）后
 // 改为 1001 起编号，避开上游后续序列；1002 加入小队控制授权（EVT_SQUAD_AUTH）；
+// 1003 加入多人对端名单与授权目标；
 // 双方须使用同一改进版，与官方 v0.51 不再互通
-const u16 PROTOCOL_VERSION = 1002;
+const u16 PROTOCOL_VERSION = 1003;
 
 // Session player cap (protocol 49): the host + up to two joins. The transport
 // and replication code is N-generic; this is the tested policy limit the host
 // enforces at admit time (HELLO), so raising it is a one-line change HERE once
 // a wider session has been soak-tested.
-const u32 MAX_PLAYERS = 3;
+const u32 MAX_PLAYERS = 4;
 
 // Packet type tags (first byte of every packet).
 enum PacketType {

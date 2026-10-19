@@ -692,8 +692,9 @@ bool cameraFocusOn(GameWorld* gw, Character* c) {
 static bool  s_camInterest    = true;  // KENSHICOOP_CAM_INTEREST master enable
 static bool  s_localCamValid  = false;
 static float s_localCam[3]    = { 0.0f, 0.0f, 0.0f };
-static bool  s_peerCamValid[PEER_CAM_SLOTS] = { false, false };
+static bool  s_peerCamValid[PEER_CAM_SLOTS] = { false, false, false };
 static float s_peerCam[PEER_CAM_SLOTS][3]   = { { 0.0f, 0.0f, 0.0f },
+                                                { 0.0f, 0.0f, 0.0f },
                                                 { 0.0f, 0.0f, 0.0f } };
 
 void setCamInterest(bool on) { s_camInterest = on; }
@@ -760,7 +761,8 @@ unsigned int interestCenters(GameWorld* gw, Ogre::Vector3 outC[INTEREST_MAX]) {
     const float* cams[1 + PEER_CAM_SLOTS] = {
         s_localCamValid    ? s_localCam  : 0,
         s_peerCamValid[0]  ? s_peerCam[0] : 0,
-        s_peerCamValid[1]  ? s_peerCam[1] : 0 };
+        s_peerCamValid[1]  ? s_peerCam[1] : 0,
+        s_peerCamValid[2]  ? s_peerCam[2] : 0 };
     for (unsigned int ci = 0; ci < 1 + PEER_CAM_SLOTS && nc < INTEREST_MAX; ++ci) {
         if (!cams[ci]) continue;
         bool dup = false;
@@ -779,7 +781,7 @@ unsigned int interestCenters(GameWorld* gw, Ogre::Vector3 outC[INTEREST_MAX]) {
 
 // SEH wrapper over interestCenters for callers outside the engine layer
 // (interestCenters itself relies on the caller's SEH frame).
-unsigned int interestAnchors(GameWorld* gw, float out[18]) {
+unsigned int interestAnchors(GameWorld* gw, float out[24]) {
     if (!gw || !out) return 0;
     unsigned int nc = 0;
     __try {
