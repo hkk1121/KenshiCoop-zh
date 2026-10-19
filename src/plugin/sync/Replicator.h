@@ -2806,6 +2806,9 @@ public:
     void syncOwners(GameWorld* gw, NetLink& net, Inbound& in, bool host);
     bool writeOwners(const std::string& name) const;
     void resetOwnersForWorld();
+    bool canCreateCharacter(GameWorld* gw, u32 author) const;
+    bool registerCreatedCharacter(u32 author, const unsigned int hand[5]);
+    u64 ownershipWorld() const { return ownersAttached_ && !ownersInvalid_ ? ownersWorld_ : 0; }
     const std::map<Tab, OwnerRow>& owners() const { return owners_; }
 };
 

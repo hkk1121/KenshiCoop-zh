@@ -13,6 +13,7 @@
 // the API consumed by the PowerShell oracles (see resources/CODE_MAP.md).
 
 #include "EngineInternal.h"
+#include "EngineChargen.h"
 
 // The co-op session panel + status overlay (the DatapanelGUI/Win32/clipboard
 // surface) moved to EngineUi.cpp in Phase 5e, taking its <kenshi/gui/...>,
@@ -170,6 +171,7 @@ namespace {
 // SEH-guarded capture of a single Character into an EntityState. Kept in its own
 // __try frame (no C++ unwinding objects) so a bad pointer degrades to a skip.
 bool captureOne(Character* c, EntityState* e) {
+    if (characterPreview(c)) return false;
     __try {
         const hand& h = c->handle;
         e->hType            = (u32)h.type;

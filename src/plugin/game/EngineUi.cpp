@@ -272,6 +272,13 @@ DataPanelLine_Button*   g_authNoBtn    = 0; // 拒绝对方申请
 DataPanelLine_Button*   g_authRevokeBtn = 0; // 收回控制权
 DataPanelLine*          g_authLine     = 0; // 授权状态行
 // 面板把授权动作交回插件（= coopPanelTick 的 onAuth 参数；0 表示未接线）
+CoopCharacterFn g_characterFn = 0;
+DataPanelLine_Button* g_characterTemplateBtn = 0;
+DataPanelLine_Button* g_characterCreateBtn = 0;
+std::string g_lastCharacterUi;
+bool g_lastCharacterEditing = false;
+void onCharacterTemplateBtn(DataPanelLine*);
+void onCharacterCreateBtn(DataPanelLine*);
 CoopAuthFn              g_authFn       = 0;
 DataPanelLine_Button*   g_scanBtn      = 0; // JOIN+UDP: scan tailnet / next found host
 DataPanelLine*          g_debugLine    = 0; // white connection-status debug row
@@ -442,6 +449,8 @@ struct PanelStrings {
     const std::string *authKey, *authVal, *authReqCap;
     const std::string *authYesCap, *authNoCap, *authRevokeCap;
     const std::string *authReqKey, *authYesKey, *authNoKey, *authRevokeKey;
+    const std::string *characterTemplateKey, *characterTemplateCap, *characterCreateKey, *characterCreateCap;
+    const std::string *characterStatusKey, *characterStatus;
     int showAuthReq, showAuthYes, showAuthNo, showAuthRevoke; // 1 = 该按钮行要出现
     const std::string *empty;
 };
@@ -483,6 +492,9 @@ void panelBuildSeh(DatapanelGUI* p, const PanelStrings* s) {
         if (s->showAuthYes)    g_authYesBtn    = p->setLineButton(*s->authYesKey, *s->authYesCap, 0);
         if (s->showAuthNo)     g_authNoBtn     = p->setLineButton(*s->authNoKey,  *s->authNoCap, 0);
         if (s->showAuthRevoke) g_authRevokeBtn = p->setLineButton(*s->authRevokeKey, *s->authRevokeCap, 0);
+        g_characterTemplateBtn = p->setLineButton(*s->characterTemplateKey, *s->characterTemplateCap, 0);
+        g_characterCreateBtn = p->setLineButton(*s->characterCreateKey, *s->characterCreateCap, 0);
+        p->setLine(*s->characterStatusKey, *s->characterStatus, *s->empty, 0, false, true);
         p->_NV_update();
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
@@ -619,9 +631,10 @@ void coopMenuLauncherTick(ForgottenGUI* g, const CoopPanelState* st) {
 
 void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
                    CoopDisconnectFn onDisconnect, CoopScanFn onScan,
-                   CoopMenuActionFn onMenuAction, CoopAuthFn onAuth) {
+                   CoopMenuActionFn onMenuAction, CoopAuthFn onAuth, CoopCharacterFn onCharacter) {
     if (!st) return;
     g_authFn = onAuth;
+    g_characterFn = onCharacter;
     ForgottenGUI* g = ::gui; // KenshiLib data export (spike 46)
     { static void* s_last = (void*)-1;
       if ((void*)g != s_last) { s_last = (void*)g;
@@ -639,6 +652,12 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         g_selfIdStr.clear();
     }
 
+    // 在主线程的下一帧隐藏面板，避免销毁仍在执行回调的按钮。
+    if (st->editingCharacter && !g_lastCharacterEditing && g_panel.open) {
+        panelDestroySeh(g, g_panel.panel); g_panel.panel = 0;
+        g_panel.open = false; g_panel.built = false;
+    }
+    g_lastCharacterEditing = st->editingCharacter;
     // F2 rising edge toggles the panel open/closed.
     // 仅当游戏窗口在前台时响应（GetAsyncKeyState 是全局按键状态，同机双开时会同时触发两个窗口）
     DWORD fgPid = 0;
@@ -683,6 +702,10 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
     }
 
     if (!g_panel.open) return;
+    std::string characterUi = st->characterTemplate ? st->characterTemplate : "";
+    characterUi += st->characterStatus ? st->characterStatus : "";
+    characterUi += st->editingCharacter ? "E" : st->canCreateCharacter ? "Y" : "N";
+    if (characterUi != g_lastCharacterUi) { g_panel.needsRebuild = true; g_lastCharacterUi = characterUi; }
 
     // Keep the Online/Offline toggle honest when the session state changes
     // underneath us (a peer-driven connect, a failed connect that stopped, etc):
@@ -733,7 +756,7 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         // Scan and Found-hosts rows on top of the host layout. Args are
         // (TOP, LEFT, width, height) render-area fractions (see the menu
         // launcher note): top 0.20, left 0.30 - the classic center-left spot.
-        g_panel.panel = g->createDatapanel(0.18f, 0.30f, 0.30f, 0.66f, false, layer, true);
+        g_panel.panel = g->createDatapanel(0.06f, 0.25f, 0.45f, 0.88f, false, layer, true);
         g_panel.built = false;
         if (!g_panel.panel) {
             coop::logErrLine("[coop-ui] createDatapanel FAILED");
@@ -859,7 +882,17 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         std::string authRevokeKey = "authrev";
         std::string empty    = "";
 
+        std::string characterTemplateKey = "chartmpl", characterCreateKey = "charcreate";
+        std::string characterTemplateCap = coop::tr("Character template (click to cycle): ");
+        if (st->characterTemplate) characterTemplateCap += st->characterTemplate;
+        std::string characterCreateCap = st->editingCharacter ? coop::tr("Cancel character creation") :
+            st->canCreateCharacter ? coop::tr("Create character") : coop::tr("Create character (unavailable)");
+        std::string characterStatusKey = coop::tr("Character creation");
+        std::string characterStatus = st->characterStatus ? st->characterStatus : "";
         PanelStrings ps;
+        ps.characterTemplateKey = &characterTemplateKey; ps.characterTemplateCap = &characterTemplateCap;
+        ps.characterCreateKey = &characterCreateKey; ps.characterCreateCap = &characterCreateCap;
+        ps.characterStatusKey = &characterStatusKey; ps.characterStatus = &characterStatus;
         ps.title = &title; ps.roleKey = &roleKey; ps.roleCap = &roleCap;
         ps.transKey = &transKey; ps.transCap = &transCap;
         ps.connKey = &connKey; ps.connCap = &connCap;
@@ -900,6 +933,8 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         if (g_copyIdBtn)  g_copyIdBtn->callback  = MyGUI::newDelegate(&onCopyIdBtn);
         if (g_pasteIdBtn) g_pasteIdBtn->callback = MyGUI::newDelegate(&onPasteIdBtn);
         if (g_fpsBtn)     g_fpsBtn->callback     = MyGUI::newDelegate(&onFpsBtn);
+        if (g_characterTemplateBtn) g_characterTemplateBtn->callback = MyGUI::newDelegate(&onCharacterTemplateBtn);
+        if (g_characterCreateBtn) g_characterCreateBtn->callback = MyGUI::newDelegate(&onCharacterCreateBtn);
         if (g_scanBtn)    g_scanBtn->callback    = MyGUI::newDelegate(&onScanBtn);
         if (g_authReqBtn)    g_authReqBtn->callback    = MyGUI::newDelegate(&onAuthReqBtn);
         if (g_authYesBtn)    g_authYesBtn->callback    = MyGUI::newDelegate(&onAuthYesBtn);
@@ -1093,3 +1128,8 @@ bool inventoryUiOpen() {
 
 } // namespace engine
 } // namespace coop
+
+namespace coop { namespace engine { namespace {
+void onCharacterTemplateBtn(DataPanelLine*) { if (g_characterFn) g_characterFn(0); }
+void onCharacterCreateBtn(DataPanelLine*) { if (g_characterFn) g_characterFn(1); }
+} } }

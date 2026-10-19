@@ -11,6 +11,7 @@
 // PowerShell oracles (see resources/CODE_MAP.md, log-tag index).
 
 #include "ReplicatorUtil.h"
+#include "../game/EngineChargen.h"
 #include "SaveXfer.h"
 
 namespace coop {
@@ -1607,6 +1608,27 @@ void Replicator::placeRecruit(GameWorld* gw, Character* c) {
     char b[160]; _snprintf(b, sizeof(b) - 1, "[owners] recruit home old=%u,%u target=%u,%u moved=%d",
                            old.first, old.second, home.first, home.second, moved ? 1 : 0);
     b[sizeof(b) - 1] = 0; coop::logLine(b);
+}
+
+bool Replicator::canCreateCharacter(GameWorld* gw, u32 author) const {
+    if (!gw || !sessionLive_ || !ownersAttached_ || ownersInvalid_ || owners_.size() >= OWNERS_MAX) return false;
+    u64 identity = identityForOwner(author);
+    if (!identity) return false;
+    for (std::map<Tab, OwnerRow>::const_iterator it = owners_.begin(); it != owners_.end(); ++it)
+        if (it->second.playerId == identity && engine::playerTabSize(gw, it->first.first, it->first.second) != 0) return false;
+    return true;
+}
+
+bool Replicator::registerCreatedCharacter(u32 author, const unsigned int h[5]) {
+    u64 identity = identityForOwner(author);
+    Tab tab(h[1], h[2]);
+    if (!isHostRole() || !identity || !ownersAttached_ || ownersInvalid_ || owners_.size() >= OWNERS_MAX ||
+        !(tab.first | tab.second) || owners_.count(tab)) return false;
+    OwnerRow row = { 0 };
+    row.container = tab.first; row.containerSerial = tab.second; row.playerId = identity;
+    row.sourceContainer = tab.first; row.sourceSerial = tab.second;
+    owners_[tab] = row; ++ownersRevision_; ownersDirty_ = true;
+    return true;
 }
 
 } // namespace coop

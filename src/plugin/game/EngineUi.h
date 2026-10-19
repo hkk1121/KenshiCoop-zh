@@ -56,6 +56,10 @@ struct CoopPanelState {
     // knowing the F2 shortcut. The launcher hides while the panel is open
     // and never exists in-game.
     bool               atTitle;
+    bool               canCreateCharacter;
+    bool               editingCharacter;
+    const char*        characterTemplate;
+    const char*        characterStatus;
 };
 // The panel's role/transport selections at the moment Connect is hit.
 // peerIds/peerCount are the Steam IDs pasted in-panel this session (protocol
@@ -69,6 +73,7 @@ typedef void (*CoopConnectFn)(bool isHost, bool useSteam,
 typedef void (*CoopDisconnectFn)();
 // 小队控制授权动作（第 3 批）：0 = 申请控制，1 = 同意，2 = 拒绝，3 = 收回 / 归还控制权。
 typedef void (*CoopAuthFn)(int action);
+typedef void (*CoopCharacterFn)(int action);
 // Scan button (JOIN + UDP): first press scans loopback + the tailnet for
 // hosts; further presses step through the results (the plugin root cycles the
 // pick and re-arms the connect endpoint).
@@ -80,7 +85,7 @@ typedef void (*CoopScanFn)();
 typedef void (*CoopMenuActionFn)(bool host);
 void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
                    CoopDisconnectFn onDisconnect, CoopScanFn onScan,
-                    CoopMenuActionFn onMenuAction, CoopAuthFn onAuth);
+                    CoopMenuActionFn onMenuAction, CoopAuthFn onAuth, CoopCharacterFn onCharacter);
 
 // Persistent co-op connection-status banner: a single screen-space label fixed 10
 // px in from the top-left corner (a createFloatingLabel MyGUI::Window on the

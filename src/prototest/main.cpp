@@ -24,6 +24,7 @@
 #include <cstring>
 
 #include "../netproto/Wire.h"
+#include "../netproto/CharacterCreation.h"
 #include "../netproto/Discovery.h"
 #include "../netproto/ContentHash.h"
 #include "../plugin/sync/Interp.h"
@@ -1458,7 +1459,7 @@ static void testFlushWorldStateContract() {
     in.pushInvXferAck(1, xa);
 
     // --- Push one sentinel into every SESSION-PRESERVING queue (10).
-    in.pushConnect(0);
+    in.pushConnect(1);
     in.pushLeave(0);
     in.pushSaveReq(1, srq);
     in.pushSaveBegin(1, sbg);
@@ -1916,10 +1917,47 @@ static void testDiscovery() {
     }
 }
 
+void testCharacterDraft() {
+    CharacterDraft d; d.startSid = "start"; d.templateSid = "character"; d.name = "Player";
+    AppearanceValue race; race.kind = AV_REFS; race.key = "race";
+    u16 count = 1; int vals[3] = { 1, 0, 0 };
+    draftAppend(race.bytes, &count, 2); draftString(race.bytes, "human"); draftAppend(race.bytes, vals, 12);
+    d.values.push_back(race);
+    AppearanceValue scalar; scalar.kind = AV_FLOAT; scalar.key = "height";
+    float height = 0.75f; draftAppend(scalar.bytes, &height, 4); d.values.push_back(scalar);
+    std::vector<u8> bytes; CharacterDraft out;
+    CHECK("chargen encode", encodeCharacterDraft(d, bytes));
+    CHECK("chargen roundtrip", decodeCharacterDraft(&bytes[0], (unsigned)bytes.size(), out) &&
+        out.name == d.name && out.startSid == d.startSid && out.templateSid == d.templateSid &&
+        out.values.size() == 2 && out.values[0].bytes == race.bytes && out.values[1].bytes == scalar.bytes);
+    bool truncated = true;
+    for (unsigned int n = 0; n < bytes.size(); ++n) if (decodeCharacterDraft(&bytes[0], n, out)) truncated = false;
+    CHECK("chargen reject every truncated prefix", truncated);
+    bytes.push_back(0); CHECK("chargen trailing bytes", !decodeCharacterDraft(&bytes[0], (unsigned)bytes.size(), out));
+    bytes.pop_back(); bytes[0] = 2; CHECK("chargen schema", !decodeCharacterDraft(&bytes[0], (unsigned)bytes.size(), out));
+    CharacterDraft bad = d; bad.values.push_back(scalar); CHECK("chargen duplicate key", !encodeCharacterDraft(bad, bytes));
+    bad = d; bad.values.erase(bad.values.begin()); CHECK("chargen missing race", !encodeCharacterDraft(bad, bytes));
+    bad = d; bad.name.assign(64, 'x'); CHECK("chargen name bound", !encodeCharacterDraft(bad, bytes));
+    bad = d; bad.values[0].bytes[0] = 2; CHECK("chargen race count", !encodeCharacterDraft(bad, bytes));
+    bad = d; u32 nan = 0x7FC00000; memcpy(&bad.values[1].bytes[0], &nan, 4);
+    CHECK("chargen NaN", !encodeCharacterDraft(bad, bytes));
+    bad = d; bad.values[1].kind = 99; CHECK("chargen unknown kind", !encodeCharacterDraft(bad, bytes));
+    bad = d; bad.values[1].bytes.resize(4097); CHECK("chargen field bound", !encodeCharacterDraft(bad, bytes));
+    bad = d; bad.name = std::string("a\0b", 3); CHECK("chargen embedded NUL", !encodeCharacterDraft(bad, bytes));
+    bad = d;
+    for (unsigned int i = 0; i < 17; ++i) {
+        AppearanceValue v; v.kind = AV_STRING; char key[16]; sprintf(key, "field%u", i); v.key = key;
+        v.bytes.assign(4096, 'x'); bad.values.push_back(v);
+    }
+    CHECK("chargen total size bound", !encodeCharacterDraft(bad, bytes));
+}
+
+
 int main() {
     std::printf("prototest: KenshiCoop wire/hash/interp unit layer (protocol v%u)\n",
                 (unsigned)PROTOCOL_VERSION);
     testSizes();
+    testCharacterDraft();
     testObjectHandLayout();
     testEngineFaults();
     testEngineCaps();

@@ -11,6 +11,7 @@
 // The include prelude (Boost guards first) rides EngineInternal.h.
 
 #include "EngineInternal.h"
+#include "EngineChargen.h"
 
 namespace coop {
 namespace engine {
@@ -108,6 +109,7 @@ void __fastcall saveMgrSave_hook(SaveManager* self, const std::string* name,
             nm[sizeof(nm) - 1] = '\0';
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { nm[0] = '\0'; }
+    if (!g_saveSuppressAll && deferCharacterSave(name, autosave)) return;
     const bool suppress = g_saveSuppressAll;
     if (!suppress) g_saveHookOrig(self, name, autosave);
     __try {
@@ -199,6 +201,7 @@ void __fastcall saveMgrLoad_hook(SaveManager* self, const std::string* name) {
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { nm[0] = '\0'; }
     if (loadDetourEdge(nm, "name")) {
+        cancelCharacterCreation(true, false);
         g_inLoadDetour = true;
         g_loadHookOrig(self, name);
         g_inLoadDetour = false;
@@ -219,6 +222,7 @@ void __fastcall saveMgrLoadInfo_hook(SaveManager* self, const SaveInfo* info,
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { nm[0] = '\0'; }
     if (loadDetourEdge(nm, "menu")) {
+        cancelCharacterCreation(true, false);
         g_inLoadDetour = true;
         g_loadInfoHookOrig(self, info, resetPos);
         g_inLoadDetour = false;

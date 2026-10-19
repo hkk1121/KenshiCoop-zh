@@ -37,6 +37,7 @@
 #include "net/SteamP2P.h"
 #include "net/SteamInvite.h"
 #include "game/Engine.h"
+#include "game/EngineChargen.h"
 #include "game/EngineUi.h"       // Phase 5a: F2 co-op panel + status overlay
 #include "game/EngineScenario.h" // Phase 5a: auto-bake scene builders
 #include "sync/Replicator.h"
@@ -256,6 +257,16 @@ void coopUiConnect(bool isHost, bool useSteam, const unsigned long long* peerIds
 void coopUiDisconnect();
 // 小队控制授权（第 3 批）：F2 面板按钮 → Replicator 动作（0 申请 / 1 同意 / 2 拒绝 / 3 收回或归还）
 void coopUiAuth(int action);
+void coopUiCharacter(int action);
+void driveCharacterCreation(GameWorld* gw, bool worldLive);
+std::vector<coop::engine::CharacterChoice> g_characterChoices;
+unsigned int g_characterChoice = 0;
+int g_characterAction = -1;
+bool g_characterAvailable = false;
+bool g_characterPending = false;
+coop::CharacterDraft g_characterDraft;
+std::string g_characterStatus;
+GameWorld* g_characterChoiceWorld = 0;
 
 // Log to BOTH our dedicated per-line-flushed file (what the test runner reads)
 // and the engine's kenshi.log (handy when attached live).
@@ -288,6 +299,8 @@ void warnIfNoPortraits(const std::string& name) {
 // clearing the maps - else a reconnect leaves orphaned duplicates or bakes them
 // into the next save. Falls back to a plain map reset if no world has ticked yet.
 void sessionResetForUi() {
+    coop::engine::cancelCharacterCreation(g_lastGw && coop::engine::gameplayLive(g_lastGw));
+    g_characterPending = false; g_characterChoiceWorld = 0; g_characterAction = -1;
     g_peersPresent.clear();
     g_peerBodyRepushDue.clear();
     g_loadXferLastName.clear();
@@ -310,6 +323,8 @@ void sessionResetForUi() {
 // OWN reload edge, and the synchronous-swap backstop reuses it, so the reset
 // order (repl maps, then inbound queues) is defined in exactly one place.
 void sessionResetForWorldReload() {
+    coop::engine::cancelCharacterCreation(false);
+    g_characterPending = false; g_characterChoiceWorld = 0; g_characterAction = -1;
     g_peerBodyRepushDue.clear();
     g_repl.resetSession();
     g_inbound.flushWorldState();
@@ -1199,6 +1214,10 @@ void coopPanelDrive(GameWorld* gw) {
     ps.authPendingPeer = g_repl.squadAuthPendingPeer();
     ps.authGrantedMine = g_repl.squadAuthGrantedMine();
     ps.authBorrowed    = g_repl.squadAuthBorrowed();
+    ps.canCreateCharacter = g_characterAvailable;
+    ps.editingCharacter = coop::engine::characterPreview();
+    ps.characterTemplate = g_characterChoices.empty() ? "" : g_characterChoices[g_characterChoice].label.c_str();
+    ps.characterStatus = g_characterStatus.c_str();
     // 授权事件的一次性提示（收到申请 / 同意 / 拒绝 / 收回 / 超时）→ 状态栏 4 秒。
     // 分支里直接写 tr("字面量")，让 check_lang.py 能扫到（与连接/断开提示同一写法）。
     {
@@ -1290,7 +1309,7 @@ void coopPanelDrive(GameWorld* gw) {
     coop::steaminvite::tick();
 
     coop::engine::coopPanelTick(&ps, &coopUiConnect, &coopUiDisconnect, &coopUiScan,
-                                &coopUiMenuAction, &coopUiAuth);
+                                &coopUiMenuAction, &coopUiAuth, &coopUiCharacter);
     coop::engine::coopOverlayTick(detail.c_str(), ostate, g_net.isRunning());
 }
 
@@ -2196,6 +2215,7 @@ void mainLoop_hook(GameWorld* gw, float dt) {
     // 联机会话中（网络在运行）对方小队即使对方掉线也保持锁定，纯单人不锁
     g_repl.setSessionLive(g_net.isRunning());
     if (worldLive && g_net.isRunning()) g_repl.syncOwners(gw, g_net, g_inbound, g_cfg.isHost);
+    driveCharacterCreation(gw, worldLive);
     tickReplicatePublish(gw, worldLive);
 
     // Coordinated save + load (protocols 31/32): run under g_gameStarted (NOT
@@ -3098,6 +3118,53 @@ __declspec(dllexport) void startPlugin() {
 
 
 namespace {
+void coopUiCharacter(int action) { g_characterAction = action; }
+
+void driveCharacterCreation(GameWorld* gw, bool worldLive) {
+    bool online = g_net.isRunning() && (g_cfg.isHost || !g_peersPresent.empty());
+    if (!worldLive || !online) {
+        if (coop::engine::characterPreview()) coop::engine::cancelCharacterCreation(worldLive);
+        g_characterAvailable = false; g_characterChoiceWorld = 0; g_characterChoices.clear();
+        g_characterPending = false; g_characterAction = -1;
+        return;
+    }
+    if (g_characterChoiceWorld != gw) {
+        coop::engine::characterChoices(gw, g_characterChoices); g_characterChoice = 0; g_characterChoiceWorld = gw;
+    }
+    g_characterAvailable = g_cfg.isHost && g_cfg.saveSync && !g_characterPending &&
+        !coop::engine::characterPreview() && g_repl.canCreateCharacter(gw, g_net.localId());
+    int action = g_characterAction; g_characterAction = -1;
+    if (coop::engine::characterPreview() && action == 1) {
+        coop::engine::cancelCharacterCreation(true); g_characterStatus = coop::tr("Character creation cancelled");
+    } else if (g_characterAvailable && !g_characterChoices.empty()) {
+        if (action == 0) g_characterChoice = (g_characterChoice + 1) % (unsigned int)g_characterChoices.size();
+        else if (action == 1) {
+            if (coop::engine::beginCharacterCreation(gw, g_characterChoices[g_characterChoice]))
+                g_characterStatus = coop::tr("Edit your character, confirm in the editor; F2 to cancel");
+            else g_characterStatus = coop::tr("Cannot open character editor");
+        }
+    }
+    coop::CharacterDraft draft;
+    int result = coop::engine::pollCharacterCreation(gw, draft);
+    if (result < 0) g_characterStatus = result == -1 ? coop::tr("Character creation cancelled") : coop::tr("Invalid character appearance");
+    if (result == 1) { g_characterDraft = draft; g_characterPending = true; }
+    if (!g_characterPending || g_bootstrapArmed || !g_savePending.empty() || coop::savexfer::sending() ||
+        coop::engine::saveMgrSignal(0) != 0 || coop::engine::characterPreview()) return;
+    g_characterPending = false;
+    unsigned int h[5] = { 0, 0, 0, 0, 0 };
+    if (!g_repl.canCreateCharacter(gw, g_net.localId()) || !coop::engine::createDraftCharacter(gw, g_characterDraft, 0, h)) {
+        g_characterStatus = coop::tr("Character creation failed"); return;
+    }
+    if (!g_repl.registerCreatedCharacter(g_net.localId(), h)) {
+        coop::engine::despawnProxyNpc(gw, coop::engine::resolveCharByHand(h[3], h[4], h[0], h[1], h[2]));
+        g_characterStatus = coop::tr("Character creation failed"); return;
+    }
+    char cur[64] = { 0 }; coop::engine::saveInfo(cur, sizeof(cur), 0, 0);
+    if (!coop::engine::saveGameAs(cur[0] ? cur : "coopresume")) g_characterStatus = coop::tr("Character created, but saving failed");
+    else g_characterStatus = coop::tr("Character created and save requested");
+}
+
+
 void coopRecruitOwnSquad(Character* c) {
     g_repl.placeRecruit(g_lastGw, c);
 }

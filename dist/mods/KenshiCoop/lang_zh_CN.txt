@@ -1,4 +1,4 @@
-# KenshiCoop 简体中文界面文字
+﻿# KenshiCoop 简体中文界面文字
 # 游戏语言（settings.cfg 中 language=zh_CN）为简体中文时自动加载本文件
 # 格式：每行 英文原文=译文，以第一个 = 分隔；# 开头为注释；文件须保存为 UTF-8
 # 注意：含 %s / %d / %.1f / %% 的条目，译文必须保留相同数量、相同顺序的占位符，否则游戏可能崩溃
@@ -84,3 +84,15 @@ Squad control returned=小队控制权已归还
 No answer - the request timed out=对方没有回应 - 申请已超时
 You control your friend's squad=你正在控制好友的小队
 Give control back=归还控制权
+Character template (click to cycle): =角色模板（点击切换）：
+Cancel character creation=取消创建角色
+Create character=创建角色
+Create character (unavailable)=创建角色（不可用）
+Character creation=创建角色
+Character creation cancelled=已取消创建角色
+Edit your character, confirm in the editor; F2 to cancel=捏人后在原生界面确认；按 F2 可取消
+Cannot open character editor=无法打开捏人界面
+Invalid character appearance=角色外观数据无效
+Character creation failed=创建角色失败
+Character created, but saving failed=角色已创建，但存档请求失败
+Character created and save requested=角色已创建，已请求协调存档
