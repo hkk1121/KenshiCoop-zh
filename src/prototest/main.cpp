@@ -73,7 +73,7 @@ static int g_total  = 0;
 
 static void testSizes() {
     std::printf("== wire struct sizes (the packed contract both clients memcpy) ==\n");
-    CHECK_EQ("sizeof(OwnerRow)", sizeof(OwnerRow), 24);
+    CHECK_EQ("sizeof(OwnerRow)", sizeof(OwnerRow), 25);
     CHECK_EQ("sizeof(OwnersHeader)", sizeof(OwnersHeader), 19);
     CHECK_EQ("sizeof(OwnerRequestPacket)", sizeof(OwnerRequestPacket), 21);
     CHECK_EQ("sizeof(HelloPacket)",             sizeof(HelloPacket),             16); // v49: +ownRank
@@ -1468,6 +1468,14 @@ static void testFlushWorldStateContract() {
     in.pushLoadGo(0, lg);
     in.pushLoadReq(1, lrq);
     in.pushLoadNack(1, lnk);
+    PeerStatusPacket ps; std::memset(&ps, 0, sizeof(ps));
+    ps.playerId = 0xFEDCBA9876543210ULL; in.pushPeerStatus(ps);
+    OwnerRow owner = { 3, 4, 0xFEDCBA9876543210ULL, 5, 6, 1 };
+    OwnersHeader owners; std::memset(&owners, 0, sizeof(owners));
+    owners.type = (u8)PKT_OWNERS; owners.worldId = 11; owners.authEpoch = 9; owners.count = 1;
+    in.pushOwners(owners, &owner);
+    OwnerRequestPacket request; std::memset(&request, 0, sizeof(request));
+    request.worldId = 11; in.pushOwnerRequest(request);
 
     in.flushWorldState();
 
@@ -1527,6 +1535,16 @@ static void testFlushWorldStateContract() {
     SP_KEPT("loadGo",    InboundLoadGo,    drainLoadGos);
     SP_KEPT("loadReq",   InboundLoadReq,   drainLoadReqs);
     SP_KEPT("loadNack",  InboundLoadNack,  drainLoadNacks);
+    SP_KEPT("players", PeerStatusPacket, drainPeerStatus);
+    { std::deque<OwnerRequestPacket> out; in.drainOwnerRequests(out);
+      CHECK("old-world ownership requests dropped on reload", out.empty()); }
+    {
+        std::deque<InboundOwners> out; in.drainOwners(out);
+        CHECK("ownership table survives coordinated reload", out.size() == 1);
+        CHECK("ownership row keeps 64-bit identity and source tag", out.size() == 1 && out[0].rows.size() == 1 &&
+              out[0].rows[0].playerId == 0xFEDCBA9876543210ULL && out[0].rows[0].sourceSerial == 6);
+        CHECK("ownership authorization epoch survives reload mailbox", out.size() == 1 && out[0].header.authEpoch == 9);
+    }
     #undef SP_KEPT
 }
 

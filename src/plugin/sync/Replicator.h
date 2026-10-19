@@ -2023,8 +2023,13 @@ private:
     struct PeerBuild {
         unsigned int localHand[5];
         int minted; std::map<u32, u32> seqSeen;
+        BuildPlacePacket ann;
+        BuildStatePacket state;
+        bool haveState;
         bool removed; // proxy destroyed on a REMOVE: tombstone (rows skip)
-        PeerBuild() : minted(0), removed(false) { memset(localHand, 0, sizeof(localHand)); }
+        PeerBuild() : minted(0), haveState(false), removed(false) {
+            memset(localHand, 0, sizeof(localHand)); memset(&ann, 0, sizeof(ann)); memset(&state, 0, sizeof(state));
+        }
     };
     std::map<Key, OwnBuild>  ownBuilds_;
     std::map<Key, PeerBuild> peerBuilds_;
@@ -2046,6 +2051,7 @@ private:
     //     whether we placed it (ownBuilds_) or minted it (peerBuilds_).
     bool buildKeyForLocalHand(const Key& local, Key& outWire) const;
     bool localHandForBuildKey(const Key& wire, unsigned int out[5]) const;
+    u64           buildKeySerial_;
     u32           buildSeqOut_;
     unsigned long buildSampleMs_;
     bool          buildSync_;
@@ -2111,11 +2117,11 @@ private:
     // zero-initialized, and a garbage latch flag cost a debugging session.
     struct DeedRow {
         unsigned long lastSendMs;
-        u32  seqSeen;
+        std::map<u32, u32> seqSeen;
         bool sent;
         bool applied;
         int  knownOwned;
-        DeedRow() : lastSendMs(0), seqSeen(0), sent(false), applied(false),
+        DeedRow() : lastSendMs(0), sent(false), applied(false),
                     knownOwned(-1) {}
     };
     std::map<Key, DeedRow> deedRows_;
@@ -2142,8 +2148,8 @@ private:
         FixOut() : lastSendMs(0), sent(false) {}
     };
     struct FixtureRow {
-        unsigned int hand[5]; bool resolved; u32 seqSeen; unsigned long lastMissMs;
-        FixtureRow() : resolved(false), seqSeen(0), lastMissMs(0) {
+        unsigned int hand[5]; bool resolved; std::map<u32, u32> seqSeen; unsigned long lastMissMs;
+        FixtureRow() : resolved(false), lastMissMs(0) {
             hand[0] = hand[1] = hand[2] = hand[3] = hand[4] = 0;
         }
     };

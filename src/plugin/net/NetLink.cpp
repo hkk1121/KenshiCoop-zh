@@ -371,9 +371,8 @@ bool NetLink::acceptEpoch(u32 ownerId, u32 epoch) {
 // existence set. Host-directed channels (prod/research/time/stealth/spawn-info)
 // never arrive at the host through this list. PKT_ENTITY_BATCH relays too, but
 // inside its epoch-accepted branch in the receive ladder. The symmetric
-// change-gated rows (faction/door/build) stay host-echoed for now: the host
-// applies the join's intent and its own authoritative stream re-broadcasts
-// the result, so relaying the raw row would race the echo.
+// 阵营、门、建筑、房产和设施显式转发，应用基线会压制再次发布。
+// 生产和研究在主机应用意图后由主机流回显，不转发加入方原包。
 bool NetLink::isRelayedType(u8 type) {
     switch (type) {
         case PKT_EVENT:
@@ -392,6 +391,14 @@ bool NetLink::isRelayedType(u8 type) {
         case PKT_NPC_CENSUS:
         case PKT_CAM_HINT:
         case PKT_CELL_CLAIM:
+        case PKT_FACTION:
+        case PKT_DOOR:
+        case PKT_BUILD_PLACE:
+        case PKT_BUILD_STATE:
+        case PKT_BUILD_DOOR:
+        case PKT_BUILD_REMOVE:
+        case PKT_DEED:
+        case PKT_FIXTURE:
             return true;
         default:
             return false;
@@ -1087,7 +1094,7 @@ void NetLink::threadLoop() {
                         // (protocol 33), applied via the engine levers.
                         ProdPacket pp;
                         if (readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &pp)
-                            && inbound_) {
+                            && inbound_ && pp.ownerId == (isHost_ ? (u32)(size_t)ev.peer->data : 0u)) {
                             inbound_->pushProd(pp.ownerId, pp);
                         }
                     } else if (type == PKT_RESEARCH) {
@@ -1095,7 +1102,7 @@ void NetLink::threadLoop() {
                         // (protocol 38), applied via Research::startResearch.
                         ResearchPacket rp;
                         if (readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &rp)
-                            && inbound_) {
+                            && inbound_ && rp.ownerId == (isHost_ ? (u32)(size_t)ev.peer->data : 0u)) {
                             inbound_->pushResearch(rp.ownerId, rp);
                         }
                     } else if (type == PKT_DEED) {

@@ -902,7 +902,7 @@ inline int qProd(float v) {
 
 void Replicator::publishProd(const SyncContext& ctx) {
     GameWorld* gw = ctx.gw; NetLink& net = *ctx.net; u32 ownerId = ctx.localId;
-    if (!prodSync_) return;
+    if (!prodSync_ || (!ctx.isHost && !ownersAttached_)) return;
     const unsigned long SAMPLE_MS = tuning_.prodSampleMs;  // machines tick slowly; 1 Hz is plenty
     const unsigned long RESEND_MS = tuning_.prodResendMs;  // safety resend = the join drift corrector
     unsigned long now = nowMs();
@@ -921,13 +921,12 @@ void Replicator::publishProd(const SyncContext& ctx) {
         // join's placement translates through the reverse map). Everything
         // else is a BAKED machine with a save-stable hand.
         int keyKind = 0; Key wk = lk;
-        if (ownBuilds_.find(lk) != ownBuilds_.end()) {
-            keyKind = 1;
-        } else {
-            std::map<Key, Key>::iterator mit = mintByLocal_.find(lk);
-            if (mit != mintByLocal_.end()) { keyKind = 1; wk = mit->second; }
-        }
+        if (buildKeyForLocalHand(lk, wk)) keyKind = 1;
         ProdRow& pr = prodRows_[std::make_pair(keyKind, wk)];
+        if (!ctx.isHost) {
+            if (!pr.sent) { pr.sent = true; pr.knownPower = r.powerOn; continue; }
+            if (r.powerOn < 0 || r.powerOn == pr.knownPower) continue;
+        }
         int qOut = qProd(r.outAmount);
         int qIn0 = qProd(r.nInputs > 0 ? r.inAmount[0] : -1.0f);
         int qIn1 = qProd(r.nInputs > 1 ? r.inAmount[1] : -1.0f);
@@ -967,6 +966,12 @@ void Replicator::publishProd(const SyncContext& ctx) {
         pkt.inAmount[1] = (r.nInputs > 1) ? r.inAmount[1] : -1.0f;
         pkt.grown = r.grown; pkt.died = r.died; pkt.growStart = r.growStart;
         pkt.harvested = (float)r.harvested;
+        if (!ctx.isHost) {
+            // 加入方只提交电源意图，资源数量继续由主机负责。
+            pkt.prodState = -1; pkt.outSid[0] = 0;
+            pkt.outAmount = pkt.inAmount[0] = pkt.inAmount[1] = -1.0f;
+            pkt.grown = pkt.died = pkt.growStart = pkt.harvested = -1.0f;
+        }
         net.queueProd(pkt);
         if (changed) { // resends stay silent; the change is the signal
             char b[256];
@@ -1009,44 +1014,35 @@ void Replicator::applyProd(const SyncContext& ctx) {
             if (!localHandForFixtureKey(wk, hand))
                 for (unsigned int h = 0; h < 5; ++h) hand[h] = p.key[h];
         } else {
-            std::map<Key, OwnBuild>::iterator ob = ownBuilds_.find(wk);
-            if (ob != ownBuilds_.end()) {
-                if (ob->second.removed) continue;
-                memcpy(hand, ob->second.hand, sizeof(hand));
-            } else {
-                std::map<Key, PeerBuild>::iterator pb = peerBuilds_.find(wk);
-                if (pb == peerBuilds_.end() || pb->second.minted != 1 ||
-                    pb->second.removed)
-                    continue; // unknown / refused / tombstoned key
-                memcpy(hand, pb->second.localHand, sizeof(hand));
-            }
+            if (!localHandForBuildKey(wk, hand)) continue;
         }
         engine::ProdRead cur;
         if (!engine::readMachineByHand(hand, &cur))
             continue; // out-of-interest / not resolvable here - accepted edge
         if (!cur.complete)
             continue; // still a construction site here; protocol 27 will finish it
+        if (!ctx.isHost) { pr.knownPower = p.powerOn; pr.sent = true; }
         // Apply only what actually diverged, through the engine's own levers.
         int wantPower = -1;
         if (p.powerOn >= 0 && cur.powerOn >= 0 && (int)p.powerOn != cur.powerOn)
             wantPower = (int)p.powerOn;
         float outWant = -1.0f;
-        if (p.outAmount >= 0.0f &&
+        if (!ctx.isHost && p.outAmount >= 0.0f &&
             qProd(p.outAmount) != qProd(cur.outAmount >= 0.0f ? cur.outAmount : 0.0f))
             outWant = p.outAmount;
         float inWant[2] = { -1.0f, -1.0f };
         for (unsigned int k = 0; k < 2; ++k)
-            if (p.inAmount[k] >= 0.0f && (int)k < cur.nInputs &&
+            if (!ctx.isHost && p.inAmount[k] >= 0.0f && (int)k < cur.nInputs &&
                 qProd(p.inAmount[k]) != qProd(cur.inAmount[k]))
                 inWant[k] = p.inAmount[k];
         float farmWant[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
-        if (p.grown >= 0.0f && qProd(p.grown) != qProd(cur.grown))
+        if (!ctx.isHost && p.grown >= 0.0f && qProd(p.grown) != qProd(cur.grown))
             farmWant[0] = p.grown;
-        if (p.died >= 0.0f && qProd(p.died) != qProd(cur.died))
+        if (!ctx.isHost && p.died >= 0.0f && qProd(p.died) != qProd(cur.died))
             farmWant[1] = p.died;
-        if (p.growStart >= 0.0f && qProd(p.growStart) != qProd(cur.growStart))
+        if (!ctx.isHost && p.growStart >= 0.0f && qProd(p.growStart) != qProd(cur.growStart))
             farmWant[2] = p.growStart;
-        if (p.harvested >= 0.0f && qProd(p.harvested) != qProd((float)cur.harvested))
+        if (!ctx.isHost && p.harvested >= 0.0f && qProd(p.harvested) != qProd((float)cur.harvested))
             farmWant[3] = p.harvested;
         bool needIn   = (inWant[0] >= 0.0f) || (inWant[1] >= 0.0f);
         bool needFarm = farmWant[0] >= 0.0f || farmWant[1] >= 0.0f ||
@@ -1066,6 +1062,7 @@ void Replicator::applyProd(const SyncContext& ctx) {
                                              /*useSetItem*/false,
                                              needIn ? inWant : 0,
                                              needFarm ? farmWant : 0, &after);
+        if (ctx.isHost && wantPower >= 0 && ok) { pr.sent = false; pr.lastSendMs = 0; }
         char b[256];
         _snprintf(b, sizeof(b) - 1,
                   "[prod] RECV key=%u.%u.%u.%u.%u kind=%u pwr=%d->%d "
@@ -1080,7 +1077,7 @@ void Replicator::applyProd(const SyncContext& ctx) {
 
 void Replicator::publishResearch(const SyncContext& ctx) {
     GameWorld* gw = ctx.gw; NetLink& net = *ctx.net; u32 ownerId = ctx.localId;
-    if (!researchSync_) return;
+    if (!researchSync_ || (!ctx.isHost && !ownersAttached_)) return;
     const unsigned long SAMPLE_MS = tuning_.researchSampleMs; // unlocks are rare; 1 Hz is plenty
     const unsigned long RESEND_MS = tuning_.researchResendMs; // lost-row / late-prereq corrector
     unsigned long now = nowMs();
@@ -1099,6 +1096,7 @@ void Replicator::publishResearch(const SyncContext& ctx) {
         bool first  = !rr.sent;
         // Known-set membership is monotonic (no value to diff): send on first
         // sight then resend periodically. No silent seed -> resendUnsent=true.
+        if (!ctx.isHost && rr.applied) continue;
         if (!sync::gateShouldSend(/*changed*/ false, now, rr.lastSendMs,
                                   /*minSendMs*/ 0, RESEND_MS, /*resendUnsent*/ true))
             continue;
@@ -1135,6 +1133,7 @@ void Replicator::applyResearch(const SyncContext& ctx) {
         ResearchRow& rr = researchRows_[std::string(sid)];
         if (!sync::gateSeqAcceptFrom(rr.seqSeen, p.ownerId, p.seq))
             continue; // stale/dup row (per sender, protocol 49)
+        if (!ctx.isHost) { rr.sent = true; rr.lastSendMs = nowMs(); }
         if (rr.applied) continue; // landed earlier; resends are no-ops
         int known = -1, can = -1;
         int rc = engine::researchQueryBySid(gw, sid, &known, &can);
@@ -1292,8 +1291,7 @@ void Replicator::applyDeeds(const SyncContext& ctx) {
         Key k; k.t = p.hand[0]; k.c = p.hand[1]; k.cs = p.hand[2];
         k.i = p.hand[3]; k.s = p.hand[4];
         DeedRow& dr = deedRows_[k];
-        if (!sync::gateSeqAccept(dr.seqSeen, p.seq)) continue; // stale/dup row
-        dr.seqSeen = p.seq;
+        if (!sync::gateSeqAcceptFrom(dr.seqSeen, p.ownerId, p.seq)) continue;
         int want = p.owned ? 1 : 0;
         if (dr.applied && dr.knownOwned == want) continue; // converged; resend no-op
         engine::DeedRead cur;
@@ -1394,8 +1392,7 @@ void Replicator::applyFixtures(const SyncContext& ctx) {
         Key k; k.t = p.hand[0]; k.c = p.hand[1]; k.cs = p.hand[2];
         k.i = p.hand[3]; k.s = p.hand[4];
         FixtureRow& fr = fixtureMap_[k];
-        if (!sync::gateSeqAccept(fr.seqSeen, p.seq)) continue; // stale/dup row
-        fr.seqSeen = p.seq;
+        if (!sync::gateSeqAcceptFrom(fr.seqSeen, p.ownerId, p.seq)) continue;
         if (fr.resolved) continue; // identity is permanent; resends are no-ops
 
         // Save-baked machines DO cross by hand, and those rows are the majority
@@ -1485,9 +1482,11 @@ bool Replicator::localHandForFixtureKey(const Key& wire, unsigned int out[5]) co
 // peer resolves nothing, parks the builder, and the body just jitters under the
 // position drive with no construction animation.
 bool Replicator::buildKeyForLocalHand(const Key& local, Key& outWire) const {
-    // A site WE placed already IS the key - nothing to rewrite.
+    // 自己放置的建筑也翻译到含稳定身份的独立键空间。
     if (ownBuilds_.find(local) != ownBuilds_.end()) {
-        outWire = local;
+        const BuildPlacePacket& ann = ownBuilds_.find(local)->second.ann;
+        outWire.t = ann.key[0]; outWire.c = ann.key[1]; outWire.cs = ann.key[2];
+        outWire.i = ann.key[3]; outWire.s = ann.key[4];
         return true;
     }
     // A site we MINTED for the peer's placement: express it as the placer's key.
@@ -1501,11 +1500,12 @@ bool Replicator::buildKeyForLocalHand(const Key& local, Key& outWire) const {
 
 bool Replicator::localHandForBuildKey(const Key& wire, unsigned int out[5]) const {
     if (!out) return false;
-    std::map<Key, OwnBuild>::const_iterator ob = ownBuilds_.find(wire);
-    if (ob != ownBuilds_.end()) {
+    for (std::map<Key, OwnBuild>::const_iterator ob = ownBuilds_.begin(); ob != ownBuilds_.end(); ++ob) {
+        const BuildPlacePacket& ann = ob->second.ann;
+        if (ann.key[0] != wire.t || ann.key[1] != wire.c || ann.key[2] != wire.cs ||
+            ann.key[3] != wire.i || ann.key[4] != wire.s) continue;
         if (ob->second.removed) return false;
-        memcpy(out, ob->second.hand, sizeof(unsigned int) * 5);
-        return true;
+        memcpy(out, ob->second.hand, sizeof(unsigned int) * 5); return true;
     }
     std::map<Key, PeerBuild>::const_iterator pb = peerBuilds_.find(wire);
     if (pb != peerBuilds_.end() && pb->second.minted == 1 && !pb->second.removed) {
@@ -1536,6 +1536,14 @@ void Replicator::publishBuilds(const SyncContext& ctx) {
         pkt.ownerId = ownerId;
         pkt.seq     = buildSeqOut_++;
         for (unsigned int h = 0; h < 5; ++h) pkt.key[h] = e.hand[h];
+        // 1004：运行时建筑键按稳定身份隔离，避免不同加入者的本地手把碰撞。
+        if (!buildKeySerial_) {
+            FILETIME time; GetSystemTimeAsFileTime(&time);
+            buildKeySerial_ = ((u64)time.dwHighDateTime << 32) | time.dwLowDateTime;
+        }
+        ++buildKeySerial_;
+        pkt.key[1] = (u32)playerIdentity_; pkt.key[2] = (u32)(playerIdentity_ >> 32);
+        pkt.key[3] = (u32)buildKeySerial_; pkt.key[4] = (u32)(buildKeySerial_ >> 32);
         strncpy(pkt.sid, e.sid, sizeof(pkt.sid) - 1);
         pkt.sid[sizeof(pkt.sid) - 1] = '\0';
         pkt.x = e.x; pkt.y = e.y; pkt.z = e.z; pkt.yaw = e.yaw;
@@ -1572,7 +1580,7 @@ void Replicator::publishBuilds(const SyncContext& ctx) {
         pkt.type    = (u8)PKT_BUILD_REMOVE;
         pkt.ownerId = ownerId;
         pkt.seq     = buildSeqOut_++;
-        for (unsigned int h = 0; h < 5; ++h) pkt.key[h] = rmEdges[i][h];
+        for (unsigned int h = 0; h < 5; ++h) pkt.key[h] = f->second.ann.key[h];
         net.queueBuildRemove(pkt);
         char b[160];
         _snprintf(b, sizeof(b) - 1,
@@ -1612,7 +1620,7 @@ void Replicator::publishBuilds(const SyncContext& ctx) {
         pkt.type     = (u8)PKT_BUILD_STATE;
         pkt.ownerId  = ownerId;
         pkt.seq      = buildSeqOut_++;
-        for (unsigned int h = 0; h < 5; ++h) pkt.key[h] = ob.hand[h];
+        for (unsigned int h = 0; h < 5; ++h) pkt.key[h] = ob.ann.key[h];
         pkt.progress = cur.progress;
         pkt.complete = (u8)(cur.complete ? 1 : 0);
         net.queueBuildState(pkt);
@@ -1646,6 +1654,7 @@ void Replicator::applyBuilds(const SyncContext& ctx) {
         if (peerBuilds_.find(k) != peerBuilds_.end())
             continue; // already minted (or mint already refused) - dedupe
         PeerBuild& pb = peerBuilds_[k];
+        pb.ann = p;
         // Mint INCOMPLETE always: the placer's STATE rows drive progress from
         // here (a real UI placement starts at 0 anyway).
         int rc = engine::placeBuildingAt(gw, p.sid, p.x, p.y, p.z, p.yaw,
@@ -1680,6 +1689,7 @@ void Replicator::applyBuilds(const SyncContext& ctx) {
         if (pb.removed) continue; // tombstoned (REMOVE already applied)
         if (!sync::gateSeqAcceptFrom(pb.seqSeen, p.ownerId, p.seq))
             continue; // stale/dup row (per sender, protocol 49)
+        pb.state = p; pb.haveState = true;
         engine::BuildRead cur;
         if (engine::readBuildingByHand(pb.localHand, &cur)) {
             float d = cur.progress - p.progress;
@@ -1761,8 +1771,8 @@ void Replicator::driveSampledChannels(const SyncContext& ctx) {
         // Ahead of prod deliberately: prod rows resolve THROUGH the fixture map,
         // so a pairing that arrives this tick is usable by the very next row.
         { &Replicator::fixtureSync_,  0,                     &Replicator::publishFixtures,   &Replicator::applyFixtures,   false },
-        { &Replicator::prodSync_,     0,                     &Replicator::publishProd,       &Replicator::applyProd,       true  },
-        { &Replicator::researchSync_, 0,                     &Replicator::publishResearch,   &Replicator::applyResearch,   true  },
+        { &Replicator::prodSync_,     0,                     &Replicator::publishProd,       &Replicator::applyProd,       false },
+        { &Replicator::researchSync_, 0,                     &Replicator::publishResearch,   &Replicator::applyResearch,   false },
         { &Replicator::deedSync_,     0,                     &Replicator::publishDeeds,      &Replicator::applyDeeds,      false }
     };
     const int n = (int)(sizeof(kCh) / sizeof(kCh[0]));
@@ -1799,7 +1809,7 @@ void Replicator::onPeerConnected(NetLink& net, u32 ownerId) {
                 pkt.type    = (u8)PKT_BUILD_REMOVE;
                 pkt.ownerId = ownerId;
                 pkt.seq     = buildSeqOut_++;
-                for (unsigned int h = 0; h < 5; ++h) pkt.key[h] = ob.hand[h];
+                for (unsigned int h = 0; h < 5; ++h) pkt.key[h] = ob.ann.key[h];
                 net.queueBuildRemove(pkt);
                 ++nRemove;
             } else {
@@ -1815,6 +1825,14 @@ void Replicator::onPeerConnected(NetLink& net, u32 ownerId) {
                 ob.lastSendMs = 0;
                 ++nPlace;
             }
+        }
+    }
+
+    if (isHostRole() && buildSync_) {
+        for (std::map<Key, PeerBuild>::const_iterator p = peerBuilds_.begin(); p != peerBuilds_.end(); ++p) {
+            if (p->second.removed) continue;
+            net.queueBuildPlace(p->second.ann);
+            if (p->second.haveState) net.queueBuildState(p->second.state);
         }
     }
 
@@ -1885,12 +1903,13 @@ void Replicator::publishBuildDoors(const SyncContext& ctx) {
         std::map<Key, OwnBuild>::iterator oit = ownBuilds_.begin();
         std::map<Key, PeerBuild>::iterator pit = peerBuilds_.begin();
         for (;;) {
-            const Key* wireKey = 0;
+            Key ownWire; const Key* wireKey = 0;
             const unsigned int* localHand = 0;
             if (pass == 0) {
                 if (oit == ownBuilds_.end()) break;
                 if (oit->second.removed) { ++oit; continue; }
-                wireKey = &oit->first; localHand = oit->second.hand; ++oit;
+                if (!buildKeyForLocalHand(oit->first, ownWire)) { ++oit; continue; }
+                wireKey = &ownWire; localHand = oit->second.hand; ++oit;
             } else {
                 if (pit == peerBuilds_.end()) break;
                 if (!pit->second.minted || pit->second.removed) { ++pit; continue; }
@@ -1954,15 +1973,8 @@ void Replicator::applyBuildDoors(const SyncContext& ctx) {
         k.i = p.bkey[3]; k.s = p.bkey[4];
         // Resolve the key to the LOCAL building: our own placement (the peer
         // moved a door on OUR building's proxy) or a minted proxy of theirs.
-        const unsigned int* localHand = 0;
-        std::map<Key, OwnBuild>::iterator oit = ownBuilds_.find(k);
-        if (oit != ownBuilds_.end() && !oit->second.removed) {
-            localHand = oit->second.hand;
-        } else {
-            std::map<Key, PeerBuild>::iterator pit = peerBuilds_.find(k);
-            if (pit != peerBuilds_.end() && pit->second.minted && !pit->second.removed)
-                localHand = pit->second.localHand;
-        }
+        unsigned int resolved[5];
+        const unsigned int* localHand = localHandForBuildKey(k, resolved) ? resolved : 0;
         BdoorRow& row = bdoorRows_[std::make_pair(k, (int)p.doorIndex)];
         if (!sync::gateSeqAcceptFrom(row.seqSeen, p.ownerId, p.seq))
             continue; // stale/dup row (per sender, protocol 49)

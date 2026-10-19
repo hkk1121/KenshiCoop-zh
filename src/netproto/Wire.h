@@ -157,6 +157,7 @@ struct OwnerRow {
     u64 playerId;
     u32 sourceContainer;
     u32 sourceSerial;
+    u8 sourceActive; // 创建者尚未载入主机存档时使用源标签，瞬态字段不写附加文件
 };
 
 struct OwnersHeader {

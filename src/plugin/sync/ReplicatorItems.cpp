@@ -138,16 +138,11 @@ void Replicator::publishInventories(GameWorld* gw, NetLink& net, u32 ownerId) {
         // the reverse map). Characters / baked containers stay raw (kind 0).
         u8 keyKind = 0;
         u32 wireKey[5] = { it->t, it->c, it->cs, it->i, it->s };
-        if (ownBuilds_.find(*it) != ownBuilds_.end()) {
+        Key translated;
+        if (buildKeyForLocalHand(*it, translated)) {
             keyKind = 1;
-        } else {
-            std::map<Key, Key>::iterator mit = mintByLocal_.find(*it);
-            if (mit != mintByLocal_.end()) {
-                keyKind = 1;
-                wireKey[0] = mit->second.t; wireKey[1] = mit->second.c;
-                wireKey[2] = mit->second.cs; wireKey[3] = mit->second.i;
-                wireKey[4] = mit->second.s;
-            }
+            wireKey[0] = translated.t; wireKey[1] = translated.c; wireKey[2] = translated.cs;
+            wireKey[3] = translated.i; wireKey[4] = translated.s;
         }
         u8 sflags = trunc ? INV_FLAG_TRUNCATED : (u8)0;
         net.queueInvSnapshot(ownerId, keyKind, wireKey, items, n, sflags);

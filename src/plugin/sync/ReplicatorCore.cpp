@@ -85,7 +85,7 @@ Replicator::Replicator()
       claimSendMs_(0), claimAssertMs_(0), claimMapMs_(0),
       facSeqOut_(1), facSampleMs_(0), factionSync_(true),
       doorSeqOut_(1), doorSampleMs_(0), doorSync_(true),
-      buildSeqOut_(1), buildSampleMs_(0), buildSync_(true),
+      buildKeySerial_(0), buildSeqOut_(1), buildSampleMs_(0), buildSync_(true),
       bdoorSeqOut_(1), bdoorSampleMs_(0), bdoorSync_(true),
       hungerSync_(true),
       prodSeqOut_(1), prodSampleMs_(0), prodSync_(true),
@@ -421,6 +421,15 @@ void Replicator::clearOwnerReplicationState(GameWorld* gw, u32 ownerId) {
         else ++ri;
     }
     peerBodyOwnerCounts_.erase(ownerId);
+    // 连接编号可能复用，新进程的低序号不能被上一位玩家留下的门槛拒绝。
+    for (std::map<std::string, FacRow>::iterator r = facRows_.begin(); r != facRows_.end(); ++r) r->second.seqSeen.erase(ownerId);
+    for (std::map<Key, DoorRow>::iterator r = doorRows_.begin(); r != doorRows_.end(); ++r) r->second.seqSeen.erase(ownerId);
+    for (std::map<Key, PeerBuild>::iterator r = peerBuilds_.begin(); r != peerBuilds_.end(); ++r) r->second.seqSeen.erase(ownerId);
+    for (std::map<std::pair<Key, int>, BdoorRow>::iterator r = bdoorRows_.begin(); r != bdoorRows_.end(); ++r) r->second.seqSeen.erase(ownerId);
+    for (std::map<std::pair<int, Key>, ProdRow>::iterator r = prodRows_.begin(); r != prodRows_.end(); ++r) r->second.seqSeen.erase(ownerId);
+    for (std::map<std::string, ResearchRow>::iterator r = researchRows_.begin(); r != researchRows_.end(); ++r) r->second.seqSeen.erase(ownerId);
+    for (std::map<Key, DeedRow>::iterator r = deedRows_.begin(); r != deedRows_.end(); ++r) r->second.seqSeen.erase(ownerId);
+    for (std::map<Key, FixtureRow>::iterator r = fixtureMap_.begin(); r != fixtureMap_.end(); ++r) r->second.seqSeen.erase(ownerId);
 
     // ONE owner left a session that continues for everyone else (protocol 49).
     // Surgical teardown of exactly its authored state; everything shared and
@@ -579,21 +588,9 @@ void Replicator::ingestInv(Inbound& in) {
         // landed yet / refused / tombstoned) is dropped - the sender's 5 s
         // safety resend re-delivers once the mint exists.
         if (it->keyKind == 1) {
-            std::map<Key, OwnBuild>::iterator ob = ownBuilds_.find(k);
-            if (ob != ownBuilds_.end()) {
-                if (ob->second.removed) continue;
-                k.t = ob->second.hand[0]; k.c = ob->second.hand[1];
-                k.cs = ob->second.hand[2]; k.i = ob->second.hand[3];
-                k.s = ob->second.hand[4];
-            } else {
-                std::map<Key, PeerBuild>::iterator pb = peerBuilds_.find(k);
-                if (pb == peerBuilds_.end() || pb->second.minted != 1 ||
-                    pb->second.removed)
-                    continue;
-                k.t = pb->second.localHand[0]; k.c = pb->second.localHand[1];
-                k.cs = pb->second.localHand[2]; k.i = pb->second.localHand[3];
-                k.s = pb->second.localHand[4];
-            }
+            unsigned int hand[5];
+            if (!localHandForBuildKey(k, hand)) continue;
+            k.t = hand[0]; k.c = hand[1]; k.cs = hand[2]; k.i = hand[3]; k.s = hand[4];
         }
         InvRecv& r = invRecv_[k];
         r.ownerId   = it->ownerId;
@@ -1282,9 +1279,9 @@ Replicator::Tab Replicator::canonicalTab(const Tab& tab, u32 author) const {
     if (author == OWNER_ID_ALL && alias != tabAliases_.end()) return alias->second;
     u64 identity = author == OWNER_ID_ALL ? playerIdentity_ : identityForOwner(author);
     std::map<Tab, OwnerRow>::const_iterator exact = owners_.find(tab);
-    if (exact != owners_.end() && exact->second.playerId == identity) return tab;
+    if (exact != owners_.end() && (exact->second.playerId == identity || (author == OWNER_ID_ALL && ownersAttached_))) return tab;
     for (std::map<Tab, OwnerRow>::const_iterator it = owners_.begin(); it != owners_.end(); ++it)
-        if (it->second.playerId == identity && it->second.sourceContainer == tab.first &&
+        if (it->second.sourceActive && it->second.playerId == identity && it->second.sourceContainer == tab.first &&
             it->second.sourceSerial == tab.second) return it->first;
     return tab;
 }
@@ -1304,7 +1301,7 @@ void Replicator::claimLocalTab(const Tab& tab) {
         OwnerRow value;
         value.container = tab.first; value.containerSerial = tab.second;
         value.playerId = playerIdentity_;
-        value.sourceContainer = tab.first; value.sourceSerial = tab.second;
+        value.sourceContainer = tab.first; value.sourceSerial = tab.second; value.sourceActive = 0;
         owners_[tab] = value; ++ownersRevision_; ownersDirty_ = true;
         pendingOwnerTabs_.erase(tab);
     }
@@ -1314,6 +1311,14 @@ Replicator::Tab Replicator::registerPeerTab(GameWorld* gw, u32 author, const Tab
     u64 identity = identityForOwner(author);
     if (!identity || !isHostRole() || owners_.size() >= OWNERS_MAX) return Tab(0, 0);
     Tab canonical = canonicalTab(source, author);
+    if (foreign) {
+        for (std::map<Tab, OwnerRow>::iterator row = owners_.begin(); row != owners_.end(); ++row)
+            if (row->second.playerId == identity && row->second.sourceContainer == source.first &&
+                row->second.sourceSerial == source.second) {
+                if (!row->second.sourceActive) { row->second.sourceActive = 1; ++ownersRevision_; ownersDirty_ = true; }
+                return row->first;
+            }
+    }
     std::map<Tab, OwnerRow>::const_iterator known = owners_.find(canonical);
     if (known != owners_.end() && (!foreign || known->second.playerId == identity)) return canonical;
     unsigned int created[2] = { 0, 0 };
@@ -1322,7 +1327,7 @@ Replicator::Tab Replicator::registerPeerTab(GameWorld* gw, u32 author, const Tab
     if (owners_.count(canonical)) return Tab(0, 0);
     OwnerRow row;
     row.container = canonical.first; row.containerSerial = canonical.second;
-    row.playerId = identity; row.sourceContainer = source.first; row.sourceSerial = source.second;
+    row.playerId = identity; row.sourceContainer = source.first; row.sourceSerial = source.second; row.sourceActive = 1;
     owners_[canonical] = row; ++ownersRevision_; ownersDirty_ = true;
     char b[192];
     _snprintf(b, sizeof(b) - 1, "[owners] registered player=%llu source=%u,%u tab=%u,%u",
@@ -1434,7 +1439,7 @@ void Replicator::syncOwners(GameWorld* gw, NetLink& net, Inbound& in, bool host)
         bool valid = it->rows.size() <= OWNERS_MAX;
         for (size_t i = 0; valid && i < it->rows.size(); ++i) {
             const OwnerRow& row = it->rows[i]; Tab key(row.container, row.containerSerial);
-            valid = row.playerId != 0 && (key.first | key.second) != 0 && !rows.count(key);
+            valid = row.playerId != 0 && row.sourceActive <= 1 && (key.first | key.second) != 0 && !rows.count(key);
             if (valid) rows[key] = row;
         }
         if (!valid) { coop::logErrLine("[owners] rejected invalid ownership snapshot"); continue; }
@@ -1479,7 +1484,7 @@ void Replicator::syncOwners(GameWorld* gw, NetLink& net, Inbound& in, bool host)
             sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
             for (unsigned int i = 0; i < sorted.size(); ++i) {
                 OwnerRow row; row.container = sorted[i].first; row.containerSerial = sorted[i].second;
-                row.playerId = playerIdentity_; row.sourceContainer = row.container; row.sourceSerial = row.containerSerial;
+                row.playerId = playerIdentity_; row.sourceContainer = row.container; row.sourceSerial = row.containerSerial; row.sourceActive = 0;
                 for (std::map<u64, PeerStatusPacket>::const_iterator p = players_.begin(); p != players_.end(); ++p)
                     if (p->second.present && p->second.ownRank == i && i != 0) { row.playerId = p->first; break; }
                 owners_[sorted[i]] = row;
@@ -1512,7 +1517,9 @@ void Replicator::syncOwners(GameWorld* gw, NetLink& net, Inbound& in, bool host)
             for (size_t c = 0; c < restore.size(); ++c)
                 reassignTab(gw, restore[c], tabOwnerIdentity(restore[c]) == playerIdentity_);
             tabAuth_.clear(); tabReq_.clear(); tabControl_.clear(); tabOutbox_.clear();
-            ++ownersAuthEpoch_; ownersDirty_ = true; continue;
+            for (std::map<Tab, OwnerRow>::iterator row = owners_.begin(); row != owners_.end(); ++row)
+                if (it->worldId == ownersWorld_ && row->second.playerId == identityForOwner(it->ownerId)) row->second.sourceActive = 0;
+            ++ownersRevision_; ++ownersAuthEpoch_; ownersDirty_ = true; continue;
         }
         if (it->worldId && it->worldId != ownersWorld_) { ownersDirty_ = true; continue; }
         registerPeerTab(gw, it->ownerId, Tab(it->container, it->containerSerial), it->worldId == 0);
@@ -1536,7 +1543,7 @@ void Replicator::syncOwners(GameWorld* gw, NetLink& net, Inbound& in, bool host)
     } else {
         if (ownersResetPending_ && ownersHaveSnapshot_) {
             OwnerRequestPacket p; memset(&p, 0, sizeof(p));
-            p.type = (u8)PKT_OWNER_REQUEST; p.ownerId = localId_; p.worldId = ownersWorld_;
+            p.type = (u8)PKT_OWNER_REQUEST; p.ownerId = localId_; p.worldId = ownersAttached_ ? ownersWorld_ : 0;
             net.queueOwnerRequest(p); ownersResetPending_ = false;
         }
         unsigned long now = nowMs();

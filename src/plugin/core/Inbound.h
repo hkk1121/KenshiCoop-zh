@@ -439,7 +439,7 @@ public:
         buildPlace_(worldReset_), buildState_(worldReset_),
         buildDoor_(worldReset_),  buildRemove_(worldReset_), stealth_(worldReset_, 512),
         spawnReq_(worldReset_),   spawnInfo_(worldReset_),  camHint_(worldReset_, 64),
-        cellClaim_(worldReset_, 64) {
+        cellClaim_(worldReset_, 64), ownerRequests_(worldReset_) {
         InitializeCriticalSection(&cs_);
     }
     ~Inbound() { DeleteCriticalSection(&cs_); }
@@ -886,7 +886,7 @@ private:
     SessionQ<u32>                  leave_;
     SessionQ<PeerStatusPacket>      peerStatus_;
     SessionQ<InboundOwners>         owners_;
-    SessionQ<OwnerRequestPacket>    ownerRequests_;
+    WorldQ<OwnerRequestPacket>      ownerRequests_;
 
     // WORLD-STATE: describe the current world; auto-cleared on a session reset.
     WorldQ<InboundEntity>          ent_;
