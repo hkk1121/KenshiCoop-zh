@@ -922,6 +922,12 @@ void Replicator::applyEvents(GameWorld* gw, Inbound& in) {
                 rekeyPeerBody(gw, k, nk, "squad");
                 break;
             }
+            case EVT_SQUAD_AUTH: {
+                // 协议 1002（第 2 批）：小队控制授权的申请 / 同意 / 拒绝 / 收回 / 归还。
+                // subject 手把 = 小队标签键（container / containerSerial）。
+                applySquadAuth(gw, ev);
+                break;
+            }
             default: break;
         }
         char b[200]; _snprintf(b, sizeof(b) - 1,
@@ -967,7 +973,7 @@ void Replicator::rekeyPeerBody(GameWorld* gw, const Key& oldK, const Key& newK,
         std::pair<u32, u32> destTab((u32)newK.c, (u32)newK.cs);
         std::map<std::pair<u32, u32>, unsigned int>::const_iterator rit =
             tabRank_.find(destTab);
-        if (rit != tabRank_.end()) destOwned = ownsTab(destTab, rit->second);
+        if (rit != tabRank_.end()) destOwned = ownsTabEffective(destTab, rit->second);
     }
     // The author owns a peer-tab hand even if a local tab census would rank it
     // into a tab we own; but a transfer INTO a tab we own is exactly the control

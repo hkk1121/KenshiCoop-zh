@@ -94,7 +94,8 @@ Replicator::Replicator()
       timeSlew_(1.0f), timeSeqOut_(1), timeSeqSeen_(0),
       timeLastSendMs_(0), timeLastLogMs_(0), timeSlewApplied_(-1.0f),
       platoonT0_(0),
-      lifeSweepMs_(0) {
+      lifeSweepMs_(0),
+      tabReqMs_(0), tabNotice_(0) {
     peerCam_[0] = peerCam_[1] = peerCam_[2] = 0.0f;
 }
 
@@ -294,6 +295,12 @@ void Replicator::resetSession() {
     tabRank_.clear();
     tabOwned_.clear();
     tabsSeeded_ = 0;
+    // 协议 1002：小队控制授权不写存档，断线 / 读档 / 会话重置一律作废（第 2 批）
+    tabAuth_.clear();
+    tabReq_.clear();
+    tabOutbox_.clear();
+    tabReqMs_ = 0;
+    tabNotice_ = 0;
     rekeyedOld_.clear();
     engine::clearSquadRoster();
     probed_.clear();
@@ -682,6 +689,231 @@ void Replicator::logSmoothSummary() {
         dg[sizeof(dg) - 1] = '\0';
         coop::logLine(dg);
     }
+}
+
+// ---- 小队控制授权（协议 1002，第 2 批） ---------------------------------------
+// 归属判定：tabOwned_（decideTabs 的一次性判定）叠加授权表——授权存在时取反（本端把该
+// 标签的发布 / 驱动权交给了对方）。publishOwned / rekeyPeerBody / 拖拽判定三处共用。
+bool Replicator::ownsTabEffective(const std::pair<u32, u32>& tab, unsigned int rank) const {
+    bool owned = ownsTab(tab, rank);
+    std::map<std::pair<u32, u32>, unsigned char>::const_iterator at = tabAuth_.find(tab);
+    if (at != tabAuth_.end() && at->second == 1) owned = !owned;
+    return owned;
+}
+
+// 切换某标签的归属：改判定 + 清挂起状态 + 清掉会压过它的 per-hand pin。
+// 驱动 / 插值缓存、AI 挂起、伤害保护都由 applyTargets 每帧重建，不需要手工清理。
+void Replicator::reassignTab(GameWorld* gw, const std::pair<u32, u32>& tab, bool owned) {
+    tabOwned_[tab] = owned;
+    tabAuth_.erase(tab);
+    tabReq_.erase(tab);
+    // 只扫本帧的小队名单（captureSquad 自带 SEH；本 TU 不接触 GameWorld 内部结构）。
+    static EntityState buf[160]; // 与 publishOwned 的 MAX_PUBLISH 同量级，仅主线程
+    unsigned int members = 0;
+    if (gw) {
+        unsigned int n = engine::captureSquad(gw, false, buf, 160);
+        for (unsigned int i = 0; i < n; ++i) {
+            if (buf[i].hContainer != tab.first ||
+                buf[i].hContainerSerial != tab.second) continue;
+            Key k = keyOf(buf[i]);
+            if (owned) pinPeer_.erase(k);
+            else       pinOwned_.erase(k);
+            ++members;
+        }
+    }
+    char b[160];
+    _snprintf(b, sizeof(b) - 1, "[auth] REASSIGN tab=%u,%u own=%d members=%u",
+              tab.first, tab.second, owned ? 1 : 0, members);
+    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+}
+
+void Replicator::sendSquadAuth(NetLink& net, u32 ownerId, unsigned char kind,
+                               const std::pair<u32, u32>& tab) {
+    EventPacket ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.type    = (u8)PKT_EVENT;
+    ev.event   = EVT_SQUAD_AUTH;
+    ev.ownerId = ownerId;
+    ev.eventId = nextEventId_++;
+    ev.sContainer = tab.first;
+    ev.sContainerSerial = tab.second;
+    ev.arg = (f32)kind;
+    net.queueEvent(ev);
+    char b[160];
+    _snprintf(b, sizeof(b) - 1, "[auth] SEND kind=%u tab=%u,%u",
+              (unsigned)kind, tab.first, tab.second);
+    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+}
+
+// 收到 EVT_SQUAD_AUTH。接收半只改状态（拿不到 NetLink），需要回的消息进 tabOutbox_。
+void Replicator::applySquadAuth(GameWorld* gw, const EventPacket& ev) {
+    if (!squadSync_) return;
+    unsigned char kind = (unsigned char)ev.arg;
+    std::pair<u32, u32> tab((u32)ev.sContainer, (u32)ev.sContainerSerial);
+    if (tab.first == 0 && tab.second == 0) return;
+    unsigned int rank = 0xFFFFFFFFu;
+    std::map<std::pair<u32, u32>, unsigned int>::const_iterator rt = tabRank_.find(tab);
+    if (rt != tabRank_.end()) rank = rt->second;
+    bool mine = ownsTabEffective(tab, rank);
+    char b[192];
+    _snprintf(b, sizeof(b) - 1, "[auth] RECV kind=%u tab=%u,%u mine=%d rank=%u",
+              (unsigned)kind, tab.first, tab.second, mine ? 1 : 0, rank);
+    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    if (kind == 1) {                      // REQUEST：对方申请控制这个标签
+        if (mine) {
+            tabReq_[tab] = 2;
+            tabReqMs_ = nowMs();
+            tabNotice_ = 5;               // 状态栏提示“好友申请控制你的小队”
+        } else {
+            // 该标签不归本端（刚交接完 / 未知标签）：直接拒绝，保持两端状态明确
+            SquadAuthMsg m; m.kind = 3; m.c = tab.first; m.cs = tab.second;
+            tabOutbox_.push_back(m);
+        }
+        return;
+    }
+    if (kind == 2) {                      // GRANT：对方同意，控制权转到本端
+        if (mine) return;                 // 已经拥有（重复投递）：忽略
+        reassignTab(gw, tab, true);
+        tabNotice_ = 3;
+        return;
+    }
+    if (kind == 3) {                      // DENY：申请被拒绝
+        tabReq_.erase(tab);
+        tabNotice_ = 2;
+        return;
+    }
+    if (kind == 4) {                      // REVOKE：对方收回，要求本端停发并确认
+        if (!mine) return;                // 本端本来就不控制它（重复投递）：忽略
+        reassignTab(gw, tab, false);      // 停发
+        SquadAuthMsg m; m.kind = 5; m.c = tab.first; m.cs = tab.second;
+        tabOutbox_.push_back(m);          // 回 RETURN 确认
+        tabNotice_ = 4;
+        return;
+    }
+    if (kind == 5) {                      // RETURN：对方归还 / 收回确认
+        std::map<std::pair<u32, u32>, unsigned char>::iterator at = tabAuth_.find(tab);
+        if (at == tabAuth_.end()) return; // 本端没有授权过它：忽略
+        reassignTab(gw, tab, true);       // 收回生效：本端重新拥有
+        tabNotice_ = 4;
+        return;
+    }
+}
+
+// 每帧调用：发出发件箱，然后处理挂起申请的超时（两端都清，避免状态悬空）。
+void Replicator::squadAuthTick(GameWorld* gw, NetLink& net, u32 ownerId) {
+    (void)gw;
+    if (!squadSync_) return;
+    if (!tabOutbox_.empty()) {
+        std::vector<SquadAuthMsg> out;
+        out.swap(tabOutbox_);
+        for (unsigned int i = 0; i < out.size(); ++i) {
+            std::pair<u32, u32> tab(out[i].c, out[i].cs);
+            sendSquadAuth(net, ownerId, out[i].kind, tab);
+        }
+    }
+    if (!tabReq_.empty()) {
+        unsigned long now = nowMs();
+        if (tabReqMs_ == 0) tabReqMs_ = now;
+        if ((now - tabReqMs_) > (unsigned long)TAB_AUTH_TIMEOUT_MS) {
+            char b[128];
+            _snprintf(b, sizeof(b) - 1, "[auth] TIMEOUT pending=%u",
+                      (unsigned)tabReq_.size());
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            tabReq_.clear();
+            tabReqMs_ = 0;
+            tabNotice_ = 1;
+        }
+    } else {
+        tabReqMs_ = 0;
+    }
+}
+
+// 面板动作：申请控制“不归本端”的每个标签（标准两标签存档下就是对方那一个）。
+void Replicator::requestSquadAuth(NetLink& net, u32 ownerId) {
+    (void)net; (void)ownerId;
+    if (!squadSync_) return;
+    for (std::map<std::pair<u32, u32>, unsigned int>::const_iterator it = tabRank_.begin();
+         it != tabRank_.end(); ++it) {
+        if (ownsTabEffective(it->first, it->second)) continue;
+        if (tabReq_.find(it->first) != tabReq_.end()) continue; // 已有挂起申请
+        tabReq_[it->first] = 1;
+        SquadAuthMsg m; m.kind = 1; m.c = it->first.first; m.cs = it->first.second;
+        tabOutbox_.push_back(m);
+    }
+    tabReqMs_ = nowMs();
+}
+
+// 面板 [同意]：先把本侧停发（归属翻成对方，命令拦截同帧生效），再回 GRANT。
+void Replicator::grantSquadAuth(GameWorld* gw, NetLink& net, u32 ownerId) {
+    (void)net; (void)ownerId;
+    for (std::map<std::pair<u32, u32>, unsigned char>::iterator it = tabReq_.begin();
+         it != tabReq_.end(); ) {
+        if (it->second != 2) { ++it; continue; }
+        std::pair<u32, u32> tab = it->first;
+        tabReq_.erase(it++);
+        reassignTab(gw, tab, false);      // 先停发
+        tabAuth_[tab] = 1;                // 记：控制权已交给对方
+        SquadAuthMsg m; m.kind = 2; m.c = tab.first; m.cs = tab.second;
+        tabOutbox_.push_back(m);
+        tabNotice_ = 3;
+    }
+}
+
+// 面板 [拒绝]：清挂起并回 DENY。
+void Replicator::denySquadAuth(NetLink& net, u32 ownerId) {
+    (void)net; (void)ownerId;
+    for (std::map<std::pair<u32, u32>, unsigned char>::iterator it = tabReq_.begin();
+         it != tabReq_.end(); ) {
+        if (it->second != 2) { ++it; continue; }
+        std::pair<u32, u32> tab = it->first;
+        tabReq_.erase(it++);
+        SquadAuthMsg m; m.kind = 3; m.c = tab.first; m.cs = tab.second;
+        tabOutbox_.push_back(m);
+    }
+}
+
+// 面板 [收回控制权]：发 REVOKE 并记“收回中”；等对方 RETURN 后才真正接管
+// （先停发再接管，避免两端同时发布的窗口，见设计说明第 5 节）。
+void Replicator::revokeSquadAuth(GameWorld* gw, NetLink& net, u32 ownerId) {
+    (void)gw; (void)net; (void)ownerId;
+    for (std::map<std::pair<u32, u32>, unsigned char>::iterator it = tabAuth_.begin();
+         it != tabAuth_.end(); ++it) {
+        tabReq_[it->first] = 3;
+        SquadAuthMsg m; m.kind = 4; m.c = it->first.first; m.cs = it->first.second;
+        tabOutbox_.push_back(m);
+    }
+    tabReqMs_ = nowMs();
+}
+
+int Replicator::squadAuthPendingPeer() const {
+    for (std::map<std::pair<u32, u32>, unsigned char>::const_iterator it = tabReq_.begin();
+         it != tabReq_.end(); ++it)
+        if (it->second == 2) return 1;
+    return 0;
+}
+
+int Replicator::squadAuthGrantedMine() const {
+    return (int)tabAuth_.size();
+}
+
+int Replicator::squadAuthRequesting() const {
+    for (std::map<std::pair<u32, u32>, unsigned char>::const_iterator it = tabReq_.begin();
+         it != tabReq_.end(); ++it)
+        if (it->second == 1 || it->second == 3) return 1;
+    return 0;
+}
+
+bool Replicator::squadAuthHasRequestable() const {
+    for (std::map<std::pair<u32, u32>, unsigned int>::const_iterator it = tabRank_.begin();
+         it != tabRank_.end(); ++it)
+        if (!ownsTabEffective(it->first, it->second)) return true;
+    return false;
+}
+
+unsigned int Replicator::takeSquadAuthNotice() {
+    unsigned int n = tabNotice_;
+    tabNotice_ = 0;
+    return n;
 }
 
 

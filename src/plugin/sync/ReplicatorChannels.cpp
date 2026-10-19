@@ -2081,8 +2081,10 @@ void Replicator::publishSquadMoves(GameWorld* gw, NetLink& net, u32 ownerId) {
                 tabRank_.find(oldTab);
             std::map<std::pair<u32, u32>, unsigned int>::const_iterator nit =
                 tabRank_.find(newTab);
-            bool oldOwned = (oit != tabRank_.end()) ? ownsTab(oldTab, oit->second) : true;
-            bool newOwned = (nit != tabRank_.end()) ? ownsTab(newTab, nit->second) : false;
+            bool oldOwned = (oit != tabRank_.end())
+                                ? ownsTabEffective(oldTab, oit->second) : true;
+            bool newOwned = (nit != tabRank_.end())
+                                ? ownsTabEffective(newTab, nit->second) : false;
             if (!oldOwned && newOwned) {
                 Character* mc = engine::resolveCharByHand(nk.i, nk.s, nk.t, nk.c, nk.cs);
                 if (mc) {

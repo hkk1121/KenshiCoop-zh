@@ -61,7 +61,7 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
         // authored it, or the host. Empty ownRanks_ (never configured) still falls
         // back to the first tab, so a missing setOwnRanks never makes us stream
         // every tab or nothing.
-        bool owned = ownsTab(key, rank);
+        bool owned = ownsTabEffective(key, rank);
         // Ownership pins (protocols 23 + 35): a RECRUIT belongs to its
         // RECRUITER and a MOVED member to its MOVER regardless of which local
         // tab rank the engine parked it in (recruit_probe: a join recruit

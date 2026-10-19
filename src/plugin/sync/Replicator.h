@@ -1,4 +1,4 @@
-// Replicator - the per-tick sync orchestrator.
+﻿// Replicator - the per-tick sync orchestrator.
 //
 // Owns the flow between the engine and the network for replicated entities:
 //   * publishOwned(): capture the locally-owned squad and hand it to the net
@@ -2465,6 +2465,21 @@ public:
         if (it == targets_.end() || it->second.lastSeenMs == 0) return false;
         return (now - it->second.lastSeenMs) <= (unsigned long)PEER_STREAM_FRESH_MS;
     }
+
+    // ---- 小队控制授权（协议 1002，第 2 批）：面板 / 主循环用的公开入口 ----------
+    // 每帧调用：发出发件箱（申请 / 同意 / 拒绝 / 收回 / 归还）+ 挂起申请超时清理。
+    void squadAuthTick(GameWorld* gw, NetLink& net, u32 ownerId);
+    // 面板动作（申请 / 同意 / 拒绝 / 收回）。
+    void requestSquadAuth(NetLink& net, u32 ownerId);
+    void grantSquadAuth(GameWorld* gw, NetLink& net, u32 ownerId);
+    void denySquadAuth(NetLink& net, u32 ownerId);
+    void revokeSquadAuth(GameWorld* gw, NetLink& net, u32 ownerId);
+    // 面板状态查询。
+    int  squadAuthPendingPeer() const;    // 1 = 有对方申请待处理（要 [同意]/[拒绝]）
+    int  squadAuthGrantedMine() const;    // 本端已授权出去的标签数（可 [收回]）
+    int  squadAuthRequesting() const;     // 1 = 本端申请中 / 正在收回
+    bool squadAuthHasRequestable() const; // 是否存在不归本端的标签（可申请）
+    unsigned int takeSquadAuthNotice();   // 一次性提示码（见 applySquadAuth 注释）
 private:
     // Recompute claimedCells_ from claimSlots_. Host wins a contested cell.
     void rebuildClaimedCells();
@@ -2661,6 +2676,30 @@ private:
     unsigned long        trustLogTick_;
     unsigned long        trustGrants_;   // trusted-mode entries this run
     unsigned long        trustRevokes_;  // trusted-mode exits (divergence/drift)
+
+    // ---- 小队控制授权（协议 1002，第 2 批） ------------------------------------
+    // 归属 = 小队标签（container, containerSerial；两端加载同一份存档，键一致）。
+    // tabAuth_：本端已把控制权交给对方的标签（值 1 = 已授权）。tabReq_：挂起的申请，
+    // 值 1 = 本端申请中，2 = 对方申请中（等面板 [同意]/[拒绝]），3 = 本端正在收回
+    // （已发 REVOKE，等对方 RETURN）。tabOutbox_ 是接收半与面板动作攒下的待发消息
+    // （接收半拿不到 NetLink，统一由 squadAuthTick 发出）。
+    std::map<std::pair<u32, u32>, unsigned char> tabAuth_;
+    std::map<std::pair<u32, u32>, unsigned char> tabReq_;
+    struct SquadAuthMsg { unsigned char kind; u32 c; u32 cs; };
+    std::vector<SquadAuthMsg> tabOutbox_;
+    unsigned long tabReqMs_;  // 挂起申请的时间戳（超时清理用）
+    unsigned int  tabNotice_; // 供 UI 取用的一次性提示（0 = 无）
+    // 归属判定：tabOwned_ 与授权表的合成。publishOwned / rekeyPeerBody / 拖拽判定
+    // 三处共用它，保证口径一致（rank 由调用方从 tabRank_ 取，未 latch 时传 0xFFFFFFFF）。
+    bool ownsTabEffective(const std::pair<u32, u32>& tab, unsigned int rank) const;
+    // 切换某标签的归属并清掉会压过它的 per-hand pin（见设计说明 4.3）。
+    void reassignTab(GameWorld* gw, const std::pair<u32, u32>& tab, bool owned);
+    // 发一条授权事件（唯一出口）。
+    void sendSquadAuth(NetLink& net, u32 ownerId, unsigned char kind,
+                       const std::pair<u32, u32>& tab);
+    // 收到 EVT_SQUAD_AUTH（接收半只改状态，发送走 tabOutbox_）。
+    void applySquadAuth(GameWorld* gw, const EventPacket& ev);
+    enum { TAB_AUTH_TIMEOUT_MS = 20000 };
 };
 
 } // namespace coop

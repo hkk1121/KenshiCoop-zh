@@ -1198,6 +1198,10 @@ void tickReplicatePublish(GameWorld* gw, bool worldLive) {
     if (g_cfg.squadSync)
         g_repl.publishSquadMoves(gw, g_net, g_net.localId());
 
+    // 小队控制授权（协议 1002，第 2 批）：发出发件箱（申请 / 同意 / 拒绝 / 收回 / 归还）
+    // 并清理超时的挂起申请。squadSync 关时整体 no-op。
+    g_repl.squadAuthTick(gw, g_net, g_net.localId());
+
     // Change-gated sampled channels (Phase 6c): faction relations (protocol 24),
     // baked doors (26), placed buildings (27), placed-building doors (28),
     // production machines (33), and research (38). Each is a self-contained

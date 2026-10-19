@@ -26,8 +26,9 @@ typedef double         f64;
 // matching entry at the bottom of that doc. The version is checked at handshake
 // and a mismatch is rejected (no back-compat).
 // 本分支（zh-cn-improvements）自有协议号：基于上游 55，加入名字同步与动物年龄同步（上游 PR #28）后
-// 改为 1001 起编号，避开上游后续序列；双方须使用同一改进版，与官方 v0.51 不再互通
-const u16 PROTOCOL_VERSION = 1001;
+// 改为 1001 起编号，避开上游后续序列；1002 加入小队控制授权（EVT_SQUAD_AUTH）；
+// 双方须使用同一改进版，与官方 v0.51 不再互通
+const u16 PROTOCOL_VERSION = 1002;
 
 // Packet type tags (first byte of every packet).
 enum PacketType {
@@ -123,7 +124,13 @@ enum EventType {
     // index/serial do not survive). An all-zero actor = the body LEFT the
     // roster (dismissal). The receiver shares the EVT_RECRUIT re-key path
     // and pins the new hand as peer-owned (rank reshuffle cannot flip it).
-    EVT_SQUAD_MOVE = 11
+    EVT_SQUAD_MOVE = 11,
+    // 小队控制授权（协议 1002，第 2 批）。subject = 小队标签键（sContainer /
+    // sContainerSerial 放标签的 container / containerSerial，其余字段 0）；arg =
+    // 动作：1 = 申请 REQUEST，2 = 同意 GRANT（发送方已停发该标签），3 = 拒绝 DENY，
+    // 4 = 收回 REVOKE（要求对方停发并确认），5 = 归还 / 收回确认 RETURN（发送方已
+    // 停发该标签）。标签键两端一致：两端加载同一份存档，容器手把相同。
+    EVT_SQUAD_AUTH = 12
 };
 
 // Sentinel ownerId meaning "all remote peers" (used on local disconnect to sweep
