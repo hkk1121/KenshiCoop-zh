@@ -29,6 +29,7 @@
 #include "CoopLog.h"
 #include "core/Config.h"
 #include "core/CrashDump.h"
+#include "core/FpsLimit.h"
 #include "core/OwnRanks.h"
 #include "core/Inbound.h"
 #include "net/NetLink.h"
@@ -2371,6 +2372,9 @@ __declspec(dllexport) void startPlugin() {
     installEngineDetours();
 
     installTitleHook();
+
+    // 帧数上限（F2 面板切换），未设置时不限
+    coop::fpslimit::install();
 
     if (g_cfg.testSeconds > 0) {
         char b[96];

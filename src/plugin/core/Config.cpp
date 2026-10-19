@@ -572,4 +572,21 @@ unsigned long long loadLastPeer() {
     return parseSteamId64(text, id) ? id : 0;
 }
 
+void saveFpsLimit(int fps) {
+    std::string p = configFilePath();
+    p = p.substr(0, p.find_last_of("\\/") + 1) + "coop_fps_limit.txt";
+    std::ofstream f(p.c_str(), std::ios::binary | std::ios::trunc);
+    if (!f) return;
+    f << fps << "\n";
+}
+
+int loadFpsLimit() {
+    std::string p = configFilePath();
+    p = p.substr(0, p.find_last_of("\\/") + 1) + "coop_fps_limit.txt";
+    std::ifstream f(p.c_str(), std::ios::binary);
+    int fps = 0;
+    if (!(f >> fps) || fps < 0) return 0;
+    return fps;
+}
+
 } // namespace coop

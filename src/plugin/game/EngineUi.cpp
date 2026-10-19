@@ -25,6 +25,7 @@
 
 #include "../core/SteamId.h" // parseSteamId64 (paste button) + maskSteamId64 (id rows)
 #include "../core/Config.h"  // coop::tr (UI text localization)
+#include "../core/FpsLimit.h" // 帧数上限切换按钮
 
 namespace coop {
 namespace engine {
@@ -255,6 +256,7 @@ DataPanelLine_Button*   g_transBtn     = 0;
 DataPanelLine_Button*   g_connBtn      = 0; // Online/Offline toggle (replaces the checkbox)
 DataPanelLine_Button*   g_copyIdBtn    = 0;
 DataPanelLine_Button*   g_pasteIdBtn   = 0; // "Paste friend's Steam ID" from clipboard
+DataPanelLine_Button*   g_fpsBtn       = 0; // 帧数上限切换
 DataPanelLine*          g_debugLine    = 0; // white connection-status debug row
 DataPanelLine*          g_peerLine     = 0; // white "Friend's Steam ID" row
 DataPanelLine*          g_selfLine     = 0; // white "Your Steam ID" row
@@ -322,6 +324,10 @@ void onPasteIdBtn(DataPanelLine*) {
     }
     g_panel.needsRebuild = true;
 }
+void onFpsBtn(DataPanelLine*) {
+    coop::fpslimit::cycle();
+    g_panel.needsRebuild = true;
+}
 
 // POD-only pointer bundle so the row-build SEH frame constructs no std::string.
 struct PanelStrings {
@@ -330,6 +336,7 @@ struct PanelStrings {
     const std::string *dbgKey, *dbgVal;
     const std::string *peerKey, *peerVal, *pasteKey, *pasteCap;
     const std::string *selfKey, *selfVal, *copyKey, *copyCap;
+    const std::string *fpsKey, *fpsCap;
     const std::string *empty;
 };
 
@@ -350,6 +357,8 @@ void panelBuildSeh(DatapanelGUI* p, const PanelStrings* s) {
         p->addSpace(0, 0.35f);
         g_selfLine = p->setLine(*s->selfKey, *s->selfVal, *s->empty, 0, false, true);
         g_copyIdBtn = p->setLineButton(*s->copyKey, *s->copyCap, 0);
+        p->addSpace(0, 0.35f);
+        g_fpsBtn = p->setLineButton(*s->fpsKey, *s->fpsCap, 0);
         p->_NV_update();
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
@@ -433,7 +442,7 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
             panelDestroySeh(g, g_panel.panel);
             g_panel.panel = 0; g_panel.built = false;
             g_roleBtn = 0; g_transBtn = 0; g_connBtn = 0; g_copyIdBtn = 0;
-            g_pasteIdBtn = 0;
+            g_pasteIdBtn = 0; g_fpsBtn = 0;
             g_debugLine = 0; g_peerLine = 0; g_selfLine = 0;
             g_panel.open = false;
             coop::logLine("[coop-ui] panel closed");
@@ -469,7 +478,7 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
     // and armed but attaches to nothing, so F2 logs open/close yet nothing draws.
     if (!g_panel.panel) {
         std::string layer = "Info";
-        g_panel.panel = g->createDatapanel(0.22f, 0.30f, 0.30f, 0.44f, false, layer, true);
+        g_panel.panel = g->createDatapanel(0.22f, 0.30f, 0.30f, 0.50f, false, layer, true);
         g_panel.built = false;
         if (!g_panel.panel) {
             coop::logErrLine("[coop-ui] createDatapanel FAILED");
@@ -541,6 +550,11 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
                                    : std::string(coop::tr("(Steam not running)"));
         std::string copyKey  = "copyid";
         std::string copyCap  = coop::tr("Copy my Steam ID");
+        std::string fpsKey   = "fps";
+        std::string fpsVal   = coop::fpslimit::current() > 0 ? std::to_string((long long)coop::fpslimit::current())
+                                                             : std::string(coop::tr("Unlimited"));
+        _snprintf(fb, sizeof(fb) - 1, coop::tr("FPS limit: %s    (switch)"), fpsVal.c_str());
+        std::string fpsCap   = fb;
         std::string empty    = "";
 
         PanelStrings ps;
@@ -552,6 +566,7 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         ps.pasteKey = &pasteKey; ps.pasteCap = &pasteCap;
         ps.selfKey = &selfKey; ps.selfVal = &selfVal;
         ps.copyKey = &copyKey; ps.copyCap = &copyCap;
+        ps.fpsKey = &fpsKey; ps.fpsCap = &fpsCap;
         ps.empty = &empty;
         panelBuildSeh(g_panel.panel, &ps);
 
@@ -563,6 +578,7 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         if (g_connBtn)    g_connBtn->callback    = MyGUI::newDelegate(&onConnBtn);
         if (g_copyIdBtn)  g_copyIdBtn->callback  = MyGUI::newDelegate(&onCopyIdBtn);
         if (g_pasteIdBtn) g_pasteIdBtn->callback = MyGUI::newDelegate(&onPasteIdBtn);
+        if (g_fpsBtn)     g_fpsBtn->callback     = MyGUI::newDelegate(&onFpsBtn);
         dbgColourSeh(g_debugLine, !transfer.empty()); // amber while streaming
         dbgColourSeh(g_peerLine, false);
         dbgColourSeh(g_selfLine, false);

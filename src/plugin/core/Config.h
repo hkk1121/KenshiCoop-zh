@@ -628,6 +628,11 @@ const char* tr(const char* en);
 void saveLastPeer(unsigned long long id);
 unsigned long long loadLastPeer();
 
+// 帧数上限（core/FpsLimit）：存于 DLL 旁的 coop_fps_limit.txt，0 = 不限；
+// 文件缺失或内容非法时 loadFpsLimit 返回 0
+void saveFpsLimit(int fps);
+int loadFpsLimit();
+
 } // namespace coop
 
 #endif // KENSHICOOP_CONFIG_H
