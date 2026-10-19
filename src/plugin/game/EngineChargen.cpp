@@ -137,6 +137,19 @@ void characterChoices(GameWorld* gw, std::vector<CharacterChoice>& out) {
                 }
             }
             for (size_t k = 0; k < candidates.size(); ++k) {
+                // 没有显式种族的模板使用引擎默认值；排除只有动物或不可玩种族的伴随模板。
+                const Ogre::vector<GameDataReference>::type* races = candidates[k]->getReferenceListIfExists("race");
+                bool playableTemplate = !races || races->empty();
+                for (size_t r = 0; races && r < races->size() && !playableTemplate; ++r) {
+                    GameData* race = gw->gamedata.getData((*races)[r].sid, RACE);
+                    if (!race) continue;
+                    auto animal = race->bdata.find("animal");
+                    auto playable = race->bdata.find("playable");
+                    RaceData* info = RaceData::getRaceData(race);
+                    playableTemplate = info && info->raceGroup && playable != race->bdata.end() && playable->second &&
+                        (animal == race->bdata.end() || !animal->second);
+                }
+                if (!playableTemplate) continue;
                 if (!seen.insert(std::make_pair(start->stringID, candidates[k]->stringID)).second) continue;
                 CharacterChoice c; c.startSid = start->stringID; c.templateSid = candidates[k]->stringID;
                 c.label = start->name + " / " + candidates[k]->name; out.push_back(c);

@@ -3207,7 +3207,7 @@ void driveCharacterCreation(GameWorld* gw, bool worldLive) {
     if (g_characterChoiceWorld != gw) {
         coop::engine::characterChoices(gw, g_characterChoices); g_characterChoice = 0; g_characterChoiceWorld = gw;
     }
-    g_characterAvailable = g_cfg.saveSync && !g_characterPending && !coop::engine::characterPreview() &&
+    g_characterAvailable = g_cfg.saveSync && g_cfg.loadSync && g_cfg.squadSync && !g_characterPending && !coop::engine::characterPreview() &&
         !g_bootstrapArmed && !coop::savexfer::watching() && !coop::savexfer::sending() && coop::engine::saveMgrSignal(0) == 0 &&
         g_repl.characterConnection(g_net.localId()) && g_repl.canCreateCharacter(gw, g_net.localId());
     if (coop::engine::characterPreview() && (world != g_characterEditWorld ||
@@ -3232,7 +3232,7 @@ void driveCharacterCreation(GameWorld* gw, bool worldLive) {
     }
     if (action == 1 && !g_characterAvailable && !coop::engine::characterPreview()) {
         if (g_characterPending) g_characterStatus = coop::tr("A character creation request is already pending");
-        else if (!g_cfg.saveSync) g_characterStatus = coop::tr("Enable save sync before creating a character");
+        else if (!g_cfg.saveSync || !g_cfg.loadSync || !g_cfg.squadSync) g_characterStatus = coop::tr("Enable save, load and squad sync before creating a character");
         else if (g_bootstrapArmed || coop::savexfer::watching() || coop::savexfer::sending() || coop::engine::saveMgrSignal(0) != 0)
             g_characterStatus = coop::tr("Wait for the current save or transfer to finish");
         else if (!world) g_characterStatus = coop::tr("Load the host save and wait for ownership synchronization");
@@ -3307,7 +3307,7 @@ void driveCharacterCreation(GameWorld* gw, bool worldLive) {
         reply.type = (coop::u8)coop::PKT_CHARACTER_REPLY; reply.targetOwnerId = h.ownerId;
         reply.playerId = h.playerId; reply.worldId = h.worldId; reply.connectionId = h.connectionId; reply.requestId = h.requestId;
         reply.result = coop::CHARACTER_DENIED;
-        if (g_cfg.saveSync && g_characterAppearances.size() < 32 && g_repl.characterRequestCurrent(h) && g_repl.canCreateCharacter(gw, h.ownerId)) {
+        if (g_cfg.saveSync && g_cfg.loadSync && g_cfg.squadSync && g_characterAppearances.size() < 32 && g_repl.characterRequestCurrent(h) && g_repl.canCreateCharacter(gw, h.ownerId)) {
             coop::CharacterDraft decoded;
             reply.result = coop::CHARACTER_INVALID;
             if (!request.data.empty() && coop::decodeCharacterDraft(&request.data[0], (unsigned int)request.data.size(), decoded)) {
