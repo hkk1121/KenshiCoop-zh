@@ -169,6 +169,8 @@ DWORD&       g_loadPumpArmTick  = g_session.loadPumpArmTick;
 std::string  g_loadXferLastName;
 unsigned int g_loadXferRetries  = 0;
 const unsigned int LOAD_XFER_MAX_RETRIES = 2;
+// 好友带自己的角色加入：最近一次对端连上的时间（主机据此只在连上后不久重新推送存档）
+DWORD        g_peerConnectTick  = 0;
 
 // Scenario harness state. Harness/Debug builds only - the shipped Release DLL
 // excludes test/Scenario*.cpp and does not define KENSHICOOP_HARNESS (Phase 1).
@@ -328,6 +330,7 @@ void processNetEvents(GameWorld* gw) {
         if (g_cfg.latejoinSync) g_repl.onPeerConnected(g_net, g_net.localId());
         else coopLog("[latejoin] connect edge seen, resync OFF (gate)");
         g_peerPresent = true;
+        g_peerConnectTick = GetTickCount();
         coop::clearNetUiError(); // 好友已连上，此前的拒绝原因作废
         g_toastText = coop::tr("Peer connected"); g_toastState = 2; g_toastArmMs = GetTickCount();
         // Coordinated save (protocol 31): while connected under save-sync,
@@ -703,8 +706,13 @@ void driveLoadSync(GameWorld* gw) {
         }
 
         // LOAD_GOs: verify our on-disk copy and follow the host.
+        // 刚进入自己新开的游戏时，先把主机的推送压住一会：让自己的角色先传到主机、进到主机
+        // 的存档里（主机会在角色进来后重新推送）。压住期间到的多个推送只处理最新的一个。
+        const DWORD JOIN_GO_HOLD_MS = 10000;
+        bool holdGo = gw && g_gameStarted && (GetTickCount() - g_gameStartTick) < JOIN_GO_HOLD_MS;
         std::deque<coop::InboundLoadGo> gos;
-        g_inbound.drainLoadGos(gos);
+        if (!holdGo) g_inbound.drainLoadGos(gos);
+        while (gos.size() > 1) gos.pop_front();
         for (std::deque<coop::InboundLoadGo>::iterator it = gos.begin();
              it != gos.end(); ++it) {
             if (it->pkt.loadId <= g_loadIdSeen) continue; // stale/duplicate
@@ -1749,6 +1757,8 @@ void mainLoop_hook(GameWorld* gw, float dt) {
 
     // Replication publish (pre-engine, worldLive-gated): ingest received targets,
     // then stream every owned channel so applied state is current this tick.
+    // 联机会话中（网络在运行）对方小队即使对方掉线也保持锁定，纯单人不锁
+    g_repl.setSessionLive(g_net.isRunning());
     tickReplicatePublish(gw, worldLive);
 
     // Coordinated save + load (protocols 31/32): run under g_gameStarted (NOT
@@ -1765,6 +1775,27 @@ void mainLoop_hook(GameWorld* gw, float dt) {
     // 选中限制兜底：收回授权的瞬间 / 不走 objectSelected 的路径，也要保证“选中集合 >1 时
     // 不含对方角色”。worldLive 门控，避免世界切换时碰旧指针。
     if (worldLive) coop::engine::enforcePeerSelection(gw);
+
+    // 好友带自己的角色加入：开局那次推送早于他的角色进来，读档后他会没有角色。他的角色在本端
+    // 铸造成新的小队（判给对方）后，等 2 秒让整队到齐，再重新推送一次存档。每次连接只触发
+    // 一次，避免之后对方招募等情况让好友中途重新读档。
+    if (worldLive && g_cfg.isHost && g_cfg.saveSync && g_peerPresent) {
+        static unsigned int s_seenPeerTabs = 0;
+        static DWORD        s_peerTabTick  = 0;
+        static DWORD        s_repushedFor  = 0;   // 已为哪次连接重推过（g_peerConnectTick）
+        unsigned int nTabs = g_repl.peerBodyTabCount();
+        if (nTabs != s_seenPeerTabs) {
+            s_seenPeerTabs = nTabs;
+            s_peerTabTick = (s_repushedFor != g_peerConnectTick) ? GetTickCount() : 0;
+        }
+        if (s_peerTabTick && GetTickCount() - s_peerTabTick >= 2000 &&
+            !g_bootstrapArmed && !coop::savexfer::sending()) {
+            s_peerTabTick = 0;
+            s_repushedFor = g_peerConnectTick;
+            coopLog("[boot] peer brought its own squad -> re-push save");
+            armConnectPush();
+        }
+    }
 
     // Replication apply (post-engine): our transform is the last word the renderer
     // samples. Re-checks gameplayLive so a swap STARTED by this engine tick skips

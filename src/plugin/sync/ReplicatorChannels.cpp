@@ -2087,9 +2087,10 @@ void Replicator::publishSquadMoves(GameWorld* gw, NetLink& net, u32 ownerId) {
                                 ? ownsTabEffective(newTab, nit->second) : false;
             if (!oldOwned && newOwned) {
                 Character* mc = engine::resolveCharByHand(nk.i, nk.s, nk.t, nk.c, nk.cs);
-                // 只拦对方此刻正在驱动的队员：单人游戏（没有对端流）和双方都不拥有的
-                // 第 3 个以后的小队，本地拖拽照常生效
-                if (mc && peerStreamFresh(ok, nowSq)) {
+                // 只拦对方的队员：对方此刻正在驱动，或联机会话中属于对方小队（对方掉线也算）。
+                // 单人游戏和双方都不拥有的第 3 个以后的小队，本地拖拽照常生效
+                if (mc && (peerStreamFresh(ok, nowSq) ||
+                           (sessionLive_ && peerTabLocked(oldTab)))) {
                     unsigned int oh[5] = { ok.t, ok.c, ok.cs, ok.i, ok.s };
                     unsigned int rh[5] = { 0, 0, 0, 0, 0 };
                     bool reverted = engine::joinPlayerSquadAt(gw, mc, oh);

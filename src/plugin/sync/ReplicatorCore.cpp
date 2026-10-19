@@ -78,6 +78,7 @@ Replicator::Replicator()
       poolSeq_(0), poolAcked_(0),
       moneySync_(true), recruitSync_(true),
       squadSync_(true), tabsSeeded_(0),
+      sessionLive_(false), peerBodyTabs_(0),
       cellAuth_(false), cellCollapse_(false), collapsed_(false),
       claimSendMs_(0), claimAssertMs_(0), claimMapMs_(0),
       facSeqOut_(1), facSampleMs_(0), factionSync_(true),
@@ -506,17 +507,37 @@ void Replicator::decideTabs(const EntityState* raw, unsigned int nSquad,
             // what put them there); capturing the answer HERE is what makes it
             // survive the later EXIT that clears them.
             int verdict = 0;   // +1 ours, -1 peer's, 0 nobody claims it
+            bool peerBody = false;
+            std::vector<Character*> promote;
             for (unsigned int m = 0; m < nSquad; ++m) {
                 if (raw[m].hContainer != ctnrs[i].first ||
                     raw[m].hContainerSerial != ctnrs[i].second) continue;
                 Key k = keyOf(raw[m]);
                 if (pinOwned_.count(k)) { verdict = 1; break; }
                 if (pinPeer_.count(k))  verdict = -1;
+                // 好友带自己的角色加入：对方流里的队员在本端铸造成代理后，引擎为它新建了玩家
+                // 小队标签。铸造的身体只可能来自对方，标签必须判给对方（原先落到
+                // host-fallback，主机把好友的角色当成自己的）。
+                Character* bc = engine::resolveCharByHand(raw[m].hIndex, raw[m].hSerial,
+                                                          raw[m].hType, raw[m].hContainer,
+                                                          raw[m].hContainerSerial);
+                if (bc && mintedBodies_.count(bc)) {
+                    verdict = -1;
+                    peerBody = true;
+                    promote.push_back(bc);
+                }
+            }
+            if (verdict == -1 && peerBody) {
+                // 已成为本端玩家小队成员（会写进存档）：不再当作可丢弃的代理，
+                // 对方掉线时 clearPeerReplicationState 不得销毁它
+                for (size_t p = 0; p < promote.size(); ++p) mintedBodies_.erase(promote[p]);
+                ++peerBodyTabs_;
             }
             owned = (verdict == 1) ? true
                                    : ((verdict == -1) ? false : isHostRole());
             why = (verdict == 1) ? "pin-own"
-                                 : ((verdict == -1) ? "pin-peer" : "host-fallback");
+                                 : ((verdict == -1) ? (peerBody ? "peer-body" : "pin-peer")
+                                                    : "host-fallback");
         }
         tabOwned_[ctnrs[i]] = owned;
         if (!seeding) {
@@ -973,7 +994,20 @@ int Replicator::orderClassForHand(const unsigned int h[5]) const {
     int cls = ownerClassForHand(h);
     if (cls != 2) return cls;
     Key k; k.t = h[0]; k.c = h[1]; k.cs = h[2]; k.i = h[3]; k.s = h[4];
-    return peerStreamFresh(k, nowMs()) ? 2 : 0;
+    if (peerStreamFresh(k, nowMs())) return 2;
+    // 联机会话中对方掉线（流已断）也不放开对方小队的控制：未授权不得操控
+    return (sessionLive_ && peerTabLocked(std::make_pair((u32)h[1], (u32)h[2]))) ? 2 : 0;
+}
+
+bool Replicator::peerTabLocked(const std::pair<u32, u32>& tab) const {
+    std::map<std::pair<u32, u32>, bool>::const_iterator ot = tabOwned_.find(tab);
+    if (ot == tabOwned_.end() || ot->second) return false;
+    std::map<std::pair<u32, u32>, unsigned int>::const_iterator rt = tabRank_.find(tab);
+    if (rt == tabRank_.end()) return false;
+    // 会话中新出现、判给对方的标签（拖入 / 招募 / 好友带进来的角色）
+    if (!rankIsShared(rt->second)) return true;
+    // 存档原有的标签：只有对方的默认标签算对方的（主机看 rank 1，加入方看 rank 0）
+    return rt->second == (isHostRole() ? 1u : 0u);
 }
 
 

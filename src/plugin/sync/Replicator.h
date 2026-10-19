@@ -2481,8 +2481,8 @@ public:
     int  squadAuthRequesting() const;     // 1 = 本端申请中 / 正在收回
     bool squadAuthHasRequestable() const; // 是否存在对方正在控制、可申请的标签
     unsigned int takeSquadAuthNotice();   // 一次性提示码（见 applySquadAuth 注释）
-    // 命令拦截用的分类：在 ownerClassForHand 基础上，只有对方此刻正在驱动（流新鲜）
-    // 才算对方控制（2）。单人游戏、双方都不拥有的小队不拦
+    // 命令拦截用的分类：在 ownerClassForHand 基础上，对方此刻正在驱动（流新鲜），或联机会话中
+    // 属于对方小队（对方掉线也算），才算对方控制（2）。单人游戏、双方都不拥有的小队不拦
     int  orderClassForHand(const unsigned int h[5]) const;
 private:
     // Recompute claimedCells_ from claimSlots_. Host wins a contested cell.
@@ -2706,6 +2706,20 @@ private:
     // 该标签是否正由对方驱动（targets_ 里有该标签成员的新鲜流）。只有这样的标签才能申请
     bool peerDrivesTab(const std::pair<u32, u32>& tab) const;
     enum { TAB_AUTH_TIMEOUT_MS = 20000 };
+
+    // ---- 好友带自己的角色加入 / 掉线期间的控制权 ---------------------------------
+    // sessionLive_：联机会话中（网络在运行）。为真时，对方小队的角色即使对方掉线、流已断
+    // 也不放开控制（未授权不得操控）；纯单人（网络未运行）不受影响。由插件每帧写入。
+    bool         sessionLive_;
+    // 会话中新出现、且因成员是“对方的身体”（铸造的代理 / 正由对方流驱动）而判给对方的
+    // 标签计数（单调递增）。主机据此在好友的角色进来后重新推送存档。
+    unsigned int peerBodyTabs_;
+    // 该标签是否属于对方：不归本端，且是存档原有的“对方默认标签”（主机看 rank 1、加入方看
+    // rank 0），或会话中判给对方的标签。rank 2 以后的原有标签不属于任何一方，不算。
+    bool peerTabLocked(const std::pair<u32, u32>& tab) const;
+public:
+    void setSessionLive(bool v) { sessionLive_ = v; }
+    unsigned int peerBodyTabCount() const { return peerBodyTabs_; }
 };
 
 } // namespace coop
