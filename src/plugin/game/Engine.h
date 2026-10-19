@@ -2224,6 +2224,15 @@ void setOrderGuard(OrderOwnerClassFn fn, OrderBlockedFn blocked);
 // removePermaJobSelectedCharacters）。全部成功才返回 true。
 bool installPlayerOrderGuardHook();
 
+// ---- 未授权时的选中限制（对方角色只能单独选中查看） ---------------------------
+// 安装 3 个选中入口 detour（objectSelected / selectObject / _selectPlayerCharacter）：
+// 框选 / Ctrl+A / Shift 加选会跳过“对方正在驱动”的角色，而单选（地图单击、头像单击、
+// Tab）仍然可以单独选中查看。全部成功才返回 true。
+bool installSelectionGuardHook();
+// 每帧兜底：选中集合 >1 且含“对方正在驱动”的角色时把它们移出（收回授权瞬间、
+// 不走 objectSelected 的路径）。调用方用 worldLive 门控。
+void enforcePeerSelection(GameWorld* gw);
+
 } // namespace engine
 } // namespace coop
 

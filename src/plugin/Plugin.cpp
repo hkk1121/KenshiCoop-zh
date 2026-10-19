@@ -1742,6 +1742,10 @@ void mainLoop_hook(GameWorld* gw, float dt) {
 
     g_mainLoop_orig(gw, dt); // run the engine (incl. local AI)
 
+    // 选中限制兜底：收回授权的瞬间 / 不走 objectSelected 的路径，也要保证“选中集合 >1 时
+    // 不含对方角色”。worldLive 门控，避免世界切换时碰旧指针。
+    if (worldLive) coop::engine::enforcePeerSelection(gw);
+
     // Replication apply (post-engine): our transform is the last word the renderer
     // samples. Re-checks gameplayLive so a swap STARTED by this engine tick skips
     // apply (its caches are now stale; the reset runs next tick's reload edge).
@@ -2269,6 +2273,13 @@ void installEngineDetours() {
         coopLog("[order] player-command guard installed; commands on the peer's squad are blocked");
     else
         coopLog("[order] FAILED to install player-command guard; commands on the peer's squad are NOT blocked");
+
+    // 选中限制（默认 ON）：未授权时对方角色只能单独选中查看——框选 / Ctrl+A / Shift 加选
+    // 都会跳过它们，多选里也不会混进对方角色（命令拦截因此只剩兜底作用）。
+    if (coop::engine::installSelectionGuardHook())
+        coopLog("[select] selection guard installed; peer squad can only be selected alone");
+    else
+        coopLog("[select] FAILED to install selection guard; multi-select may include the peer's squad");
 
     // Phase W1b: query-free ground-drop capture (town reliability). Detour
     // Inventory::dropItem so every drop is discovered without the spatial sphere

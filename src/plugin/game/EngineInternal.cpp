@@ -2461,8 +2461,12 @@ bool readBloodByHand(const unsigned int hand[5], float* outBlood) {
 // work/设计_小队控制授权.md 第 1 节。
 //
 // 归属判定由 Replicator 提供，与跨归属拖拽否决共用同一个分类器：
-//   0 = 不是玩家小队成员（世界 NPC / 容器 / 商人），1 = 本端控制，2 = 对端控制。
-// 选中集合里只要有“对方控制”的角色，整条命令就不执行（混合选择也拦）。
+//   0 = 不是玩家小队成员（世界 NPC / 容器 / 商人），1 = 本端控制，2 = 对端控制
+// （分类器 = Replicator::orderClassForHand：只有“对方此刻正在驱动”才算 2）。
+// 选中集合里只要有“对方控制”的角色，整条命令就不执行。
+// 注意：混合选中现在由后面的“选中限制”（installSelectionGuardHook /
+// enforcePeerSelection）避免——对方角色只能单独被选中——所以这里的整条拦下只是兜底
+// （例如收回授权的瞬间、或引擎自己的非 UI 路径改了选中集合）。
 // 之所以不把对方的角色临时从选中集合里摘掉：PlayerInterface::selectedCharacters 是
 // boost::unordered_set<hand,...>，它的 hash_value(hand) 定制点在游戏自己的 TU 里，
 // 我们无法保证用同一个哈希插入，插入后引擎的查找会失效。只读遍历不需要哈希，安全。
@@ -2621,6 +2625,168 @@ void setOrderGuard(OrderOwnerClassFn fn, OrderBlockedFn blocked) {
     g_orderOwnerClass = fn;
     g_orderBlocked = blocked;
 }
+
+// ---- 未授权时的选中限制（对方角色只能单独选中查看，不能进多选） -----------------
+// 目标：分类器判为“对方正在驱动”（= 2）的角色
+//   * 单选上下文（selectObject / _selectPlayerCharacter 的 modifier==false 路径，引擎自己
+//     先 clearSelection 再 objectSelected）→ 放行，结果就是单独选中它，可查看属性 / 背包；
+//   * 其它加入路径（框选、Ctrl+A、Shift 加选、引擎自己的零散调用）→ 跳过，不加入；
+//   * 加入“自己 / 无主”对象前，先把选中集合里已有的对方角色移出，再加入；
+//   * 每帧兜底 enforcePeerSelection：选中集合 size>1 且含对方角色时把它们移出。
+// 关键约束：绝不自己 insert/erase `selectedCharacters`（它的 hash_value 定制点在游戏自己的
+// TU 里，自建哈希会让引擎查不到元素）。一律调用引擎自己的 objectSelected 原函数来改选中。
+typedef void (__fastcall* ObjectSelectedFn)(PlayerInterface* self, RootObject* obj, bool select);
+typedef void (__fastcall* SelectObjectFn)(PlayerInterface* self, RootObject* obj, bool modifier);
+typedef void (__fastcall* SelectPlayerCharFn)(PlayerInterface* self, RootObject* obj,
+                                              bool modifier, bool track);
+
+static ObjectSelectedFn   g_objectSelectedOrig   = 0;
+static SelectObjectFn     g_selectObjectOrig     = 0;
+static SelectPlayerCharFn g_selectPlayerCharOrig = 0;
+// 单选上下文深度（可嵌套，所以用计数器而不是布尔量；只有主线程会走到这里）。
+static int                g_singleSelectDepth    = 0;
+// 限频日志时间戳（主线程；实测时用来判断框选到底走没走这条路）
+static unsigned long      g_selSkipLogMs         = 0;
+static unsigned long      g_selSweepLogMs        = 0;
+
+// 把选中集合里所有“对方正在驱动”的角色移出（返回移出个数）。
+// 只读遍历选中集合 + 玩家小队名单比对（都在 SEH 内、只用 POD 局部量），改选中一律走
+// objectSelected 的原函数。拿不到世界 / 名单时返回 0（宁可少动，不可乱动）。
+static unsigned int selectSweepPeer(PlayerInterface* self) {
+    if (!self || !g_orderOwnerClass || !g_objectSelectedOrig) return 0;
+    RootObject* victims[64];
+    unsigned int n = 0;
+    __try {
+        if (!ou || !ou->player) return 0;
+        const ogre_unordered_set<hand>::type& sel = self->selectedCharacters;
+        if (sel.empty()) return 0;
+        unsigned int pc = (unsigned int)ou->player->playerCharacters.size();
+        for (unsigned int i = 0; i < pc && n < 64; ++i) {
+            Character* c = ou->player->playerCharacters[i];
+            if (!c) continue;
+            unsigned int mh[5];
+            if (!readObjectHand(reinterpret_cast<RootObject*>(c), mh)) continue;
+            if (g_orderOwnerClass(mh) != 2) continue;
+            // 它在选中集合里吗？（逐个比对 5 元组，只读，不用哈希查找）
+            for (ogre_unordered_set<hand>::type::const_iterator it = sel.begin();
+                 it != sel.end(); ++it) {
+                if ((unsigned int)it->type == mh[0] && it->container == mh[1] &&
+                    it->containerSerial == mh[2] && it->index == mh[3] &&
+                    it->serial == mh[4]) {
+                    victims[n++] = reinterpret_cast<RootObject*>(c);
+                    break;
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    for (unsigned int i = 0; i < n; ++i)
+        g_objectSelectedOrig(self, victims[i], false);
+    return n;
+}
+
+// 加入 / 移出选中对象的公共入口：这里是“多选里混进对方角色”的唯一闸门。
+static void __fastcall objectSelected_hook(PlayerInterface* self, RootObject* obj, bool select) {
+    if (!select || !g_orderOwnerClass || !obj || !g_objectSelectedOrig) {
+        g_objectSelectedOrig(self, obj, select);
+        return;
+    }
+    unsigned int h[5];
+    if (!readObjectHand(obj, h)) {   // 读不到手把：放行（宁可少拦，不可卡死）
+        g_objectSelectedOrig(self, obj, select);
+        return;
+    }
+    if (g_orderOwnerClass(h) == 2) {
+        // 对方正在驱动的角色：只有“单选上下文”允许加入（引擎刚清空过选中集合）
+        if (g_singleSelectDepth > 0) {
+            g_objectSelectedOrig(self, obj, select);
+            return;
+        }
+        unsigned long now = GetTickCount();
+        if ((now - g_selSkipLogMs) >= 1000) {
+            g_selSkipLogMs = now;
+            coop::logLine("[select] skip peer char in multi-select");
+        }
+        if (g_orderBlocked) g_orderBlocked();
+        return;
+    }
+    // 加入的是自己 / 无主的对象：先把已有的对方角色移出（保持“>1 个就不含对方角色”）
+    unsigned int removed = selectSweepPeer(self);
+    if (removed) {
+        unsigned long now = GetTickCount();
+        if ((now - g_selSweepLogMs) >= 1000) {
+            g_selSweepLogMs = now;
+            char b[96];
+            _snprintf(b, sizeof(b) - 1, "[select] sweep removed=%u", removed);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+    }
+    g_objectSelectedOrig(self, obj, select);
+}
+
+// 地图单击 / 头像单击等“先清空再单选”的入口：modifier==false 时进入单选上下文。
+static void __fastcall selectObject_hook(PlayerInterface* self, RootObject* obj, bool modifier) {
+    if (modifier || !g_selectObjectOrig) {
+        if (g_selectObjectOrig) g_selectObjectOrig(self, obj, modifier);
+        return;
+    }
+    ++g_singleSelectDepth;
+    g_selectObjectOrig(self, obj, modifier);
+    --g_singleSelectDepth;
+}
+
+static void __fastcall selectPlayerChar_hook(PlayerInterface* self, RootObject* obj,
+                                             bool modifier, bool track) {
+    if (modifier || !g_selectPlayerCharOrig) {
+        if (g_selectPlayerCharOrig) g_selectPlayerCharOrig(self, obj, modifier, track);
+        return;
+    }
+    ++g_singleSelectDepth;
+    g_selectPlayerCharOrig(self, obj, modifier, track);
+    --g_singleSelectDepth;
+}
+
+// 安装 3 个选中入口 detour。任一失败即整体算失败（缺一个都可能漏掉一条加入路径）。
+bool installSelectionGuardHook() {
+    intptr_t aObjSel = KenshiLib::GetRealAddress(&PlayerInterface::objectSelected);
+    intptr_t aSelObj = KenshiLib::GetRealAddress(&PlayerInterface::selectObject);
+    intptr_t aSelChar = KenshiLib::GetRealAddress(&PlayerInterface::_selectPlayerCharacter);
+    unsigned int ok = 0;
+    if (aObjSel && KenshiLib::AddHook(aObjSel, (void*)&objectSelected_hook,
+                                      (void**)&g_objectSelectedOrig) == KenshiLib::SUCCESS) ++ok;
+    if (aSelObj && KenshiLib::AddHook(aSelObj, (void*)&selectObject_hook,
+                                      (void**)&g_selectObjectOrig) == KenshiLib::SUCCESS) ++ok;
+    if (aSelChar && KenshiLib::AddHook(aSelChar, (void*)&selectPlayerChar_hook,
+                                       (void**)&g_selectPlayerCharOrig) == KenshiLib::SUCCESS) ++ok;
+    char b[96];
+    _snprintf(b, sizeof(b) - 1, "[select] selection guard installed=%u/3", ok);
+    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    return ok == 3;
+}
+
+// 每帧兜底：选中集合 >1 且含“对方正在驱动”的角色时，把它们移出。
+// 覆盖收回授权的瞬间、updatePlayerSelection 之类不走 objectSelected 的路径，以及
+// 我们推断错的框选路径。正常情况下什么都不做（单独选中对方角色是允许的查看态）。
+void enforcePeerSelection(GameWorld* gw) {
+    if (!gw || !g_orderOwnerClass || !g_objectSelectedOrig) return;
+    PlayerInterface* self = 0;
+    unsigned int selSize = 0;
+    __try {
+        self = gw->player;
+        if (self) selSize = (unsigned int)self->selectedCharacters.size();
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    if (!self || selSize <= 1) return;
+    unsigned int removed = selectSweepPeer(self);
+    if (removed) {
+        unsigned long now = GetTickCount();
+        if ((now - g_selSweepLogMs) >= 1000) {
+            g_selSweepLogMs = now;
+            char b[96];
+            _snprintf(b, sizeof(b) - 1, "[select] sweep removed=%u", removed);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+    }
+}
+
 
 } // namespace engine
 } // namespace coop
