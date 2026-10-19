@@ -249,6 +249,8 @@ void (*g_titleUpdate_orig)(TitleScreen*)   = 0;
 // startNetworking() (which coopUiConnect reuses); forward-declared here so
 // mainLoop_hook can hand their addresses to coopPanelTick.
 void startNetworking();
+void coopRecruitOwnSquad(Character* c);
+void coopCreatedSquad(unsigned int container, unsigned int serial);
 void coopUiConnect(bool isHost, bool useSteam, const unsigned long long* peerIds,
                    unsigned int peerCount, unsigned int ownRank);
 void coopUiDisconnect();
@@ -2878,6 +2880,9 @@ void installEngineDetours() {
     // is the A/B escape hatch (squad_probe forces it off to keep the unsynced
     // baseline measurable).
     g_repl.setSquadSync(g_cfg.squadSync);
+    coop::engine::setSquadOwnershipCallbacks(&coopRecruitOwnSquad, &coopCreatedSquad);
+    if (g_cfg.squadSync && !coop::engine::installSquadCreateHook())
+        coopErr("[owners] squad creation hook installation failed");
     g_repl.setFactionSync(g_cfg.factionSync);
     g_repl.setTimeSync(g_cfg.timeSync);
     g_repl.setTimeBrake(g_cfg.timeBrake);
@@ -3089,3 +3094,15 @@ __declspec(dllexport) void startPlugin() {
                 "enter the friend's Steam ID, and check CONNECTED");
     }
 }
+
+
+namespace {
+void coopRecruitOwnSquad(Character* c) {
+    g_repl.placeRecruit(g_lastGw, c);
+}
+
+void coopCreatedSquad(unsigned int container, unsigned int serial) {
+    g_repl.claimLocalTab(std::make_pair((coop::u32)container, (coop::u32)serial));
+}
+
+} // namespace

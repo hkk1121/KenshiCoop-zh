@@ -1801,7 +1801,7 @@ unsigned int listPlayerTabs(GameWorld* gw, unsigned int (*out)[2], unsigned int 
 bool createPlayerSquad(GameWorld* gw, unsigned int out[2]) {
     __try {
         if (!gw || !gw->player || !out) return false;
-        ActivePlatoon* p = gw->player->createSquad();
+        ActivePlatoon* p = g_createSquadOrig ? g_createSquadOrig(gw->player) : gw->player->createSquad();
         if (!p || !p->me) return false;
         const hand& h = p->me->getHandle();
         out[0] = h.container; out[1] = h.containerSerial;

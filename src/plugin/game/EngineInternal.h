@@ -522,6 +522,8 @@ extern bool g_invVetoSuspend;
 extern RecruitFn g_recruitFn;
 extern std::vector<RecruitEdgeRec> g_recruitEdges;
 extern RecruitFn g_recruitHookOrig;
+typedef ActivePlatoon* (__fastcall* CreateSquadFn)(PlayerInterface*);
+extern CreateSquadFn g_createSquadOrig;
 extern std::map<Character*, SquadHandRec> g_squadRoster;
 extern std::vector<SquadMoveEdge> g_squadMoveEdges;
 extern PlayerFactionFn  g_playerFactionFn;

@@ -950,6 +950,9 @@ RecruitFn g_recruitFn = 0;
 // tick and plugin tick share the main thread, so the queue needs no lock.
 std::vector<RecruitEdgeRec> g_recruitEdges;
 RecruitFn g_recruitHookOrig = 0;
+CreateSquadFn g_createSquadOrig = 0;
+static void (*g_recruitOwnership)(Character*) = 0;
+static void (*g_squadCreated)(unsigned int, unsigned int) = 0;
 bool __fastcall recruit_hook(PlayerInterface* self, Character* c, bool editor) {
     unsigned int hb[5] = { 0, 0, 0, 0, 0 };
     bool haveBefore = false;
@@ -958,6 +961,7 @@ bool __fastcall recruit_hook(PlayerInterface* self, Character* c, bool editor) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     bool ok = g_recruitHookOrig(self, c, editor);
     if (ok && haveBefore) {
+        if (!editor && g_recruitOwnership) g_recruitOwnership(c);
         __try {
             RecruitEdgeRec e;
             memcpy(e.before, hb, sizeof(hb));
@@ -2790,6 +2794,27 @@ void enforcePeerSelection(GameWorld* gw) {
     }
 }
 
+
+void setSquadOwnershipCallbacks(void (*recruit)(Character*), void (*created)(unsigned int, unsigned int)) {
+    g_recruitOwnership = recruit; g_squadCreated = created;
+}
+
+static ActivePlatoon* __fastcall createSquad_hook(PlayerInterface* self) {
+    ActivePlatoon* squad = g_createSquadOrig(self);
+    __try {
+        if (g_buildCaptureArmed && g_squadCreated && squad && squad->me && ou && self == ou->player) {
+            const hand& h = squad->me->getHandle();
+            g_squadCreated(h.container, h.containerSerial);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return squad;
+}
+
+bool installSquadCreateHook() {
+    intptr_t addr = KenshiLib::GetRealAddress(&PlayerInterface::createSquad);
+    return addr && KenshiLib::AddHook(addr, (void*)&createSquad_hook,
+                                    (void**)&g_createSquadOrig) == KenshiLib::SUCCESS;
+}
 
 } // namespace engine
 } // namespace coop

@@ -2069,26 +2069,19 @@ void Replicator::publishSquadMoves(GameWorld* gw, NetLink& net, u32 ownerId) {
         // recruit / a re-moved member must not leave a stale claim behind).
         pinOwned_.erase(ok);
         pinPeer_.erase(ok);
-        // 小队控制授权（第 1 批）：本地把“对方控制的队员”拖进自己控制的标签时，不接受
+        // 本地把无控制权的队员拖进任何标签时，都不接受
         // 这次移动——就地回退到原标签，并且不广播 EVT_SQUAD_MOVE（对端收到后一律按“目标
         // 标签归谁”重定归属，本协议无法表达“这次移动无效”）。回退后把对端仍在使用的流键
         // （旧 hand）绑到本地这具身体上（proxyByKey_），否则对端流的旧 hand 在本地解析不到
         // 会铸出重复代理（与 rekeyPeerBody 处理的同类问题）。
         if (!exited && squadSync_ && (spawnSync_ || recruitSync_)) {
             std::pair<u32, u32> oldTab((u32)ok.c, (u32)ok.cs);
-            std::pair<u32, u32> newTab((u32)nk.c, (u32)nk.cs);
-            std::map<std::pair<u32, u32>, unsigned int>::const_iterator oit =
-                tabRank_.find(oldTab);
-            std::map<std::pair<u32, u32>, unsigned int>::const_iterator nit =
-                tabRank_.find(newTab);
-            bool oldOwned = (oit != tabRank_.end())
-                                ? ownsTabEffective(oldTab, oit->second) : true;
-            bool newOwned = (nit != tabRank_.end())
-                                ? ownsTabEffective(newTab, nit->second) : false;
-            if (!oldOwned && newOwned) {
+            std::map<std::pair<u32, u32>, unsigned int>::const_iterator oit = tabRank_.find(oldTab);
+            bool oldOwned = ownsTabEffective(oldTab, oit == tabRank_.end() ? 0xFFFFFFFFu : oit->second);
+            if (!oldOwned) {
                 Character* mc = engine::resolveCharByHand(nk.i, nk.s, nk.t, nk.c, nk.cs);
                 // 只拦对方的队员：对方此刻正在驱动，或联机会话中属于对方小队（对方掉线也算）。
-                // 单人游戏和双方都不拥有的第 3 个以后的小队，本地拖拽照常生效
+                // 离线主人仍受归属表保护，回退继续使用原流键绑定身体
                 if (mc && (peerStreamFresh(ok, nowSq) ||
                            (sessionLive_ && peerTabLocked(oldTab)))) {
                     unsigned int oh[5] = { ok.t, ok.c, ok.cs, ok.i, ok.s };
@@ -2107,7 +2100,8 @@ void Replicator::publishSquadMoves(GameWorld* gw, NetLink& net, u32 ownerId) {
                             Key rk;
                             rk.t = rh[0]; rk.c = rh[1]; rk.cs = rh[2];
                             rk.i = rh[3]; rk.s = rh[4];
-                            pinPeer_[rk] = 0;
+                            pinPeer_[rk] = driverOwnerForTab(oldTab);
+                            tabAliases_[Tab(rk.c, rk.cs)] = canonicalTab(oldTab);
                             moveEcho_[rh[4]] = nowSq;
                         }
                         moveEcho_[nk.s] = nowSq;
@@ -2127,7 +2121,11 @@ void Replicator::publishSquadMoves(GameWorld* gw, NetLink& net, u32 ownerId) {
         // polled from OUR roster is OUR user's action, so the new hand
         // publishes from this side no matter which rank its container latched
         // to (an appended tab inherits our ownership through this pin).
-        if (!exited) pinOwned_.insert(nk);
+        if (!exited) {
+            Tab tab(nk.c, nk.cs); claimLocalTab(tab);
+            if (ownsTabEffective(tab, 0xFFFFFFFFu)) pinOwned_.insert(nk);
+            else pinPeer_[nk] = ownerForIdentity(tabOwnerIdentity(tab));
+        }
         // ...and if it LEFT, retire the hand so the peer's in-flight tail cannot
         // turn our departed body into a driven one (see exitedOwn_).
         else exitedOwn_[ok] = nowSq;

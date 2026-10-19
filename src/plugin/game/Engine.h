@@ -2237,6 +2237,8 @@ bool installSelectionGuardHook();
 // 不走 objectSelected 的路径）。调用方用 worldLive 门控。
 void enforcePeerSelection(GameWorld* gw);
 
+void setSquadOwnershipCallbacks(void (*recruit)(Character*), void (*created)(unsigned int, unsigned int));
+bool installSquadCreateHook();
 unsigned int listPlayerTabs(GameWorld* gw, unsigned int (*out)[2], unsigned int maxOut);
 bool createPlayerSquad(GameWorld* gw, unsigned int out[2]);
 

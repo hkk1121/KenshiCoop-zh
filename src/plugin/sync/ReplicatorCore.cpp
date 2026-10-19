@@ -645,6 +645,8 @@ void Replicator::decideTabs(const EntityState* raw, unsigned int nSquad,
             // The save's own tabs, ranked identically on both clients: the
             // historical rule, so nothing about a normal session changes.
             owned = ownRanks_.empty() ? (rank == 0u) : (ownRanks_.count(rank) != 0);
+            if (!isHostRole() && !owned && !ctnrs.empty() && !ownRanks_.empty() &&
+                *ownRanks_.begin() >= ctnrs.size() && i + 1 == ctnrs.size()) owned = true;
             why = "seed";
         } else {
             // A tab that did not exist at session start. Its rank is a local
@@ -1547,6 +1549,42 @@ void Replicator::syncOwners(GameWorld* gw, NetLink& net, Inbound& in, bool host)
             net.queueOwnerRequest(p); it->second = now;
         }
     }
+}
+
+void Replicator::placeRecruit(GameWorld* gw, Character* c) {
+    if (!sessionLive_ || !squadSync_ || !gw || !c || ownersInvalid_) return;
+    unsigned int current[5] = { 0, 0, 0, 0, 0 };
+    if (!engine::readObjectHand(reinterpret_cast<RootObject*>(c), current)) return;
+    Tab old(current[1], current[2]);
+    unsigned int tabs[OWNERS_MAX][2]; unsigned int n = engine::listPlayerTabs(gw, tabs, OWNERS_MAX);
+    Tab home(0, 0);
+    for (unsigned int i = 0; i < n; ++i) {
+        Tab candidate(tabs[i][0], tabs[i][1]);
+        std::map<Tab, unsigned int>::const_iterator rank = tabRank_.find(candidate);
+        bool own = ownersAttached_ ? (tabOwnerIdentity(candidate) == playerIdentity_ || pendingOwnerTabs_.count(candidate)) :
+            ownsTab(candidate, rank == tabRank_.end() ? 0xFFFFFFFFu : rank->second);
+        if (!own || !ownsTabEffective(candidate, rank == tabRank_.end() ? 0xFFFFFFFFu : rank->second)) continue;
+        home = candidate;
+        if (candidate == old) break;
+    }
+    if (home == old) return;
+    if (!(home.first | home.second)) {
+        unsigned int created[2] = { 0, 0 };
+        if (!engine::createPlayerSquad(gw, created)) {
+            coop::logErrLine("[owners] recruit home squad creation failed"); return;
+        }
+        home = Tab(created[0], created[1]); claimLocalTab(home);
+    }
+    unsigned int target[5] = { current[0], home.first, home.second, current[3], current[4] };
+    bool moved = engine::joinPlayerSquadAt(gw, c, target);
+    if (moved) {
+        moveEcho_[current[4]] = nowMs();
+        unsigned int after[5] = { 0, 0, 0, 0, 0 };
+        if (engine::readObjectHand(reinterpret_cast<RootObject*>(c), after)) moveEcho_[after[4]] = nowMs();
+    }
+    char b[160]; _snprintf(b, sizeof(b) - 1, "[owners] recruit home old=%u,%u target=%u,%u moved=%d",
+                           old.first, old.second, home.first, home.second, moved ? 1 : 0);
+    b[sizeof(b) - 1] = 0; coop::logLine(b);
 }
 
 } // namespace coop
