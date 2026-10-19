@@ -14,6 +14,7 @@
 #include <set>
 #include <vector>
 #include "../../netproto/Wire.h"
+#include "../../netproto/CharacterCreation.h"
 
 namespace coop {
 
@@ -22,6 +23,9 @@ namespace coop {
 // never one we own). sendMs (wire v35) is the sender's monotonic ms clock at
 // capture time - the interp buffer indexes on it (mapped into the local clock)
 // instead of the arrival time, so path jitter stays out of the snapshot spacing.
+struct InboundCharacterRequest { CharacterRequestHeader header; std::vector<u8> data; };
+struct InboundCharacterAppearance { CharacterAppearanceHeader header; std::vector<u8> data; CharacterDraft draft; };
+
 struct InboundEntity {
     u32         ownerId;
     u32         sendMs;
@@ -439,7 +443,8 @@ public:
         buildPlace_(worldReset_), buildState_(worldReset_),
         buildDoor_(worldReset_),  buildRemove_(worldReset_), stealth_(worldReset_, 512),
         spawnReq_(worldReset_),   spawnInfo_(worldReset_),  camHint_(worldReset_, 64),
-        cellClaim_(worldReset_, 64), ownerRequests_(worldReset_) {
+        cellClaim_(worldReset_, 64), ownerRequests_(worldReset_),
+        characterRequests_(worldReset_, 8), characterAppearances_(worldReset_, 32) {
         InitializeCriticalSection(&cs_);
     }
     ~Inbound() { DeleteCriticalSection(&cs_); }
@@ -942,6 +947,10 @@ private:
     SessionQ<InboundLoadReq>       loadReq_;
     SessionQ<InboundLoadNack>      loadNack_;
 
+    WorldQ<InboundCharacterRequest> characterRequests_;
+    WorldQ<InboundCharacterAppearance> characterAppearances_;
+    SessionQ<CharacterReplyPacket> characterReplies_;
+
     Inbound(const Inbound&);
     Inbound& operator=(const Inbound&);
 public:
@@ -965,6 +974,30 @@ public:
     void drainOwnerRequests(std::deque<OwnerRequestPacket>& out) {
         EnterCriticalSection(&cs_); out.swap(ownerRequests_); LeaveCriticalSection(&cs_);
     }
+    void pushCharacterRequest(const CharacterRequestHeader& h, const u8* bytes) {
+        InboundCharacterRequest p; p.header = h; p.data.assign(bytes, bytes + h.bytes);
+        EnterCriticalSection(&cs_); characterRequests_.push_back(p); LeaveCriticalSection(&cs_);
+    }
+    void drainCharacterRequests(std::deque<InboundCharacterRequest>& out) {
+        EnterCriticalSection(&cs_); out.swap(characterRequests_); LeaveCriticalSection(&cs_);
+    }
+    void pushCharacterAppearance(const CharacterAppearanceHeader& h, const u8* bytes) {
+        InboundCharacterAppearance p; p.header = h; p.data.assign(bytes, bytes + h.bytes);
+        EnterCriticalSection(&cs_); characterAppearances_.push_back(p); LeaveCriticalSection(&cs_);
+    }
+    void drainCharacterAppearances(std::deque<InboundCharacterAppearance>& out) {
+        EnterCriticalSection(&cs_); out.swap(characterAppearances_); LeaveCriticalSection(&cs_);
+    }
+    void pushCharacterReply(const CharacterReplyPacket& p) {
+        EnterCriticalSection(&cs_);
+        std::deque<CharacterReplyPacket>& q = characterReplies_;
+        if (q.size() >= 32) q.pop_front();
+        q.push_back(p); LeaveCriticalSection(&cs_);
+    }
+    void drainCharacterReplies(std::deque<CharacterReplyPacket>& out) {
+        EnterCriticalSection(&cs_); out.swap(characterReplies_); LeaveCriticalSection(&cs_);
+    }
+
 };
 
 } // namespace coop

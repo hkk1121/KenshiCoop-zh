@@ -30,7 +30,7 @@ typedef double         f64;
 // 改为 1001 起编号，避开上游后续序列；1002 加入小队控制授权（EVT_SQUAD_AUTH）；
 // 1003 加入多人对端名单与授权目标；1004 加入稳定玩家身份与存档归属表；
 // 双方须使用同一改进版，与官方 v0.51 不再互通
-const u16 PROTOCOL_VERSION = 1004;
+const u16 PROTOCOL_VERSION = 1005;
 
 // Session player cap (four-player first stage): the host + up to three joins.
 // Transport and replication are N-generic; the host enforces this policy limit
@@ -89,6 +89,9 @@ enum PacketType {
     PKT_FIXTURE          = 48,// RELIABLE runtime-fixture identity row (protocol 55); FixturePacket
     PKT_OWNERS           = 50,
     PKT_OWNER_REQUEST    = 51,
+    PKT_CHARACTER_REQUEST = 52,
+    PKT_CHARACTER_REPLY = 53,
+    PKT_CHARACTER_APPEARANCE = 54,
     PKT_PEER_STATUS      = 49 // RELIABLE peer roster edge (host -> joins); PeerStatusPacket
 };
 
@@ -207,6 +210,7 @@ struct PeerStatusPacket {
     u32 ownerId; // the join this row describes (never 0 = the host)
     u32 ownRank; // the squad-tab rank that join claimed at HELLO
     u64 playerId;
+    u32 connectionId;
     char name[64];
 };
 
@@ -1648,6 +1652,31 @@ struct TimePongPacket {
     u32 nonce;        // echoed from the ping
     u32 echoWallMs;   // the ping's senderWallMs, echoed verbatim
     u32 responderWallMs; // host's wallClockMs() at echo
+};
+
+// 创建请求只发给主机；可靠通道由ENet分片，不传引擎指针或容器布局。
+struct CharacterRequestHeader {
+    u8 type;
+    u32 ownerId;
+    u64 playerId, worldId;
+    u32 connectionId, authEpoch, requestId;
+    f32 position[3];
+    u32 bytes;
+};
+enum CharacterResult { CHARACTER_CREATED = 1, CHARACTER_INVALID, CHARACTER_DENIED, CHARACTER_FAILED, CHARACTER_SAVE_FAILED };
+struct CharacterReplyPacket {
+    u8 type;
+    u32 targetOwnerId;
+    u64 playerId, worldId;
+    u32 connectionId, requestId;
+    u8 result;
+    u32 hand[5];
+};
+struct CharacterAppearanceHeader {
+    u8 type;
+    u64 worldId;
+    u32 hand[5];
+    u32 bytes;
 };
 
 #pragma pack(pop)

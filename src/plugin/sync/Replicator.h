@@ -34,6 +34,7 @@ class Character;
 class RootObject;
 
 namespace coop {
+struct CharacterDraft;
 
 class Replicator {
 public:
@@ -2809,6 +2810,14 @@ public:
     bool canCreateCharacter(GameWorld* gw, u32 author) const;
     bool registerCreatedCharacter(u32 author, const unsigned int hand[5]);
     u64 ownershipWorld() const { return ownersAttached_ && !ownersInvalid_ ? ownersWorld_ : 0; }
+    u64 playerIdentity() const { return playerIdentity_; }
+    u32 ownershipEpoch() const { return ownersAuthEpoch_; }
+    u32 characterConnection(u32 owner) const;
+    bool characterRequestCurrent(const CharacterRequestHeader& h) const;
+    bool applyCreatedAppearance(GameWorld* gw, const unsigned int hand[5], const CharacterDraft& draft);
+private:
+    std::map<Key, Character*> createdAppearanceApplied_;
+public:
     const std::map<Tab, OwnerRow>& owners() const { return owners_; }
 };
 

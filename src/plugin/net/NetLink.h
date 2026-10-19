@@ -431,6 +431,11 @@ public:
 private:
     std::vector<InboundOwners> outOwners_;
     std::vector<OwnerRequestPacket> outOwnerRequests_;
+    u32 connectionSequence_;
+    struct OutCharacter { u32 targetId, epoch; std::vector<u8> data; };
+    std::vector<OutCharacter> outCharacter_;
+public:
+    void queueCharacterPacket(u32 target, const std::vector<u8>& data);
 };
 
 } // namespace coop

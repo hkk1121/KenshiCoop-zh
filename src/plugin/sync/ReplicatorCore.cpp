@@ -193,7 +193,7 @@ void Replicator::resetSession() {
     canonicalOf_.clear();      // capture-translation reverse map (same pointers)
     rekeyLogged_.clear();      // and the change-detector for its [rekey] line
     jailObs_.clear();          // jail-observe spike per-captive last sample
-    proxyByKey_.clear();
+    proxyByKey_.clear(); createdAppearanceApplied_.clear();
     mintedBodies_.clear();     // 与 proxyByKey_ 同为旧世界指针，读档后失效
     suppressed_.clear();
     midBand_.clear();          // host mid-band round-robin (rebuilt by next census)
@@ -1628,6 +1628,31 @@ bool Replicator::registerCreatedCharacter(u32 author, const unsigned int h[5]) {
     row.container = tab.first; row.containerSerial = tab.second; row.playerId = identity;
     row.sourceContainer = tab.first; row.sourceSerial = tab.second;
     owners_[tab] = row; ++ownersRevision_; ownersDirty_ = true;
+    return true;
+}
+
+u32 Replicator::characterConnection(u32 owner) const {
+    u64 identity = identityForOwner(owner);
+    std::map<u64, PeerStatusPacket>::const_iterator p = players_.find(identity);
+    return p != players_.end() && p->second.present ? p->second.connectionId : 0;
+}
+
+bool Replicator::characterRequestCurrent(const CharacterRequestHeader& h) const {
+    return h.worldId && h.worldId == ownershipWorld() && h.authEpoch == ownersAuthEpoch_ &&
+        h.playerId && h.playerId == identityForOwner(h.ownerId) &&
+        h.connectionId && h.connectionId == characterConnection(h.ownerId);
+}
+
+bool Replicator::applyCreatedAppearance(GameWorld* gw, const unsigned int h[5], const CharacterDraft& draft) {
+    Key key; key.t = h[0]; key.c = h[1]; key.cs = h[2]; key.i = h[3]; key.s = h[4];
+    std::map<Key, Character*>::const_iterator proxy = proxyByKey_.find(key);
+    Character* c = proxy != proxyByKey_.end() ? proxy->second : engine::resolveCharByHand(h[3], h[4], h[0], h[1], h[2]);
+    if (!c) { createdAppearanceApplied_.erase(key); return false; }
+    std::map<Key, Character*>::const_iterator applied = createdAppearanceApplied_.find(key);
+    if (applied != createdAppearanceApplied_.end() && applied->second == c) return true;
+    if (!engine::applyCharacterDraft(gw, c, draft)) return false;
+    createdAppearanceApplied_[key] = c;
+    coop::logLine("[chargen] host appearance applied to resolved native or proxy character");
     return true;
 }
 

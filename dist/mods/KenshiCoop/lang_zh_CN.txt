@@ -96,3 +96,6 @@ Invalid character appearance=角色外观数据无效
 Character creation failed=创建角色失败
 Character created, but saving failed=角色已创建，但存档请求失败
 Character created and save requested=角色已创建，已请求协调存档
+Waiting for host to create and save character=等待主机创建角色并存档
+Host refused: character already owned or session changed=主机拒绝：已有自己的角色，或会话状态已改变
+Host response timed out; check connection and ownership before retrying=等待主机回复超时；重试前请检查连接和角色归属

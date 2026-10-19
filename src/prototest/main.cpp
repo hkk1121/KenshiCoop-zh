@@ -78,8 +78,11 @@ static void testSizes() {
     CHECK_EQ("sizeof(OwnersHeader)", sizeof(OwnersHeader), 19);
     CHECK_EQ("sizeof(OwnerRequestPacket)", sizeof(OwnerRequestPacket), 21);
     CHECK_EQ("sizeof(HelloPacket)",             sizeof(HelloPacket),             16); // v49: +ownRank
+    CHECK_EQ("sizeof(CharacterRequestHeader)", sizeof(CharacterRequestHeader), 49);
+    CHECK_EQ("sizeof(CharacterReplyPacket)", sizeof(CharacterReplyPacket), 50);
+    CHECK_EQ("sizeof(CharacterAppearanceHeader)", sizeof(CharacterAppearanceHeader), 33);
     CHECK_EQ("sizeof(WelcomePacket)",           sizeof(WelcomePacket),           7);
-    CHECK_EQ("sizeof(PeerStatusPacket)",        sizeof(PeerStatusPacket),        82); // v49: roster edge
+    CHECK_EQ("sizeof(PeerStatusPacket)",        sizeof(PeerStatusPacket),        86); // v49: roster edge
     CHECK_EQ("sizeof(EventPacket)",             sizeof(EventPacket),             58); // v1003: +target owner
     CHECK_EQ("sizeof(EntityState)",             sizeof(EntityState),             79);
     CHECK_EQ("sizeof(EntityBatchHeader)",       sizeof(EntityBatchHeader),       14); // v35: +sendMs; v44: +epoch
@@ -316,8 +319,8 @@ static void testSizes() {
     CHECK_EQ("EVT_SQUAD_MOVE id", (int)EVT_SQUAD_MOVE, 11);
     CHECK("EVT_SQUAD_MOVE distinct", EVT_SQUAD_MOVE != EVT_RECRUIT &&
           EVT_SQUAD_MOVE != EVT_NONE && EVT_SQUAD_MOVE != EVT_EXIT_FURNITURE);
-    CHECK_EQ("PROTOCOL_VERSION (v1004: stable player identity)",
-             (int)PROTOCOL_VERSION, 1004);
+    CHECK_EQ("PROTOCOL_VERSION (v1005: native character creation)",
+             (int)PROTOCOL_VERSION, 1005);
 
     // Protocol 52: the shared money pool. The two players spend from ONE wallet,
     // so the join reports CHANGES and the host the authoritative TOTAL - swap
@@ -1953,11 +1956,41 @@ void testCharacterDraft() {
 }
 
 
+void testCharacterMailboxes() {
+    Inbound in; u8 bytes[4] = { 1, 0, 0, 0 };
+    CharacterRequestHeader rq; memset(&rq, 0, sizeof(rq)); rq.bytes = sizeof(bytes); rq.playerId = 0xF000000000000011ULL;
+    CharacterAppearanceHeader app; memset(&app, 0, sizeof(app)); app.bytes = sizeof(bytes); app.worldId = 77;
+    CharacterReplyPacket reply; memset(&reply, 0, sizeof(reply)); reply.requestId = 6; reply.connectionId = 9;
+    in.pushCharacterRequest(rq, bytes); in.pushCharacterAppearance(app, bytes); in.pushCharacterReply(reply);
+    in.flushWorldState();
+    std::deque<InboundCharacterRequest> requests; in.drainCharacterRequests(requests);
+    std::deque<InboundCharacterAppearance> appearances; in.drainCharacterAppearances(appearances);
+    std::deque<CharacterReplyPacket> replies; in.drainCharacterReplies(replies);
+    CHECK("chargen old-world requests dropped", requests.empty());
+    CHECK("chargen old-world appearances dropped", appearances.empty());
+    CHECK("chargen reply survives targeted reload", replies.size() == 1 && replies[0].requestId == 6 && replies[0].connectionId == 9);
+    for (u32 i = 0; i < 40; ++i) { rq.requestId = i; in.pushCharacterRequest(rq, bytes); in.pushCharacterAppearance(app, bytes); in.pushCharacterReply(reply); }
+    in.drainCharacterRequests(requests); in.drainCharacterAppearances(appearances); replies.clear(); in.drainCharacterReplies(replies);
+    CHECK("chargen bounded request mailbox", requests.size() == 8 && requests[0].header.requestId == 32);
+    CHECK("chargen bounded appearance mailbox", appearances.size() == 32);
+    CHECK("chargen bounded reply mailbox", replies.size() == 32);
+    in.pushConnect(2); in.pushLeave(2);
+    std::deque<u32> connects, leaves; in.drainConnects(connects); in.drainLeaves(leaves);
+    CHECK("connect followed by leave cancels pending connect", connects.empty() && leaves.size() == 1);
+    in.pushLeave(2); in.pushConnect(2); connects.clear(); leaves.clear(); in.drainConnects(connects); in.drainLeaves(leaves);
+    CHECK("leave followed by reconnect keeps both edges", connects.size() == 1 && leaves.size() == 1);
+    roundTrip<CharacterRequestHeader>("CharacterRequestHeader", (u8)PKT_CHARACTER_REQUEST);
+    roundTrip<CharacterReplyPacket>("CharacterReplyPacket", (u8)PKT_CHARACTER_REPLY);
+    roundTrip<CharacterAppearanceHeader>("CharacterAppearanceHeader", (u8)PKT_CHARACTER_APPEARANCE);
+}
+
+
 int main() {
     std::printf("prototest: KenshiCoop wire/hash/interp unit layer (protocol v%u)\n",
                 (unsigned)PROTOCOL_VERSION);
     testSizes();
     testCharacterDraft();
+    testCharacterMailboxes();
     testObjectHandLayout();
     testEngineFaults();
     testEngineCaps();

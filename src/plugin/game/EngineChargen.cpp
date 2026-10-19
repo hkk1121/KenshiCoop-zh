@@ -1,7 +1,6 @@
 ﻿#pragma warning(push)
-#pragma warning(disable: 4099)
+#pragma warning(disable: 4099 4819 4005 4091)
 #include "EngineInternal.h"
-#pragma warning(pop)
 #include <kenshi/RaceData.h>
 #include "EngineChargen.h"
 #include <kenshi/Appearance.h>
@@ -9,6 +8,7 @@
 #include <kenshi/GameDataManager.h>
 #include <kenshi/gui/CharacterEditWindow.h>
 #include <algorithm>
+#pragma warning(pop)
 
 namespace coop { namespace engine {
 namespace {

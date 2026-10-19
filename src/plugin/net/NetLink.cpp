@@ -1,6 +1,7 @@
 ﻿#define _CRT_SECURE_NO_WARNINGS 1 // _snprintf is fine here; silence VC10 C4996
 
 #include "NetLink.h"
+#include "../../netproto/CharacterCreation.h"
 #include "SteamP2P.h"
 #include "../CoopLog.h"
 
@@ -100,6 +101,7 @@ NetLink::NetLink()
       sendEpoch_(0),
       steamPeer_(0),
       simDelayMs_(0), simJitterMs_(0), simLossPct_(0) {
+    connectionSequence_ = 0;
     playerName_[0] = 0;
     InitializeCriticalSection(&outCs_);
 }
@@ -156,7 +158,7 @@ void NetLink::stop() {
         enet_deinitialize();
     }
     EnterCriticalSection(&outCs_);
-    outOwners_.clear(); outOwnerRequests_.clear();
+    outOwners_.clear(); outOwnerRequests_.clear(); outCharacter_.clear();
     LeaveCriticalSection(&outCs_);
 }
 
@@ -590,6 +592,7 @@ void NetLink::threadLoop() {
         PeerStatusPacket self;
         memset(&self, 0, sizeof(self));
         self.type = (u8)PKT_PEER_STATUS; self.present = 1;
+        self.connectionId = ++connectionSequence_;
         self.playerId = playerId_; memcpy(self.name, playerName_, sizeof(self.name));
         statusById_[0] = self;
         if (inbound_) inbound_->pushPeerStatus(self);
@@ -756,6 +759,7 @@ void NetLink::threadLoop() {
                                     memset(&row, 0, sizeof(row));
                                     row.type = (u8)PKT_PEER_STATUS; row.present = 1;
                                     row.ownerId = id; row.ownRank = rank; row.playerId = h.playerId;
+                                    row.connectionId = ++connectionSequence_;
                                     memcpy(row.name, ev.packet->data + sizeof(h), h.nameLen);
                                     statusById_[id] = row;
                                     if (inbound_) inbound_->pushPeerStatus(row);
@@ -807,6 +811,33 @@ void NetLink::threadLoop() {
                                 if (inbound_) inbound_->pushConnect(0); // host id = 0
                             }
                         }
+                    } else if (type == PKT_CHARACTER_REQUEST) {
+                        CharacterRequestHeader h;
+                        u32 owner = (u32)(size_t)ev.peer->data;
+                        std::map<u32, ENetPeer*>::const_iterator admitted = peersById_.find(owner);
+                        std::map<u32, PeerStatusPacket>::const_iterator identity = statusById_.find(owner);
+                        if (isHost_ && inbound_ && admitted != peersById_.end() && admitted->second == ev.peer &&
+                            identity != statusById_.end() && ev.channelID == CH_RELIABLE &&
+                            readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &h) &&
+                            h.ownerId == owner && h.playerId == identity->second.playerId && h.connectionId == identity->second.connectionId &&
+                            h.worldId && h.requestId && h.bytes && h.bytes <= CHARACTER_DRAFT_MAX &&
+                            ev.packet->dataLength == sizeof(h) + h.bytes)
+                            inbound_->pushCharacterRequest(h, ev.packet->data + sizeof(h));
+                        else netErr("[chargen] rejected request direction, connection or framing");
+                    } else if (type == PKT_CHARACTER_REPLY) {
+                        CharacterReplyPacket p;
+                        if (!isHost_ && inbound_ && ev.peer == serverPeer_ && ev.channelID == CH_RELIABLE &&
+                            ev.packet->dataLength == sizeof(p) && readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &p) &&
+                            p.targetOwnerId == localId() && p.playerId == playerId_ &&
+                            p.result >= CHARACTER_CREATED && p.result <= CHARACTER_SAVE_FAILED)
+                            inbound_->pushCharacterReply(p);
+                    } else if (type == PKT_CHARACTER_APPEARANCE) {
+                        CharacterAppearanceHeader h;
+                        if (!isHost_ && inbound_ && ev.peer == serverPeer_ && ev.channelID == CH_RELIABLE &&
+                            readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &h) &&
+                            h.worldId && h.bytes && h.bytes <= CHARACTER_DRAFT_MAX &&
+                            ev.packet->dataLength == sizeof(h) + h.bytes)
+                            inbound_->pushCharacterAppearance(h, ev.packet->data + sizeof(h));
                     } else if (type == PKT_OWNERS) {
                         OwnersHeader h;
                         if (!isHost_ && inbound_ &&
@@ -1378,6 +1409,14 @@ void NetLink::threadLoop() {
         // Drain + send any queued reliable events on CH_RELIABLE. ENet guarantees
         // delivery + ordering on that channel, so these survive the unreliable-batch
         // loss the WAN sim injects (the reliability proof the death oracle checks).
+        std::vector<OutCharacter> characterPackets;
+        EnterCriticalSection(&outCs_); characterPackets.swap(outCharacter_); LeaveCriticalSection(&outCs_);
+        for (size_t i = 0; i < characterPackets.size(); ++i) {
+            const OutCharacter& p = characterPackets[i];
+            if (p.epoch != (u32)sendEpoch_ || p.data.empty()) continue;
+            ENetPacket* out = enet_packet_create(&p.data[0], p.data.size(), ENET_PACKET_FLAG_RELIABLE);
+            if (out) routeOut(p.targetId, CH_RELIABLE, out);
+        }
         std::vector<InboundOwners> owners;
         std::vector<OwnerRequestPacket> requests;
         EnterCriticalSection(&outCs_);
@@ -2235,6 +2274,14 @@ void NetLink::queueOwners(u64 worldId, u32 revision, u32 authEpoch, const std::v
 
 void NetLink::queueOwnerRequest(const OwnerRequestPacket& request) {
     pushLocked(outCs_, outOwnerRequests_, request);
+}
+
+void NetLink::queueCharacterPacket(u32 target, const std::vector<u8>& data) {
+    if (data.empty() || data.size() > CHARACTER_DRAFT_MAX + sizeof(CharacterRequestHeader)) return;
+    OutCharacter p; p.targetId = target; p.epoch = (u32)sendEpoch_; p.data = data;
+    EnterCriticalSection(&outCs_);
+    if (outCharacter_.size() < 64) outCharacter_.push_back(p);
+    LeaveCriticalSection(&outCs_);
 }
 
 } // namespace coop
