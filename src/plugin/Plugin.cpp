@@ -360,41 +360,7 @@ void processNetEvents(GameWorld* gw) {
     g_repl.ingestPlayers(g_inbound);
     g_inbound.drainConnects(conns);
     g_inbound.drainLeaves(leaves);
-    for (std::deque<coop::u32>::iterator it = conns.begin(); it != conns.end(); ++it) {
-        char b[96];
-        _snprintf(b, sizeof(b) - 1, "handshake: peer present id=%u (local id=%u)",
-                  (unsigned)*it, (unsigned)g_net.localId());
-        b[sizeof(b) - 1] = '\0';
-        coopLog(b);
-        // Connect-edge resync (protocol 30): re-announce placed buildings and
-        // force an immediate resend pass across all change-gated channels, so
-        // a late joiner / reconnector converges now instead of waiting out
-        // per-channel safety resends (or never minting a pre-connect build).
-        // With protocol 49 this also fires on a JOIN when the host announces
-        // a new fellow join (roster edge) - our re-burst reaches it through
-        // the host relay.
-        if (g_cfg.latejoinSync) g_repl.onPeerConnected(g_net, g_net.localId());
-        else coopLog("[latejoin] connect edge seen, resync OFF (gate)");
-        coop::clearNetUiError(); // 好友已连上，此前的拒绝原因作废
-        g_toastText = coop::tr("Peer connected"); g_toastState = 2; g_toastArmMs = GetTickCount();
-        g_peersPresent.insert(*it);
-        g_peerBodyRepushDue.erase(*it);
-        // Coordinated save (protocol 31): while connected TO THE HOST under
-        // save-sync, the JOIN never writes a save locally - the host's save
-        // is authoritative and a local save press forwards as PKT_SAVE_REQ.
-        // Keyed to the host link (id 0), not a fellow join's roster edge.
-        if (!g_cfg.isHost && g_cfg.saveSync && *it == 0) {
-            coop::engine::setSaveSuppress(true);
-            coopLog("[save] JOIN save suppression ON (host save is authoritative)");
-        }
-        // Push-save-on-connect (host): if already in a game, bake+announce the
-        // live world so the join can enter it with no pre-shared save. If the
-        // host is NOT yet in-game (title/loading), the gameplay-start edge in
-        // mainLoop_hook arms this instead - covers either connect ordering.
-        // Targeted (protocol 49): only the connecting join is announced to.
-        if (g_cfg.isHost && g_cfg.saveSync && g_gameStarted)
-            armConnectPush(*it);
-    }
+    // 先处理离开再处理连接：同一玩家重连顶替旧连接时，离开与连接的编号相同（见 Inbound::pushLeave）
     for (std::deque<coop::u32>::iterator it = leaves.begin(); it != leaves.end(); ++it) {
         char b[64];
         _snprintf(b, sizeof(b) - 1, "handshake: peer left id=%u", (unsigned)*it);
@@ -457,6 +423,41 @@ void processNetEvents(GameWorld* gw) {
             }
             g_repl.clearOwnerReplicationState(gw, *it);
         }
+    }
+    for (std::deque<coop::u32>::iterator it = conns.begin(); it != conns.end(); ++it) {
+        char b[96];
+        _snprintf(b, sizeof(b) - 1, "handshake: peer present id=%u (local id=%u)",
+                  (unsigned)*it, (unsigned)g_net.localId());
+        b[sizeof(b) - 1] = '\0';
+        coopLog(b);
+        // Connect-edge resync (protocol 30): re-announce placed buildings and
+        // force an immediate resend pass across all change-gated channels, so
+        // a late joiner / reconnector converges now instead of waiting out
+        // per-channel safety resends (or never minting a pre-connect build).
+        // With protocol 49 this also fires on a JOIN when the host announces
+        // a new fellow join (roster edge) - our re-burst reaches it through
+        // the host relay.
+        if (g_cfg.latejoinSync) g_repl.onPeerConnected(g_net, g_net.localId());
+        else coopLog("[latejoin] connect edge seen, resync OFF (gate)");
+        coop::clearNetUiError(); // 好友已连上，此前的拒绝原因作废
+        g_toastText = coop::tr("Peer connected"); g_toastState = 2; g_toastArmMs = GetTickCount();
+        g_peersPresent.insert(*it);
+        g_peerBodyRepushDue.erase(*it);
+        // Coordinated save (protocol 31): while connected TO THE HOST under
+        // save-sync, the JOIN never writes a save locally - the host's save
+        // is authoritative and a local save press forwards as PKT_SAVE_REQ.
+        // Keyed to the host link (id 0), not a fellow join's roster edge.
+        if (!g_cfg.isHost && g_cfg.saveSync && *it == 0) {
+            coop::engine::setSaveSuppress(true);
+            coopLog("[save] JOIN save suppression ON (host save is authoritative)");
+        }
+        // Push-save-on-connect (host): if already in a game, bake+announce the
+        // live world so the join can enter it with no pre-shared save. If the
+        // host is NOT yet in-game (title/loading), the gameplay-start edge in
+        // mainLoop_hook arms this instead - covers either connect ordering.
+        // Targeted (protocol 49): only the connecting join is announced to.
+        if (g_cfg.isHost && g_cfg.saveSync && g_gameStarted)
+            armConnectPush(*it);
     }
 }
 

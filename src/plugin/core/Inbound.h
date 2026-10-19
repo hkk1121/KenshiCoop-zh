@@ -1,4 +1,4 @@
-// Inbound - the net->game thread bridge.
+﻿// Inbound - the net->game thread bridge.
 //
 // Kenshi's engine is single-threaded and NOT thread-safe, so the background net
 // thread must never touch game memory. It only pushes small PODs (copied by
@@ -449,7 +449,14 @@ public:
         EnterCriticalSection(&cs_); conn_.push_back(id); LeaveCriticalSection(&cs_);
     }
     void pushLeave(u32 id) {
-        EnterCriticalSection(&cs_); leave_.push_back(id); LeaveCriticalSection(&cs_);
+        EnterCriticalSection(&cs_);
+        // 主线程先处理离开、再处理连接（同一玩家顶替旧连接时是“先离开后连接”且编号相同）。
+        // 同一帧内先连上又断开的，撤销尚未取走的连接边，避免先离开后连接留下幽灵在线。
+        std::deque<u32>& conns = conn_;
+        for (std::deque<u32>::iterator it = conns.begin(); it != conns.end(); )
+            it = (*it == id || id == OWNER_ID_ALL) ? conns.erase(it) : it + 1;
+        leave_.push_back(id);
+        LeaveCriticalSection(&cs_);
     }
     // NET thread: one received entity transform, owner-tagged + send-stamped.
     void pushEntity(u32 ownerId, u32 sendMs, const EntityState& e) {
