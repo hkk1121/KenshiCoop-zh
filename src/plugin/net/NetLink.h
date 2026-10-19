@@ -426,6 +426,11 @@ private:
     NetLink& operator=(const NetLink&);
 public:
     void setIdentity(u64 id, const std::string& name);
+    void queueOwners(u64 worldId, u32 revision, u32 authEpoch, const std::vector<OwnerRow>& rows);
+    void queueOwnerRequest(const OwnerRequestPacket& request);
+private:
+    std::vector<InboundOwners> outOwners_;
+    std::vector<OwnerRequestPacket> outOwnerRequests_;
 };
 
 } // namespace coop

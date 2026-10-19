@@ -73,6 +73,9 @@ static int g_total  = 0;
 
 static void testSizes() {
     std::printf("== wire struct sizes (the packed contract both clients memcpy) ==\n");
+    CHECK_EQ("sizeof(OwnerRow)", sizeof(OwnerRow), 24);
+    CHECK_EQ("sizeof(OwnersHeader)", sizeof(OwnersHeader), 19);
+    CHECK_EQ("sizeof(OwnerRequestPacket)", sizeof(OwnerRequestPacket), 21);
     CHECK_EQ("sizeof(HelloPacket)",             sizeof(HelloPacket),             16); // v49: +ownRank
     CHECK_EQ("sizeof(WelcomePacket)",           sizeof(WelcomePacket),           7);
     CHECK_EQ("sizeof(PeerStatusPacket)",        sizeof(PeerStatusPacket),        82); // v49: roster edge
@@ -465,6 +468,8 @@ static void roundTrip(const char* name, u8 typeTag) {
 
 static void testRoundTrips() {
     std::printf("== readPacket round-trips + truncation rejection ==\n");
+    roundTrip<OwnersHeader>("OwnersHeader", (u8)PKT_OWNERS);
+    roundTrip<OwnerRequestPacket>("OwnerRequestPacket", (u8)PKT_OWNER_REQUEST);
     roundTrip<HelloPacket>("HelloPacket", (u8)PKT_HELLO);
     roundTrip<WelcomePacket>("WelcomePacket", (u8)PKT_WELCOME);
     roundTrip<PeerStatusPacket>("PeerStatusPacket", (u8)PKT_PEER_STATUS);

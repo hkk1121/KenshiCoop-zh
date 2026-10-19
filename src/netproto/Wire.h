@@ -87,6 +87,8 @@ enum PacketType {
     PKT_MONEY_DELTA      = 46,// RELIABLE join money-pool delta (join -> host, protocol 52); MoneyDeltaPacket
     PKT_DEED             = 47,// RELIABLE property-ownership row (protocol 54); DeedPacket
     PKT_FIXTURE          = 48,// RELIABLE runtime-fixture identity row (protocol 55); FixturePacket
+    PKT_OWNERS           = 50,
+    PKT_OWNER_REQUEST    = 51,
     PKT_PEER_STATUS      = 49 // RELIABLE peer roster edge (host -> joins); PeerStatusPacket
 };
 
@@ -146,6 +148,32 @@ enum EventType {
 const u32 OWNER_ID_ALL = 0xFFFFFFFFu;
 
 #pragma pack(push, 1)
+
+const unsigned int OWNERS_MAX = 512;
+
+struct OwnerRow {
+    u32 container;
+    u32 containerSerial;
+    u64 playerId;
+    u32 sourceContainer;
+    u32 sourceSerial;
+};
+
+struct OwnersHeader {
+    u8 type;
+    u64 worldId;
+    u32 revision;
+    u32 authEpoch;
+    u16 count;
+};
+
+struct OwnerRequestPacket {
+    u8 type;
+    u32 ownerId;
+    u64 worldId;
+    u32 container;
+    u32 containerSerial;
+};
 
 struct HelloPacket {
     u8  type;    // = PKT_HELLO

@@ -155,6 +155,9 @@ void NetLink::stop() {
         thread_ = 0;
         enet_deinitialize();
     }
+    EnterCriticalSection(&outCs_);
+    outOwners_.clear(); outOwnerRequests_.clear();
+    LeaveCriticalSection(&outCs_);
 }
 
 void NetLink::setOwnedEntities(u32 ownerId, const EntityState* arr, unsigned int count) {
@@ -797,6 +800,20 @@ void NetLink::threadLoop() {
                                 if (inbound_) inbound_->pushConnect(0); // host id = 0
                             }
                         }
+                    } else if (type == PKT_OWNERS) {
+                        OwnersHeader h;
+                        if (!isHost_ && inbound_ &&
+                            readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &h) &&
+                            h.worldId && h.count <= OWNERS_MAX &&
+                            ev.packet->dataLength == sizeof(h) + h.count * sizeof(OwnerRow)) {
+                            inbound_->pushOwners(h, (const OwnerRow*)(ev.packet->data + sizeof(h)));
+                        }
+                    } else if (type == PKT_OWNER_REQUEST) {
+                        OwnerRequestPacket p;
+                        if (isHost_ && inbound_ &&
+                            readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &p) &&
+                            ev.packet->dataLength == sizeof(p) && p.ownerId == (u32)(size_t)ev.peer->data)
+                            inbound_->pushOwnerRequest(p);
                     } else if (type == PKT_PEER_STATUS) {
                         // Peer roster edge (protocol 49, host -> joins): another
                         // join arrived or left. Forget that owner's epoch entries
@@ -1354,6 +1371,22 @@ void NetLink::threadLoop() {
         // Drain + send any queued reliable events on CH_RELIABLE. ENet guarantees
         // delivery + ordering on that channel, so these survive the unreliable-batch
         // loss the WAN sim injects (the reliability proof the death oracle checks).
+        std::vector<InboundOwners> owners;
+        std::vector<OwnerRequestPacket> requests;
+        EnterCriticalSection(&outCs_);
+        owners.swap(outOwners_); requests.swap(outOwnerRequests_);
+        LeaveCriticalSection(&outCs_);
+        for (size_t i = 0; i < owners.size(); ++i) {
+            const InboundOwners& row = owners[i];
+            ENetPacket* out = enet_packet_create(0, sizeof(OwnersHeader) + row.rows.size() * sizeof(OwnerRow), ENET_PACKET_FLAG_RELIABLE);
+            memcpy(out->data, &row.header, sizeof(OwnersHeader));
+            if (!row.rows.empty()) memcpy(out->data + sizeof(OwnersHeader), &row.rows[0], row.rows.size() * sizeof(OwnerRow));
+            routeOut(OWNER_ID_ALL, CH_RELIABLE, out);
+        }
+        for (size_t i = 0; i < requests.size(); ++i) {
+            ENetPacket* out = enet_packet_create(&requests[i], sizeof(OwnerRequestPacket), ENET_PACKET_FLAG_RELIABLE);
+            routeOut(OWNER_ID_ALL, CH_RELIABLE, out);
+        }
         std::vector<EventPacket> events;
         EnterCriticalSection(&outCs_);
         events.swap(outEvents_);
@@ -2182,6 +2215,19 @@ void NetLink::setIdentity(u64 id, const std::string& name) {
     playerId_ = id;
     memset(playerName_, 0, sizeof(playerName_));
     strncpy(playerName_, name.c_str(), sizeof(playerName_) - 1);
+}
+
+void NetLink::queueOwners(u64 worldId, u32 revision, u32 authEpoch, const std::vector<OwnerRow>& rows) {
+    if (rows.size() > OWNERS_MAX) return;
+    InboundOwners p;
+    p.header.type = (u8)PKT_OWNERS; p.header.worldId = worldId;
+    p.header.revision = revision; p.header.authEpoch = authEpoch;
+    p.header.count = (u16)rows.size(); p.rows = rows;
+    pushLocked(outCs_, outOwners_, p);
+}
+
+void NetLink::queueOwnerRequest(const OwnerRequestPacket& request) {
+    pushLocked(outCs_, outOwnerRequests_, request);
 }
 
 } // namespace coop

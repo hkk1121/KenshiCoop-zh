@@ -68,8 +68,10 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
         // landed in the host-owned rank-0 container). Our own edges always
         // publish; hands the peer authored never do.
         Key hk = keyOf(raw[i]);
-        if (pinOwned_.count(hk))     owned = true;
-        else if (pinPeer_.count(hk)) owned = false;
+        if (!ownersAttached_) {
+            if (pinOwned_.count(hk))     owned = true;
+            else if (pinPeer_.count(hk)) owned = false;
+        }
         // Drive-exclusion (Phase 1b recruit membership): a body we are DRIVING
         // from the peer's stream is peer-owned regardless of the local tab
         // rank/hand it sits in. insertPeerMember re-containers a recruit into

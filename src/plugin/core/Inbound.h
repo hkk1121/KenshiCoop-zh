@@ -410,6 +410,11 @@ private:
     SessionQ& operator=(const SessionQ&);
 };
 
+struct InboundOwners {
+    OwnersHeader header;
+    std::vector<OwnerRow> rows;
+};
+
 class Inbound {
 public:
     // WorldQ members self-register into worldReset_ (declared first, below), so
@@ -880,6 +885,8 @@ private:
     SessionQ<u32>                  conn_;
     SessionQ<u32>                  leave_;
     SessionQ<PeerStatusPacket>      peerStatus_;
+    SessionQ<InboundOwners>         owners_;
+    SessionQ<OwnerRequestPacket>    ownerRequests_;
 
     // WORLD-STATE: describe the current world; auto-cleared on a session reset.
     WorldQ<InboundEntity>          ent_;
@@ -936,6 +943,20 @@ public:
     }
     void drainPeerStatus(std::deque<PeerStatusPacket>& out) {
         EnterCriticalSection(&cs_); out.swap(peerStatus_); LeaveCriticalSection(&cs_);
+    }
+    void pushOwners(const OwnersHeader& h, const OwnerRow* rows) {
+        InboundOwners p; p.header = h;
+        if (h.count) p.rows.assign(rows, rows + h.count);
+        EnterCriticalSection(&cs_); owners_.push_back(p); LeaveCriticalSection(&cs_);
+    }
+    void drainOwners(std::deque<InboundOwners>& out) {
+        EnterCriticalSection(&cs_); out.swap(owners_); LeaveCriticalSection(&cs_);
+    }
+    void pushOwnerRequest(const OwnerRequestPacket& p) {
+        EnterCriticalSection(&cs_); ownerRequests_.push_back(p); LeaveCriticalSection(&cs_);
+    }
+    void drainOwnerRequests(std::deque<OwnerRequestPacket>& out) {
+        EnterCriticalSection(&cs_); out.swap(ownerRequests_); LeaveCriticalSection(&cs_);
     }
 };
 

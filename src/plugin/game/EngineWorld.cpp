@@ -1,4 +1,4 @@
-// EngineWorld.cpp - world economy + structures (monolith split from
+﻿// EngineWorld.cpp - world economy + structures (monolith split from
 // EngineInternal.cpp, 2026-07-12): protocol 52 money pool + vendor trading,
 // protocol 23 recruitment probe, protocol 24 faction relations read/write,
 // protocol 26 door/gate state, protocols 27/28 placed-building sync +
@@ -243,27 +243,16 @@ bool joinPlayerSquadAt(GameWorld* gw, Character* c, const unsigned int newHand[5
             return true;
         Faction* f = g_playerFactionFn(gw->player);
         if (!f) return false;
-        // Case A (the norm - recruit_sync showed tabKnown=1): resolve the target
-        // platoon by the reported container serial among existing squad members,
-        // so the inserted body lands in the SAME tab the recruiter used and its
-        // hand container matches the streamed key.
+        // 精确匹配标签，也覆盖没有成员的空队；绝不回退到主机首队。
         ActivePlatoon* target = 0;
-        unsigned int pc = gw->player->playerCharacters.size();
-        for (unsigned int i = 0; i < pc; ++i) {
-            Character* m = gw->player->playerCharacters[i];
-            if (!m) continue;
-            unsigned int mh[5];
-            if (!readObjectHand(static_cast<RootObject*>(m), mh)) continue;
-            if (mh[1] == newHand[1] && mh[2] == newHand[2]) {
-                target = g_getPlatoonFn(m);
-                break;
+        for (unsigned int i = 0; i < f->activePlatoons.size(); ++i) {
+            Platoon* p = f->activePlatoons[i];
+            if (!p || !p->activePlatoon) continue;
+            const hand& h = p->getHandle();
+            if (h.container == newHand[1] && h.containerSerial == newHand[2]) {
+                target = p->activePlatoon; break;
             }
         }
-        // Case B fallback: the reported tab is a runtime-minted platoon not
-        // present locally - drop into the leader's default tab so the body is
-        // still a panel member (control still follows the peer-owned pin).
-        if (!target && pc > 0 && gw->player->playerCharacters[0])
-            target = g_getPlatoonFn(gw->player->playerCharacters[0]);
         if (!target) return false;
         // setFaction (probe lever 1, the header-documented re-platoon path):
         // moves 'c' into the player faction + target platoon WITHOUT touching
@@ -1791,6 +1780,34 @@ int probeVendorBuy(GameWorld* gw, const unsigned int vHand[5],
     }
 }
 
+
+unsigned int listPlayerTabs(GameWorld* gw, unsigned int (*out)[2], unsigned int maxOut) {
+    unsigned int n = 0;
+    __try {
+        if (!gw || !gw->player || !out) return 0;
+        Faction* faction = gw->player->getFaction();
+        if (!faction) return 0;
+        for (unsigned int i = 0; i < faction->activePlatoons.size() && n < maxOut; ++i) {
+            Platoon* p = faction->activePlatoons[i];
+            if (!p || !p->activePlatoon) continue;
+            const hand& h = p->getHandle();
+            if (!(h.container | h.containerSerial)) continue;
+            out[n][0] = h.container; out[n][1] = h.containerSerial; ++n;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return n;
+}
+
+bool createPlayerSquad(GameWorld* gw, unsigned int out[2]) {
+    __try {
+        if (!gw || !gw->player || !out) return false;
+        ActivePlatoon* p = gw->player->createSquad();
+        if (!p || !p->me) return false;
+        const hand& h = p->me->getHandle();
+        out[0] = h.container; out[1] = h.containerSerial;
+        return (out[0] | out[1]) != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
 
 } // namespace engine
 } // namespace coop

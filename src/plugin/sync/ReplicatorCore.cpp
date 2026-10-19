@@ -11,6 +11,7 @@
 // PowerShell oracles (see resources/CODE_MAP.md, log-tag index).
 
 #include "ReplicatorUtil.h"
+#include "SaveXfer.h"
 
 namespace coop {
 
@@ -97,7 +98,9 @@ Replicator::Replicator()
       timeLastSendMs_(0), timeLastLogMs_(0), timeSlewApplied_(-1.0f),
       platoonT0_(0),
       lifeSweepMs_(0),
-      tabNotice_(0), playerIdentity_(0) {
+      tabNotice_(0), playerIdentity_(0), ownersWorld_(0), ownersFileWorld_(0),
+      ownersRevision_(0), ownersAuthEpoch_(1), ownersLoaded_(false), ownersAttached_(false),
+      ownersDirty_(false), ownersHaveSnapshot_(false), ownersInvalid_(false), ownersResetPending_(false) {
 }
 
 // ---- Phase 3: unified entity lifecycle ---------------------------------------
@@ -207,7 +210,7 @@ void Replicator::resetSession() {
     attackerOf_.clear();
     combatCapMs_.clear();
     authCount_.clear();
-    ownHands_.clear();
+    ownHands_.clear(); allSquad_.clear();
     // Protocol 36: the existence census describes the OLD world's hands; the
     // host re-publishes within a second of the new world going live.
     censusHands_.clear();
@@ -296,6 +299,7 @@ void Replicator::resetSession() {
     // the reloaded save re-seeds them at first census/poll.
     tabRank_.clear();
     tabOwned_.clear();
+    tabControl_.clear(); pendingPeerMembers_.clear();
     tabsSeeded_ = 0;
     // 协议 1002：小队控制授权不写存档，断线 / 读档 / 会话重置一律作废（第 2 批）
     tabAuth_.clear();
@@ -392,6 +396,8 @@ void Replicator::clearPeerReplicationState(GameWorld* gw) {
     b[sizeof(b) - 1] = '\0';
     coop::logLine(b);
     // Now drop every map (proxyByKey_ included) back to freshly-launched state.
+    for (std::map<u64, PeerStatusPacket>::iterator p = players_.begin(); p != players_.end(); ++p)
+        if (p->first != playerIdentity_) p->second.present = 0;
     resetSession();
 }
 
@@ -552,9 +558,6 @@ void Replicator::ingest(Inbound& in) {
         d.owner = it->ownerId; // protocol 49: scope a leave teardown to this owner
         d.interp.push(it->e, t, now);
         d.lastSeenMs = now;
-        // 临时补丁（第二阶段归属表之前）：记下被其他玩家驱动过的小队标签，用于锁定
-        std::pair<u32, u32> tab(it->e.hContainer, it->e.hContainerSerial);
-        if (tabRank_.count(tab)) peerDrivenTabs_.insert(tab);
     }
 }
 
@@ -619,6 +622,20 @@ void Replicator::decideTabs(const EntityState* raw, unsigned int nSquad,
                             const std::vector<std::pair<u32, u32> >& ctnrs) {
     if (!squadSync_) return;   // legacy per-tick ranking owns nothing durably
     bool seeding = (tabsSeeded_ == 0);
+    if (ownersAttached_) {
+        for (unsigned int m = 0; m < nSquad; ++m) {
+            Character* c = engine::resolveCharByHand(raw[m].hIndex, raw[m].hSerial, raw[m].hType,
+                                                    raw[m].hContainer, raw[m].hContainerSerial);
+            if (!c || !mintedBodies_.count(c)) continue;
+            Tab tab(raw[m].hContainer, raw[m].hContainerSerial);
+            u32 owner = ownerForIdentity(tabOwnerIdentity(tab));
+            if (owner == OWNER_ID_ALL || owner == localId_) continue;
+            mintedBodies_.erase(c); ++peerBodyTabs_;
+            if (isHostRole() && peerBodyOwnerCounts_[owner]++ == 0) peerBodyOwnerQueue_.push_back(owner);
+        }
+        if (seeding && !ctnrs.empty()) tabsSeeded_ = (unsigned int)tabRank_.size();
+        return;
+    }
     for (unsigned int i = 0; i < ctnrs.size(); ++i) {
         if (tabOwned_.find(ctnrs[i]) != tabOwned_.end()) continue;
         unsigned int rank = tabRankFor(ctnrs[i], ctnrs);
@@ -681,6 +698,7 @@ void Replicator::decideTabs(const EntityState* raw, unsigned int nSquad,
                                                     : "host-fallback");
         }
         tabOwned_[ctnrs[i]] = owned;
+        if (!isHostRole() && owned) pendingOwnerTabs_[ctnrs[i]] = 0;
         if (!seeding) {
             char b[128];
             _snprintf(b, sizeof(b) - 1, "[squad] TABOWN cont=%u,%u rank=%u own=%d via=%s",
@@ -693,6 +711,12 @@ void Replicator::decideTabs(const EntityState* raw, unsigned int nSquad,
 }
 
 bool Replicator::ownsTab(const std::pair<u32, u32>& key, unsigned int rank) const {
+    if (ownersAttached_) {
+        Tab tab = canonicalTab(key);
+        std::map<Tab, OwnerRow>::const_iterator row = owners_.find(tab);
+        if (row != owners_.end()) return row->second.playerId == playerIdentity_;
+        return pendingOwnerTabs_.count(key) != 0;
+    }
     std::map<std::pair<u32, u32>, bool>::const_iterator it = tabOwned_.find(key);
     if (it != tabOwned_.end()) return it->second;
     // Not yet decided (squadSync_ off, or the first tick of a fresh container):
@@ -854,31 +878,33 @@ void Replicator::logSmoothSummary() {
 }
 
 // ---- 小队控制授权（协议 1002，第 2 批） ---------------------------------------
-// 归属判定：授权的交接由 reassignTab 直接写进 tabOwned_，这里不再按授权表取反
-// （tabAuth_ 只记录“谁授权给谁”，供面板与收回 / 归还使用）。publishOwned /
-// rekeyPeerBody / 拖拽判定三处共用。
+// 持久主人与临时控制权分离，读档或断线不会改写主人。
 bool Replicator::ownsTabEffective(const std::pair<u32, u32>& tab, unsigned int rank) const {
+    Tab canonical = canonicalTab(tab);
+    std::map<Tab, AuthPeer>::const_iterator auth = tabAuth_.find(canonical);
+    if (auth != tabAuth_.end()) return auth->second.mode == 2;
+    std::map<Tab, bool>::const_iterator control = tabControl_.find(canonical);
+    if (control != tabControl_.end()) return control->second;
     return ownsTab(tab, rank);
 }
 
-// 切换某标签的归属：改判定 + 清挂起状态 + 清掉会压过它的 per-hand pin。
+// 切换某标签的控制权：改判定 + 清挂起状态 + 清掉会压过它的 per-hand pin。
 // 接管（owned）时还要清掉驱动残留，与 rekeyPeerBody 的 CONTROL-FLIP claim 一致：
 // canonicalOf_ 按 Character* 记录“正被驱动”，不清掉的话 publishOwned 的驱动排除会让
 // 这些角色永远不被本端发布；targets_ / spawnReq_ 是对端流的状态。
 // AI 挂起、伤害保护由 applyTargets 每帧重建，不需要手工清理。
 void Replicator::reassignTab(GameWorld* gw, const std::pair<u32, u32>& tab, bool owned) {
-    tabOwned_[tab] = owned;
-    if (!owned) peerDrivenTabs_.insert(tab); // 交给其他玩家的标签：会话内保持锁定
-    tabAuth_.erase(tab);
-    tabReq_.erase(tab);
+    Tab key = canonicalTab(tab);
+    tabControl_[key] = owned;
+    tabAuth_.erase(key);
+    tabReq_.erase(key);
     // 只扫本帧的小队名单（captureSquad 自带 SEH；本 TU 不接触 GameWorld 内部结构）。
     static EntityState buf[160]; // 与 publishOwned 的 MAX_PUBLISH 同量级，仅主线程
     unsigned int members = 0;
     if (gw) {
         unsigned int n = engine::captureSquad(gw, false, buf, 160);
         for (unsigned int i = 0; i < n; ++i) {
-            if (buf[i].hContainer != tab.first ||
-                buf[i].hContainerSerial != tab.second) continue;
+            if (canonicalTab(Tab(buf[i].hContainer, buf[i].hContainerSerial)) != key) continue;
             Key k = keyOf(buf[i]);
             if (owned) {
                 pinPeer_.erase(k);
@@ -918,8 +944,9 @@ void Replicator::sendSquadAuth(NetLink& net, u32 ownerId, u32 targetId,
     ev.ownerId = ownerId;
     ev.targetOwnerId = targetId;
     ev.eventId = nextEventId_++;
-    ev.sContainer = tab.first;
-    ev.sContainerSerial = tab.second;
+    Tab canonical = canonicalTab(tab);
+    ev.sContainer = canonical.first;
+    ev.sContainerSerial = canonical.second;
     ev.arg = (f32)kind;
     net.queueEvent(ev);
     char b[160];
@@ -946,7 +973,7 @@ void Replicator::applySquadAuth(GameWorld* gw, const EventPacket& ev) {
               tab.first, tab.second, mine ? 1 : 0, rank);
     b[sizeof(b) - 1] = '\0'; coop::logLine(b);
     if (kind == 1) {                      // REQUEST：对方申请控制这个标签
-        if (mine) {
+        if (mine && (!ownersAttached_ || tabOwnerIdentity(tab) == playerIdentity_)) {
             tabReq_[tab].ownerId = ev.ownerId;
             tabReq_[tab].mode = 2;
             tabReq_[tab].ms = nowMs();
@@ -1048,16 +1075,17 @@ void Replicator::requestSquadAuth(NetLink& net, u32 ownerId) {
     unsigned long now = nowMs();
     for (std::map<std::pair<u32, u32>, unsigned int>::const_iterator it = tabRank_.begin();
          it != tabRank_.end(); ++it) {
-        if (ownsTabEffective(it->first, it->second)) continue;
-        if (tabAuth_.find(it->first) != tabAuth_.end()) continue; // 本端借出的标签
-        u32 target = driverOwnerForTab(it->first);
+        Tab tab = canonicalTab(it->first);
+        if (ownsTabEffective(tab, it->second)) continue;
+        if (tabAuth_.find(tab) != tabAuth_.end()) continue; // 本端借出的标签
+        u32 target = driverOwnerForTab(tab);
         if (target == OWNER_ID_ALL) continue; // 双方都不拥有的标签：没人能同意
-        if (tabReq_.find(it->first) != tabReq_.end()) continue; // 已有挂起申请
-        tabReq_[it->first].ownerId = target;
-        tabReq_[it->first].mode = 1;
-        tabReq_[it->first].ms = now;
+        if (tabReq_.find(tab) != tabReq_.end()) continue; // 已有挂起申请
+        tabReq_[tab].ownerId = target;
+        tabReq_[tab].mode = 1;
+        tabReq_[tab].ms = now;
         SquadAuthMsg m; m.kind = 1; m.targetId = target;
-        m.c = it->first.first; m.cs = it->first.second;
+        m.c = tab.first; m.cs = tab.second;
         tabOutbox_.push_back(m);
     }
 }
@@ -1159,7 +1187,7 @@ bool Replicator::squadAuthHasRequestable() const {
     for (std::map<std::pair<u32, u32>, unsigned int>::const_iterator it = tabRank_.begin();
          it != tabRank_.end(); ++it)
         if (!ownsTabEffective(it->first, it->second) &&
-            tabAuth_.find(it->first) == tabAuth_.end() &&
+            tabAuth_.find(canonicalTab(it->first)) == tabAuth_.end() &&
             driverOwnerForTab(it->first) != OWNER_ID_ALL)
             return true;
     return false;
@@ -1172,34 +1200,33 @@ unsigned int Replicator::takeSquadAuthNotice() {
 }
 
 u32 Replicator::driverOwnerForTab(const std::pair<u32, u32>& tab) const {
+    Tab canonical = canonicalTab(tab);
+    std::map<Tab, AuthPeer>::const_iterator auth = tabAuth_.find(canonical);
+    if (auth != tabAuth_.end() && auth->second.mode == 1) return auth->second.ownerId;
+    if (ownersAttached_) return ownerForIdentity(tabOwnerIdentity(tab));
     unsigned long now = nowMs();
     for (std::map<Key, Driven>::const_iterator it = targets_.begin(); it != targets_.end(); ++it)
-        if (it->first.c == tab.first && it->first.cs == tab.second &&
-            peerStreamFresh(it->first, now))
+        if (it->first.c == tab.first && it->first.cs == tab.second && peerStreamFresh(it->first, now))
             return it->second.owner;
     return OWNER_ID_ALL;
 }
 
 int Replicator::orderClassForHand(const unsigned int h[5]) const {
+    if (!sessionLive_) return 0;
+    Tab tab(h[1], h[2]);
+    Key local; local.t = h[0]; local.c = h[1]; local.cs = h[2]; local.i = h[3]; local.s = h[4];
+    if (ownersAttached_ && (owners_.count(canonicalTab(tab)) || allSquad_.count(local)))
+        return ownsTabEffective(tab, 0xFFFFFFFFu) ? 1 : 2;
     int cls = ownerClassForHand(h);
     if (cls != 2) return cls;
     Key k; k.t = h[0]; k.c = h[1]; k.cs = h[2]; k.i = h[3]; k.s = h[4];
-    if (peerStreamFresh(k, nowMs())) return 2;
-    // 联机会话中对方掉线（流已断）也不放开对方小队的控制：未授权不得操控
-    return (sessionLive_ && peerTabLocked(std::make_pair((u32)h[1], (u32)h[2]))) ? 2 : 0;
+    return peerStreamFresh(k, nowMs()) || peerTabLocked(tab) ? 2 : 0;
 }
 
 bool Replicator::peerTabLocked(const std::pair<u32, u32>& tab) const {
     if (!sessionLive_) return false;
-    std::map<std::pair<u32, u32>, unsigned int>::const_iterator rt = tabRank_.find(tab);
-    unsigned int rank = (rt == tabRank_.end()) ? 0xFFFFFFFFu : rt->second;
-    // 归本端的不锁（尚未经过 decideTabs 的首帧按同一归属规则判断）
-    if (ownsTabEffective(tab, rank)) return false;
-    // 未 latch 的标签、会话中新出现且判给其他玩家的标签
-    if (rt == tabRank_.end() || !rankIsShared(rank)) return true;
-    // 临时补丁：存档原有的标签只锁“其他玩家驱动过 / 交给其他玩家”的，
-    // 无人认领的排位（如两人联机时的第 3、4 个小队）照常可控
-    return peerDrivenTabs_.count(tab) != 0;
+    std::map<Tab, unsigned int>::const_iterator rank = tabRank_.find(tab);
+    return !ownsTabEffective(tab, rank == tabRank_.end() ? 0xFFFFFFFFu : rank->second);
 }
 
 bool Replicator::takePeerBodyTabOwner(u32* ownerId) {
@@ -1211,6 +1238,9 @@ bool Replicator::takePeerBodyTabOwner(u32* ownerId) {
 
 void Replicator::setPlayerIdentity(u64 id) {
     if (playerIdentity_ != id) players_.clear();
+    ownersDirty_ = true; ownersLoaded_ = false; ownersAttached_ = false;
+    ownersHaveSnapshot_ = false; ownersFileWorld_ = 0;
+    owners_.clear(); tabAliases_.clear(); pendingOwnerTabs_.clear();
     playerIdentity_ = id;
     for (std::map<u64, PeerStatusPacket>::iterator it = players_.begin(); it != players_.end(); ++it)
         it->second.present = 0;
@@ -1223,10 +1253,299 @@ void Replicator::ingestPlayers(Inbound& in) {
         for (std::map<u64, PeerStatusPacket>::iterator old = players_.begin(); old != players_.end(); ++old)
             if (old->second.ownerId == it->ownerId) old->second.present = 0;
         players_[it->playerId] = *it;
+        if (isHostRole()) ownersDirty_ = true;
         char b[224];
         _snprintf(b, sizeof(b) - 1, "[owners] player=%llu owner=%u rank=%u online=%u name='%s'",
                   it->playerId, it->ownerId, it->ownRank, it->present, it->name);
         b[sizeof(b) - 1] = 0; coop::logLine(b);
+    }
+}
+
+u64 Replicator::identityForOwner(u32 owner) const {
+    if (owner == localId_) return playerIdentity_;
+    for (std::map<u64, PeerStatusPacket>::const_iterator it = players_.begin(); it != players_.end(); ++it)
+        if (it->second.present && it->second.ownerId == owner) return it->first;
+    return 0;
+}
+
+u32 Replicator::ownerForIdentity(u64 identity) const {
+    if (!identity) return OWNER_ID_ALL;
+    if (identity == playerIdentity_) return localId_;
+    std::map<u64, PeerStatusPacket>::const_iterator it = players_.find(identity);
+    return it != players_.end() && it->second.present ? it->second.ownerId : OWNER_ID_ALL;
+}
+
+Replicator::Tab Replicator::canonicalTab(const Tab& tab, u32 author) const {
+    std::map<Tab, Tab>::const_iterator alias = tabAliases_.find(tab);
+    if (author == OWNER_ID_ALL && alias != tabAliases_.end()) return alias->second;
+    u64 identity = author == OWNER_ID_ALL ? playerIdentity_ : identityForOwner(author);
+    std::map<Tab, OwnerRow>::const_iterator exact = owners_.find(tab);
+    if (exact != owners_.end() && exact->second.playerId == identity) return tab;
+    for (std::map<Tab, OwnerRow>::const_iterator it = owners_.begin(); it != owners_.end(); ++it)
+        if (it->second.playerId == identity && it->second.sourceContainer == tab.first &&
+            it->second.sourceSerial == tab.second) return it->first;
+    return tab;
+}
+
+u64 Replicator::tabOwnerIdentity(const Tab& tab) const {
+    std::map<Tab, OwnerRow>::const_iterator row = owners_.find(canonicalTab(tab));
+    return row == owners_.end() ? 0 : row->second.playerId;
+}
+
+void Replicator::claimLocalTab(const Tab& tab) {
+    if (!sessionLive_ || !(tab.first | tab.second)) return;
+    Tab canonical = canonicalTab(tab);
+    std::map<Tab, OwnerRow>::const_iterator row = owners_.find(canonical);
+    if (ownersAttached_ && row != owners_.end()) return;
+    pendingOwnerTabs_[tab] = 0;
+    if (isHostRole() && ownersAttached_ && owners_.size() < OWNERS_MAX) {
+        OwnerRow value;
+        value.container = tab.first; value.containerSerial = tab.second;
+        value.playerId = playerIdentity_;
+        value.sourceContainer = tab.first; value.sourceSerial = tab.second;
+        owners_[tab] = value; ++ownersRevision_; ownersDirty_ = true;
+        pendingOwnerTabs_.erase(tab);
+    }
+}
+
+Replicator::Tab Replicator::registerPeerTab(GameWorld* gw, u32 author, const Tab& source, bool foreign) {
+    u64 identity = identityForOwner(author);
+    if (!identity || !isHostRole() || owners_.size() >= OWNERS_MAX) return Tab(0, 0);
+    Tab canonical = canonicalTab(source, author);
+    std::map<Tab, OwnerRow>::const_iterator known = owners_.find(canonical);
+    if (known != owners_.end() && (!foreign || known->second.playerId == identity)) return canonical;
+    unsigned int created[2] = { 0, 0 };
+    if (!engine::createPlayerSquad(gw, created)) return Tab(0, 0);
+    canonical = Tab(created[0], created[1]);
+    if (owners_.count(canonical)) return Tab(0, 0);
+    OwnerRow row;
+    row.container = canonical.first; row.containerSerial = canonical.second;
+    row.playerId = identity; row.sourceContainer = source.first; row.sourceSerial = source.second;
+    owners_[canonical] = row; ++ownersRevision_; ownersDirty_ = true;
+    char b[192];
+    _snprintf(b, sizeof(b) - 1, "[owners] registered player=%llu source=%u,%u tab=%u,%u",
+              identity, source.first, source.second, canonical.first, canonical.second);
+    b[sizeof(b) - 1] = 0; coop::logLine(b);
+    return canonical;
+}
+
+bool Replicator::readOwners(const std::string& name) {
+    std::string path = savexfer::saveFolderFor(name) + "/coop_owners.txt";
+    int n = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, 0, 0);
+    if (n <= 0) return false;
+    std::vector<wchar_t> wide(n);
+    MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, &wide[0], n);
+    FILE* f = _wfopen(&wide[0], L"rb");
+    if (!f) return false;
+    char line[1024]; unsigned int version = 0, revision = 0;
+    u64 world = 0;
+    bool valid = fgets(line, sizeof(line), f) &&
+                 sscanf(line, "KCOOP_OWNERS %u %I64u %u", &version, &world, &revision) == 3 && version == 1 && world != 0;
+    std::map<Tab, OwnerRow> rows;
+    while (valid && fgets(line, sizeof(line), f)) {
+        if (line[0] == '#' || line[0] == '\r' || line[0] == '\n') continue;
+        if (line[0] == 'P') {
+            PeerStatusPacket p; memset(&p, 0, sizeof(p)); p.ownerId = OWNER_ID_ALL;
+            char hex[129] = { 0 };
+            if (sscanf(line, "P %I64u %u %128s", &p.playerId, &p.ownRank, hex) >= 2 && p.playerId) {
+                for (unsigned int i = 0; i < 63 && hex[i * 2] && hex[i * 2 + 1]; ++i) {
+                    unsigned int byte = 0;
+                    if (sscanf(hex + i * 2, "%2x", &byte) != 1) break;
+                    p.name[i] = (char)byte;
+                }
+                if (!players_.count(p.playerId)) players_[p.playerId] = p;
+            }
+            continue;
+        }
+        OwnerRow row = { 0 };
+        valid = sscanf(line, "T %u %u %I64u %u %u", &row.container, &row.containerSerial,
+                       &row.playerId, &row.sourceContainer, &row.sourceSerial) == 5 && row.playerId != 0 &&
+                (row.container | row.containerSerial) != 0 && rows.size() < OWNERS_MAX;
+        Tab tab(row.container, row.containerSerial);
+        if (valid && !rows.count(tab)) rows[tab] = row;
+        else valid = false;
+    }
+    if (ferror(f)) valid = false;
+    fclose(f);
+    if (!valid) {
+        owners_.clear(); ownersInvalid_ = true; ownersAttached_ = true;
+        coop::logErrLine("[owners] invalid ownership file; ownership migration blocked");
+        return true;
+    }
+    ownersFileWorld_ = world;
+    if (isHostRole() || !ownersHaveSnapshot_) {
+        ownersWorld_ = world; ownersRevision_ = revision; owners_.swap(rows);
+    }
+    ownersAttached_ = isHostRole() || (ownersHaveSnapshot_ && ownersWorld_ == ownersFileWorld_);
+    if (isHostRole()) ownersDirty_ = true;
+    char b[160];
+    _snprintf(b, sizeof(b) - 1, "[owners] restored world=%llu rows=%u save='%s' attached=%d",
+              world, (unsigned)owners_.size(), name.c_str(), ownersAttached_ ? 1 : 0);
+    b[sizeof(b) - 1] = 0; coop::logLine(b);
+    return true;
+}
+
+bool Replicator::writeOwners(const std::string& name) const {
+    if (!isHostRole() || !ownersAttached_ || !ownersWorld_ || ownersInvalid_) return false;
+    std::string path = savexfer::saveFolderFor(name) + "/coop_owners.txt";
+    int n = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, 0, 0);
+    if (n <= 0) return false;
+    std::vector<wchar_t> wide(n);
+    MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, &wide[0], n);
+    std::wstring target(&wide[0]); std::wstring temp = target + L".tmp";
+    FILE* f = _wfopen(temp.c_str(), L"wb");
+    if (!f) { coop::logErrLine("[owners] ownership file could not be opened for writing"); return false; }
+    fprintf(f, "KCOOP_OWNERS 1 %I64u %u\n", ownersWorld_, ownersRevision_);
+    for (std::map<u64, PeerStatusPacket>::const_iterator it = players_.begin(); it != players_.end(); ++it) {
+        fprintf(f, "P %I64u %u ", it->first, it->second.ownRank);
+        for (unsigned int i = 0; i < 63 && it->second.name[i]; ++i) fprintf(f, "%02x", (unsigned char)it->second.name[i]);
+        fprintf(f, "\n");
+    }
+    for (std::map<Tab, OwnerRow>::const_iterator it = owners_.begin(); it != owners_.end(); ++it)
+        fprintf(f, "T %u %u %I64u %u %u\n", it->first.first, it->first.second,
+                it->second.playerId, it->second.sourceContainer, it->second.sourceSerial);
+    bool ok = ferror(f) == 0;
+    if (fclose(f) != 0) ok = false;
+    if (ok) ok = MoveFileExW(temp.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    char b[160];
+    _snprintf(b, sizeof(b) - 1, "[owners] saved rows=%u save='%s' ok=%d", (unsigned)owners_.size(), name.c_str(), ok ? 1 : 0);
+    b[sizeof(b) - 1] = 0; coop::logLine(b);
+    return ok;
+}
+
+void Replicator::resetOwnersForWorld() {
+    ownersLoaded_ = false; ownersAttached_ = false; ownersInvalid_ = false;
+    ownersFileWorld_ = 0; tabAliases_.clear(); pendingOwnerTabs_.clear();
+    ownersResetPending_ = true;
+    if (isHostRole()) {
+        owners_.clear(); ownersWorld_ = 0; ownersHaveSnapshot_ = false;
+        ++ownersAuthEpoch_; ownersDirty_ = true;
+    }
+}
+
+void Replicator::syncOwners(GameWorld* gw, NetLink& net, Inbound& in, bool host) {
+    std::deque<InboundOwners> snapshots;
+    in.drainOwners(snapshots);
+    for (std::deque<InboundOwners>::const_iterator it = snapshots.begin(); !host && it != snapshots.end(); ++it) {
+        if (ownersHaveSnapshot_ && it->header.worldId == ownersWorld_ && it->header.revision < ownersRevision_) continue;
+        std::map<Tab, OwnerRow> rows;
+        bool valid = it->rows.size() <= OWNERS_MAX;
+        for (size_t i = 0; valid && i < it->rows.size(); ++i) {
+            const OwnerRow& row = it->rows[i]; Tab key(row.container, row.containerSerial);
+            valid = row.playerId != 0 && (key.first | key.second) != 0 && !rows.count(key);
+            if (valid) rows[key] = row;
+        }
+        if (!valid) { coop::logErrLine("[owners] rejected invalid ownership snapshot"); continue; }
+        if (ownersWorld_ != it->header.worldId || ownersAuthEpoch_ != it->header.authEpoch) {
+            std::vector<Tab> restore;
+            for (std::map<Tab, bool>::const_iterator c = tabControl_.begin(); c != tabControl_.end(); ++c)
+                restore.push_back(c->first);
+            for (size_t c = 0; c < restore.size(); ++c)
+                reassignTab(gw, restore[c], tabOwnerIdentity(restore[c]) == playerIdentity_);
+            tabControl_.clear(); tabAuth_.clear(); tabReq_.clear(); tabOutbox_.clear();
+        }
+        ownersWorld_ = it->header.worldId; ownersRevision_ = it->header.revision;
+        ownersAuthEpoch_ = it->header.authEpoch;
+        owners_.swap(rows); ownersHaveSnapshot_ = true;
+        bool attached = ownersFileWorld_ != 0 && ownersFileWorld_ == ownersWorld_;
+        if (attached && !ownersAttached_) tabOwned_.clear();
+        ownersAttached_ = attached;
+        for (std::map<Tab, unsigned long>::iterator p = pendingOwnerTabs_.begin(); p != pendingOwnerTabs_.end(); ) {
+            Tab key = canonicalTab(p->first);
+            if (owners_.count(key) && owners_[key].playerId == playerIdentity_) {
+                tabAliases_[p->first] = key; pendingOwnerTabs_.erase(p++);
+            } else ++p;
+        }
+        char b[144];
+        _snprintf(b, sizeof(b) - 1, "[owners] snapshot world=%llu revision=%u rows=%u attached=%d",
+                  ownersWorld_, ownersRevision_, (unsigned)owners_.size(), ownersAttached_ ? 1 : 0);
+        b[sizeof(b) - 1] = 0; coop::logLine(b);
+    }
+    if (!ownersLoaded_) {
+        char name[64] = { 0 }; engine::saveInfo(name, sizeof(name), 0, 0);
+        bool found = name[0] && readOwners(name);
+        ownersLoaded_ = true;
+        if (host && !found) {
+            FILETIME time; GetSystemTimeAsFileTime(&time);
+            ownersWorld_ = ((u64)time.dwHighDateTime << 32 | time.dwLowDateTime) ^ playerIdentity_;
+            if (!ownersWorld_) ownersWorld_ = 1;
+            owners_.clear(); ownersRevision_ = 1; ownersAttached_ = true; ownersDirty_ = true;
+            unsigned int tabs[OWNERS_MAX][2]; unsigned int n = engine::listPlayerTabs(gw, tabs, OWNERS_MAX);
+            std::vector<Tab> sorted;
+            for (unsigned int i = 0; i < n; ++i) sorted.push_back(Tab(tabs[i][0], tabs[i][1]));
+            std::sort(sorted.begin(), sorted.end());
+            sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+            for (unsigned int i = 0; i < sorted.size(); ++i) {
+                OwnerRow row; row.container = sorted[i].first; row.containerSerial = sorted[i].second;
+                row.playerId = playerIdentity_; row.sourceContainer = row.container; row.sourceSerial = row.containerSerial;
+                for (std::map<u64, PeerStatusPacket>::const_iterator p = players_.begin(); p != players_.end(); ++p)
+                    if (p->second.present && p->second.ownRank == i && i != 0) { row.playerId = p->first; break; }
+                owners_[sorted[i]] = row;
+                char b[160];
+                _snprintf(b, sizeof(b) - 1, "[owners] legacy seed tab=%u,%u rank=%u player=%llu",
+                          row.container, row.containerSerial, i, row.playerId);
+                b[sizeof(b) - 1] = 0; coop::logLine(b);
+            }
+        }
+    }
+    if (ownersInvalid_) return;
+    for (std::map<Key, u32>::iterator p = pendingPeerMembers_.begin(); p != pendingPeerMembers_.end(); ) {
+        Tab tab = canonicalTab(Tab(p->first.c, p->first.cs), p->second);
+        if (!owners_.count(tab)) { ++p; continue; }
+        Key key = p->first; u32 author = p->second;
+        pendingPeerMembers_.erase(p++);
+        std::map<Key, Character*>::iterator proxy = proxyByKey_.find(key);
+        Character* c = proxy != proxyByKey_.end() ? proxy->second :
+            engine::resolveCharByHand(key.i, key.s, key.t, key.c, key.cs);
+        if (c) insertPeerMember(gw, author, c, key, "recruit", ownsTabEffective(tab, 0xFFFFFFFFu));
+    }
+    std::deque<OwnerRequestPacket> requests;
+    in.drainOwnerRequests(requests);
+    for (std::deque<OwnerRequestPacket>::const_iterator it = requests.begin(); host && it != requests.end(); ++it) {
+        if (!identityForOwner(it->ownerId)) continue;
+        if (!(it->container | it->containerSerial)) {
+            std::vector<Tab> restore;
+            for (std::map<Tab, bool>::const_iterator c = tabControl_.begin(); c != tabControl_.end(); ++c)
+                restore.push_back(c->first);
+            for (size_t c = 0; c < restore.size(); ++c)
+                reassignTab(gw, restore[c], tabOwnerIdentity(restore[c]) == playerIdentity_);
+            tabAuth_.clear(); tabReq_.clear(); tabControl_.clear(); tabOutbox_.clear();
+            ++ownersAuthEpoch_; ownersDirty_ = true; continue;
+        }
+        if (it->worldId && it->worldId != ownersWorld_) { ownersDirty_ = true; continue; }
+        registerPeerTab(gw, it->ownerId, Tab(it->container, it->containerSerial), it->worldId == 0);
+        ownersDirty_ = true;
+    }
+    if (host) {
+        unsigned int tabs[OWNERS_MAX][2]; unsigned int n = engine::listPlayerTabs(gw, tabs, OWNERS_MAX);
+        for (unsigned int i = 0; i < n; ++i) {
+            Tab tab(tabs[i][0], tabs[i][1]);
+            if (owners_.count(tab) || owners_.size() >= OWNERS_MAX) continue;
+            claimLocalTab(tab);
+            char b[144];
+            _snprintf(b, sizeof(b) - 1, "[owners] unknown tab=%u,%u -> host fallback", tab.first, tab.second);
+            b[sizeof(b) - 1] = 0; coop::logLine(b);
+        }
+        if (ownersDirty_) {
+            std::vector<OwnerRow> rows;
+            for (std::map<Tab, OwnerRow>::const_iterator it = owners_.begin(); it != owners_.end(); ++it) rows.push_back(it->second);
+            net.queueOwners(ownersWorld_, ownersRevision_, ownersAuthEpoch_, rows); ownersDirty_ = false;
+        }
+    } else {
+        if (ownersResetPending_ && ownersHaveSnapshot_) {
+            OwnerRequestPacket p; memset(&p, 0, sizeof(p));
+            p.type = (u8)PKT_OWNER_REQUEST; p.ownerId = localId_; p.worldId = ownersWorld_;
+            net.queueOwnerRequest(p); ownersResetPending_ = false;
+        }
+        unsigned long now = nowMs();
+        for (std::map<Tab, unsigned long>::iterator it = pendingOwnerTabs_.begin(); it != pendingOwnerTabs_.end(); ++it) {
+            if (it->second && now - it->second < 2000) continue;
+            OwnerRequestPacket p; memset(&p, 0, sizeof(p));
+            p.type = (u8)PKT_OWNER_REQUEST; p.ownerId = localId_;
+            p.worldId = ownersAttached_ ? ownersWorld_ : 0;
+            p.container = it->first.first; p.containerSerial = it->first.second;
+            net.queueOwnerRequest(p); it->second = now;
+        }
     }
 }
 

@@ -2731,7 +2731,7 @@ private:
     struct SquadAuthMsg { unsigned char kind; u32 targetId; u32 c; u32 cs; };
     std::vector<SquadAuthMsg> tabOutbox_;
     unsigned int  tabNotice_; // 供 UI 取用的一次性提示（0 = 无）
-    // 归属判定：tabOwned_ 与授权表的合成。publishOwned / rekeyPeerBody / 拖拽判定
+    // 归属判定：持久主人与会话控制权的合成。publishOwned / rekeyPeerBody / 拖拽判定
     // 三处共用它，保证口径一致（rank 由调用方从 tabRank_ 取，未 latch 时传 0xFFFFFFFF）。
     bool ownsTabEffective(const std::pair<u32, u32>& tab, unsigned int rank) const;
     // 切换某标签的归属并清掉会压过它的 per-hand pin（见设计说明 4.3）。
@@ -2754,16 +2754,11 @@ private:
     unsigned int peerBodyTabs_;
     std::map<u32, unsigned int> peerBodyOwnerCounts_;
     std::vector<u32> peerBodyOwnerQueue_;
-    // 该标签是否锁定：联机会话中、不归本端，且是会话中判给其他玩家的新标签，或
-    // peerDrivenTabs_ 记录过的存档原有标签；owner 可以是任一其他玩家，掉线后仍锁定。
+    // 联机时未拥有且未借到控制权的标签锁定，主人离线也不解锁。
     bool peerTabLocked(const std::pair<u32, u32>& tab) const;
-    // 临时补丁（第二阶段归属表之前）：联机期间被其他玩家驱动过、或本端交给其他玩家的
-    // 存档原有标签。读档 / 有人离开都保留，网络停止时清空。
-    std::set<std::pair<u32, u32> > peerDrivenTabs_;
 public:
     void setSessionLive(bool v) {
         sessionLive_ = v;
-        if (!v) peerDrivenTabs_.clear();
     }
     void setLocalId(u32 id) { localId_ = id; }
     unsigned int peerBodyTabCount() const { return peerBodyTabs_; }
@@ -2777,6 +2772,34 @@ public:
 private:
     u64 playerIdentity_;
     std::map<u64, PeerStatusPacket> players_;
+    typedef std::pair<u32, u32> Tab;
+    std::map<Tab, OwnerRow> owners_;
+    std::map<Tab, Tab> tabAliases_;
+    std::map<Tab, unsigned long> pendingOwnerTabs_;
+    u64 ownersWorld_;
+    u64 ownersFileWorld_;
+    u32 ownersRevision_;
+    u32 ownersAuthEpoch_;
+    bool ownersLoaded_;
+    bool ownersAttached_;
+    bool ownersDirty_;
+    bool ownersHaveSnapshot_;
+    bool ownersInvalid_;
+    bool ownersResetPending_;
+    std::map<Tab, bool> tabControl_;
+    std::map<Key, u32> pendingPeerMembers_;
+    u64 identityForOwner(u32 owner) const;
+    u32 ownerForIdentity(u64 identity) const;
+    bool readOwners(const std::string& name);
+public:
+    Tab canonicalTab(const Tab& tab, u32 author = OWNER_ID_ALL) const;
+    u64 tabOwnerIdentity(const Tab& tab) const;
+    void claimLocalTab(const Tab& tab);
+    Tab registerPeerTab(GameWorld* gw, u32 author, const Tab& source, bool foreign);
+    void syncOwners(GameWorld* gw, NetLink& net, Inbound& in, bool host);
+    bool writeOwners(const std::string& name) const;
+    void resetOwnersForWorld();
+    const std::map<Tab, OwnerRow>& owners() const { return owners_; }
 };
 
 } // namespace coop

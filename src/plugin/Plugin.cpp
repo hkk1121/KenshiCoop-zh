@@ -294,7 +294,11 @@ void sessionResetForUi() {
     g_loadXferRetries.clear();
     if (g_lastGw) g_repl.clearPeerReplicationState(g_lastGw);
     else          g_repl.resetSession();
+    g_repl.resetOwnersForWorld();
     g_inbound.flushWorldState();
+    std::deque<coop::InboundOwners> owners; g_inbound.drainOwners(owners);
+    std::deque<coop::OwnerRequestPacket> requests; g_inbound.drainOwnerRequests(requests);
+    std::deque<coop::PeerStatusPacket> players; g_inbound.drainPeerStatus(players);
     g_net.bumpSessionEpoch(); // v44: fence off any in-flight prior-session batch
 }
 
@@ -569,6 +573,12 @@ void driveSaveSync() {
                           rc == 1 ? "settled" : "timeout", g_savePending.c_str(),
                           files, bytes, waited);
                 b[sizeof(b) - 1] = '\0'; coopLog(b);
+                if (!g_repl.writeOwners(g_savePending) && g_net.isRunning()) {
+                    coopErr("[owners] save transfer cancelled: ownership file write failed");
+                    g_bootstrapArmed = false; g_bootstrapTargets.clear(); g_savePending.clear();
+                    return;
+                }
+                if (!g_cfg.saveSync) { g_savePending.clear(); return; }
                 if (g_bootstrapArmed && g_savePending == g_bootstrapName) {
                     // Connect-push: announce the freshly-baked save with a
                     // LOAD_GO instead of a blind stream. The join loads it
@@ -1722,7 +1732,7 @@ void tickCoordinatedSaveLoad(GameWorld* gw) {
         // Coordinated save + session resume (protocol 31): host-arbitrated
         // save edges, folder-quiescence completion, paced in-band folder
         // transfer, staged+verified commit on the join.
-        if (g_cfg.saveSync)
+        if (g_cfg.saveSync || g_cfg.isHost)
             driveSaveSync();
         // Coordinated load (protocol 32): host-arbitrated load edges,
         // fingerprint-verified join follow, SaveXfer fallback on divergence.
@@ -2182,6 +2192,7 @@ void mainLoop_hook(GameWorld* gw, float dt) {
     // then stream every owned channel so applied state is current this tick.
     // 联机会话中（网络在运行）对方小队即使对方掉线也保持锁定，纯单人不锁
     g_repl.setSessionLive(g_net.isRunning());
+    if (worldLive && g_net.isRunning()) g_repl.syncOwners(gw, g_net, g_inbound, g_cfg.isHost);
     tickReplicatePublish(gw, worldLive);
 
     // Coordinated save + load (protocols 31/32): run under g_gameStarted (NOT
@@ -2933,7 +2944,7 @@ void installEngineDetours() {
     // host-authoritative save transfer (and the join's REQ forwarding).
     // save_probe installs it too but measures the raw behaviour alone
     // (saveSync forced off - no coordination on top).
-    if (g_cfg.saveSync || g_cfg.scenario == "save_probe") {
+    if (g_cfg.saveSync || g_cfg.squadSync || g_cfg.scenario == "save_probe") {
         if (coop::engine::installSaveHook())
             coopLog(g_cfg.saveSync
                 ? "[save] save detour installed; coordinated save ON"

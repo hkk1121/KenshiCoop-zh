@@ -603,7 +603,10 @@ void Replicator::syncSpawns(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerI
         // member on this client too (same as the ok=1 path) and retire the
         // force-REQ. Only force-REQ hands become members: an ordinary world-NPC
         // census mint must NOT be dropped into the player squad.
-        if (forceReqHands_.erase(k))
+        bool forcedMember = forceReqHands_.erase(k) != 0;
+        Tab streamedTab = canonicalTab(Tab(k.c, k.cs), p.ownerId);
+        std::map<Tab, OwnerRow>::const_iterator owner = owners_.find(streamedTab);
+        if (forcedMember || (owner != owners_.end() && owner->second.playerId == identityForOwner(p.ownerId)))
             insertPeerMember(gw, p.ownerId, proxy, k, "recruit");
     }
 
@@ -969,11 +972,11 @@ void Replicator::rekeyPeerBody(GameWorld* gw, u32 authorId, const Key& oldK,
     // only then); a move into a tab not yet ranked locally reads destOwned=false
     // and self-corrects on a later edge.
     bool destOwned = false;
-    if (squadSync_ && tag && tag[0] == 's') {
+    if (squadSync_ && (ownersAttached_ || (tag && tag[0] == 's'))) {
         std::pair<u32, u32> destTab((u32)newK.c, (u32)newK.cs);
         std::map<std::pair<u32, u32>, unsigned int>::const_iterator rit =
             tabRank_.find(destTab);
-        if (rit != tabRank_.end()) destOwned = ownsTabEffective(destTab, rit->second);
+        destOwned = ownsTabEffective(canonicalTab(destTab, authorId), rit == tabRank_.end() ? 0xFFFFFFFFu : rit->second);
     }
     // The author owns a peer-tab hand even if a local tab census would rank it
     // into a tab we own; but a transfer INTO a tab we own is exactly the control
@@ -1198,7 +1201,23 @@ void Replicator::rekeyPeerBody(GameWorld* gw, u32 authorId, const Key& oldK,
 void Replicator::insertPeerMember(GameWorld* gw, u32 authorId, Character* c,
                                   const Key& newK, const char* tag, bool ownIt) {
     if (!c) return;
-    unsigned int nh[5] = { newK.t, newK.c, newK.cs, newK.i, newK.s };
+    Tab target = canonicalTab(Tab(newK.c, newK.cs), authorId);
+    if (isHostRole() && ownersAttached_ && !owners_.count(target))
+        target = registerPeerTab(gw, authorId, Tab(newK.c, newK.cs), true);
+    if (!owners_.count(target)) { pendingPeerMembers_[newK] = authorId; return; }
+    unsigned int tabs[OWNERS_MAX][2]; unsigned int n = engine::listPlayerTabs(gw, tabs, OWNERS_MAX);
+    Tab local(0, 0);
+    for (unsigned int i = 0; i < n; ++i) {
+        Tab t(tabs[i][0], tabs[i][1]);
+        if (canonicalTab(t) == target) { local = t; break; }
+    }
+    if (!(local.first | local.second)) {
+        unsigned int created[2] = { 0, 0 };
+        if (!engine::createPlayerSquad(gw, created)) { pendingPeerMembers_[newK] = authorId; return; }
+        local = Tab(created[0], created[1]); tabAliases_[local] = target;
+    }
+    ownIt = ownsTabEffective(target, 0xFFFFFFFFu);
+    unsigned int nh[5] = { newK.t, local.first, local.second, newK.i, newK.s };
     bool ok = engine::joinPlayerSquadAt(gw, c, nh);
     // Pin the body's ACTUAL local hand. setFaction assigns a local platoon index
     // that usually DIFFERS from the owner's streamed hand (each engine numbers
@@ -1224,6 +1243,11 @@ void Replicator::insertPeerMember(GameWorld* gw, u32 authorId, Character* c,
         haveLh = engine::readObjectHand(reinterpret_cast<RootObject*>(c), lh);
     } __except (EXCEPTION_EXECUTE_HANDLER) { haveLh = false; }
     Key lk; lk.t = lh[0]; lk.c = lh[1]; lk.cs = lh[2]; lk.i = lh[3]; lk.s = lh[4];
+    if (ok && haveLh) {
+        tabAliases_[Tab(lk.c, lk.cs)] = target;
+        if (mintedBodies_.erase(c) && isHostRole() && peerBodyOwnerCounts_[authorId]++ == 0)
+            peerBodyOwnerQueue_.push_back(authorId);
+    }
     bool sameAsNew = (lk.t == newK.t && lk.c == newK.c && lk.cs == newK.cs &&
                       lk.i == newK.i && lk.s == newK.s);
     bool pinnedLocal = false;
