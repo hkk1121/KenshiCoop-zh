@@ -205,6 +205,14 @@ const char*  g_toastText        = 0;     // 已翻译的提示文字，0 = 无
 int          g_toastState       = 0;     // 状态栏颜色（2 = 绿，0 = 红）
 DWORD        g_toastArmMs       = 0;
 
+// 小队控制授权（第 1 批）：本地命令被拦下时的状态栏提示（engine OrderBlockedFn）。
+// 与 coopInvOwnerClass 同一模式：引擎层不认识面板与 Replicator，只回调。
+static void coopOrderBlocked() {
+    g_toastText  = coop::tr("This is your friend's squad - ask them for control");
+    g_toastState = 0;
+    g_toastArmMs = GetTickCount();
+}
+
 // Original function pointers, filled by KenshiLib::AddHook.
 void (*g_mainLoop_orig)(GameWorld*, float) = 0;
 void (*g_titleUpdate_orig)(TitleScreen*)   = 0;
@@ -2199,6 +2207,14 @@ void installEngineDetours() {
         else
             coopLog("[xfer] FAILED to install drag detours; cross-owner trade veto degraded");
     }
+
+    // 小队控制授权（第 1 批，默认 ON）：本地玩家对“对方控制的角色”下达的命令被拦下。
+    // 分类器复用跨归属拖拽否决那一个（Replicator::ownerClassForHand）。
+    coop::engine::setOrderGuard(&coopInvOwnerClass, &coopOrderBlocked);
+    if (coop::engine::installPlayerOrderGuardHook())
+        coopLog("[order] player-command guard installed; commands on the peer's squad are blocked");
+    else
+        coopLog("[order] FAILED to install player-command guard; commands on the peer's squad are NOT blocked");
 
     // Phase W1b: query-free ground-drop capture (town reliability). Detour
     // Inventory::dropItem so every drop is discovered without the spatial sphere

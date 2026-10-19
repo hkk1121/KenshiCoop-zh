@@ -2069,6 +2069,55 @@ void Replicator::publishSquadMoves(GameWorld* gw, NetLink& net, u32 ownerId) {
         // recruit / a re-moved member must not leave a stale claim behind).
         pinOwned_.erase(ok);
         pinPeer_.erase(ok);
+        // 小队控制授权（第 1 批）：本地把“对方控制的队员”拖进自己控制的标签时，不接受
+        // 这次移动——就地回退到原标签，并且不广播 EVT_SQUAD_MOVE（对端收到后一律按“目标
+        // 标签归谁”重定归属，本协议无法表达“这次移动无效”）。回退后把对端仍在使用的流键
+        // （旧 hand）绑到本地这具身体上（proxyByKey_），否则对端流的旧 hand 在本地解析不到
+        // 会铸出重复代理（与 rekeyPeerBody 处理的同类问题）。
+        if (!exited && squadSync_ && (spawnSync_ || recruitSync_)) {
+            std::pair<u32, u32> oldTab((u32)ok.c, (u32)ok.cs);
+            std::pair<u32, u32> newTab((u32)nk.c, (u32)nk.cs);
+            std::map<std::pair<u32, u32>, unsigned int>::const_iterator oit =
+                tabRank_.find(oldTab);
+            std::map<std::pair<u32, u32>, unsigned int>::const_iterator nit =
+                tabRank_.find(newTab);
+            bool oldOwned = (oit != tabRank_.end()) ? ownsTab(oldTab, oit->second) : true;
+            bool newOwned = (nit != tabRank_.end()) ? ownsTab(newTab, nit->second) : false;
+            if (!oldOwned && newOwned) {
+                Character* mc = engine::resolveCharByHand(nk.i, nk.s, nk.t, nk.c, nk.cs);
+                if (mc) {
+                    unsigned int oh[5] = { ok.t, ok.c, ok.cs, ok.i, ok.s };
+                    unsigned int rh[5] = { 0, 0, 0, 0, 0 };
+                    bool reverted = engine::joinPlayerSquadAt(gw, mc, oh);
+                    bool haveRh = false;
+                    if (reverted) {
+                        __try {
+                            haveRh = engine::readObjectHand(
+                                reinterpret_cast<RootObject*>(mc), rh);
+                        } __except (EXCEPTION_EXECUTE_HANDLER) { haveRh = false; }
+                        // 对端的流键（旧 hand）继续指向这具身体；本侧永不发布它。
+                        proxyByKey_[ok] = mc;
+                        canonicalOf_[mc] = ok;
+                        if (haveRh) {
+                            Key rk;
+                            rk.t = rh[0]; rk.c = rh[1]; rk.cs = rh[2];
+                            rk.i = rh[3]; rk.s = rh[4];
+                            pinPeer_.insert(rk);
+                            moveEcho_[rh[4]] = nowSq;
+                        }
+                        moveEcho_[nk.s] = nowSq;
+                        char db[208];
+                        _snprintf(db, sizeof(db) - 1,
+                            "[squad] DRAG-BLOCK peer member kept old=%u,%u,%u,%u,%u "
+                            "new=%u,%u,%u,%u,%u back=%u,%u,%u,%u,%u",
+                            ok.t, ok.c, ok.cs, ok.i, ok.s, nk.t, nk.c, nk.cs, nk.i, nk.s,
+                            rh[0], rh[1], rh[2], rh[3], rh[4]);
+                        db[sizeof(db) - 1] = '\0'; coop::logLine(db);
+                        continue;
+                    }
+                }
+            }
+        }
         // Pin ownership BEFORE the wire (the recruit pattern): every edge
         // polled from OUR roster is OUR user's action, so the new hand
         // publishes from this side no matter which rank its container latched

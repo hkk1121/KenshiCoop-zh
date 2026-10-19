@@ -1,4 +1,4 @@
-// EngineInternal.cpp (formerly Engine.cpp - monolith split, 2026-07-12). This
+﻿// EngineInternal.cpp (formerly Engine.cpp - monolith split, 2026-07-12). This
 // file owns the shared engine-access substrate for every Engine*.cpp domain TU:
 //   * the g_* resolved-function-pointer registry + hook trampolines/queues
 //     (declared extern in EngineInternal.h - this is their ONE definition
@@ -2447,6 +2447,179 @@ bool readBloodByHand(const unsigned int hand[5], float* outBlood) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
+}
+
+// ---- 小队控制授权 第 1 批：本地玩家命令拦截 -----------------------------------
+// 默认双方只能操控自己的小队：本地玩家对“对方控制的角色”下达的移动 / 攻击 / 拾取 /
+// 交易 / 对话等命令在这里被拦下，而不是靠网络流事后覆盖。挂钩点选在 PlayerInterface
+// 的命令层——KenshiCoop 自己的驱动调用（Character::setDestination、
+// CharMovement::setDestination、Character::addOrder / addGoal）都不经过这些函数，
+// 因此不会误伤驱动。
+//
+// 挂钩地址一律用 KenshiLib::GetRealAddress(成员函数指针)。头文件注释里的
+// “// public RVA = 0x...” 来自另一份构建，不能直接用来挂钩；核实过程见
+// work/设计_小队控制授权.md 第 1 节。
+//
+// 归属判定由 Replicator 提供，与跨归属拖拽否决共用同一个分类器：
+//   0 = 不是玩家小队成员（世界 NPC / 容器 / 商人），1 = 本端控制，2 = 对端控制。
+// 选中集合里只要有“对方控制”的角色，整条命令就不执行（混合选择也拦）。
+// 之所以不把对方的角色临时从选中集合里摘掉：PlayerInterface::selectedCharacters 是
+// boost::unordered_set<hand,...>，它的 hash_value(hand) 定制点在游戏自己的 TU 里，
+// 我们无法保证用同一个哈希插入，插入后引擎的查找会失效。只读遍历不需要哈希，安全。
+typedef int  (*OrderOwnerClassFn)(const unsigned int ownerHand[5]);
+typedef void (*OrderBlockedFn)();
+static OrderOwnerClassFn g_orderOwnerClass = 0;
+static OrderBlockedFn     g_orderBlocked    = 0;
+
+// 命令入口的函数指针类型（x64 __fastcall：this 在 RCX，引用参数按指针传）。
+typedef void (__fastcall* OrderNewTaskFn)(PlayerInterface* self, TaskType t,
+                                          const hand* targetH, Building* destinationIndoors,
+                                          const Ogre::Vector3* clickpos, bool addDontClear);
+typedef void (__fastcall* OrderPlayerMoveFn)(PlayerInterface* self,
+                                             const Ogre::Vector3* pos, Building* destBuilding);
+typedef void (__fastcall* OrderNearestTaskFn)(PlayerInterface* self, Building* dest, TaskType t,
+                                              RootObject* subject, bool shift,
+                                              const Ogre::Vector3* location, bool noAnimals);
+typedef void (__fastcall* OrderPickupFn)(PlayerInterface* self, Item* item);
+typedef void (__fastcall* OrderStandingFn)(PlayerInterface* self, MessageForB::StandingOrder order);
+typedef void (__fastcall* OrderStopFn)(PlayerInterface* self);
+typedef void (__fastcall* OrderAddJobFn)(PlayerInterface* self, TaskType task, RootObject* subject,
+                                         bool shift, bool add, const Ogre::Vector3* location);
+typedef void (__fastcall* OrderRemoveJobFn)(PlayerInterface* self, TaskType t);
+typedef void (__fastcall* OrderRemovePermaJobFn)(PlayerInterface* self, int id);
+
+static OrderNewTaskFn        g_orderNewTaskOrig     = 0;
+static OrderPlayerMoveFn     g_orderPlayerMoveOrig  = 0;
+static OrderNearestTaskFn    g_orderNearestOrig     = 0;
+static OrderPickupFn         g_orderPickupOrig      = 0;
+static OrderStandingFn       g_orderStandingOrig    = 0;
+static OrderStopFn           g_orderStopOrig        = 0;
+static OrderAddJobFn         g_orderAddJobOrig      = 0;
+static OrderRemoveJobFn      g_orderRemoveJobOrig   = 0;
+static OrderRemovePermaJobFn g_orderRemovePermaOrig = 0;
+
+// 选中集合里是否有“对方控制”的角色（只读遍历，SEH 安全）。
+// 读故障按“放行”处理：宁可少拦，不可卡死。
+static int orderGuardPeerSelected(PlayerInterface* self) {
+    if (!self || !g_orderOwnerClass) return 0;
+    __try {
+        const ogre_unordered_set<hand>::type& sel = self->selectedCharacters;
+        for (ogre_unordered_set<hand>::type::const_iterator it = sel.begin();
+             it != sel.end(); ++it) {
+            unsigned int h[5];
+            h[0] = (unsigned int)it->type; h[1] = it->container;
+            h[2] = it->containerSerial;    h[3] = it->index; h[4] = it->serial;
+            if (g_orderOwnerClass(h) == 2) return 1;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    return 0;
+}
+
+// 进入命令前的拦截判定：1 = 放行，0 = 拦下（并给一次状态栏提示）。
+static int orderGuardEnter(PlayerInterface* self) {
+    if (!orderGuardPeerSelected(self)) return 1;
+    if (g_orderBlocked) g_orderBlocked();
+    return 0;
+}
+
+// 9 个命令入口的 detour 本体：拦下即直接返回，放行则调用原函数。
+static void __fastcall orderNewTask_hook(PlayerInterface* self, TaskType t, const hand* targetH,
+                                         Building* destinationIndoors,
+                                         const Ogre::Vector3* clickpos, bool addDontClear) {
+    if (!orderGuardEnter(self)) return;
+    g_orderNewTaskOrig(self, t, targetH, destinationIndoors, clickpos, addDontClear);
+}
+
+static void __fastcall orderPlayerMove_hook(PlayerInterface* self, const Ogre::Vector3* pos,
+                                            Building* destBuilding) {
+    if (!orderGuardEnter(self)) return;
+    g_orderPlayerMoveOrig(self, pos, destBuilding);
+}
+
+static void __fastcall orderNearestTask_hook(PlayerInterface* self, Building* dest, TaskType t,
+                                             RootObject* subject, bool shift,
+                                             const Ogre::Vector3* location, bool noAnimals) {
+    if (!orderGuardEnter(self)) return;
+    g_orderNearestOrig(self, dest, t, subject, shift, location, noAnimals);
+}
+
+static void __fastcall orderPickup_hook(PlayerInterface* self, Item* item) {
+    if (!orderGuardEnter(self)) return;
+    g_orderPickupOrig(self, item);
+}
+
+static void __fastcall orderStanding_hook(PlayerInterface* self, MessageForB::StandingOrder order) {
+    if (!orderGuardEnter(self)) return;
+    g_orderStandingOrig(self, order);
+}
+
+static void __fastcall orderStop_hook(PlayerInterface* self) {
+    if (!orderGuardEnter(self)) return;
+    g_orderStopOrig(self);
+}
+
+static void __fastcall orderAddJob_hook(PlayerInterface* self, TaskType task, RootObject* subject,
+                                        bool shift, bool add, const Ogre::Vector3* location) {
+    if (!orderGuardEnter(self)) return;
+    g_orderAddJobOrig(self, task, subject, shift, add, location);
+}
+
+static void __fastcall orderRemoveJob_hook(PlayerInterface* self, TaskType t) {
+    if (!orderGuardEnter(self)) return;
+    g_orderRemoveJobOrig(self, t);
+}
+
+static void __fastcall orderRemovePermaJob_hook(PlayerInterface* self, int id) {
+    if (!orderGuardEnter(self)) return;
+    g_orderRemovePermaOrig(self, id);
+}
+
+// 安装 9 个命令入口 detour。任一失败即整体算失败：拦截是安全特性，缺一个都可能漏拦
+// （漏拦的后果是本地命令被网络流覆盖，表现为“命令没反应”，不是崩溃）。
+bool installPlayerOrderGuardHook() {
+    intptr_t aNewTask = KenshiLib::GetRealAddress(
+        &PlayerInterface::newPlayerTaskSelectedCharacters);
+    intptr_t aMove    = KenshiLib::GetRealAddress(&PlayerInterface::playerMove);
+    intptr_t aNearest = KenshiLib::GetRealAddress(
+        &PlayerInterface::addTaskNearestSelectedCharacter);
+    intptr_t aPickup  = KenshiLib::GetRealAddress(&PlayerInterface::pickupItem);
+    intptr_t aStand   = KenshiLib::GetRealAddress(
+        &PlayerInterface::setOrderSelectedCharacters);
+    intptr_t aStop    = KenshiLib::GetRealAddress(&PlayerInterface::stopCharactersMovement);
+    intptr_t aAddJob  = KenshiLib::GetRealAddress(
+        &PlayerInterface::addJobSelectedCharacters);
+    intptr_t aRemJob  = KenshiLib::GetRealAddress(
+        &PlayerInterface::removeJobSelectedCharacters);
+    intptr_t aRemPerma = KenshiLib::GetRealAddress(
+        &PlayerInterface::removePermaJobSelectedCharacters);
+    unsigned int ok = 0;
+    if (aNewTask && KenshiLib::AddHook(aNewTask, (void*)&orderNewTask_hook,
+                                       (void**)&g_orderNewTaskOrig) == KenshiLib::SUCCESS) ++ok;
+    if (aMove && KenshiLib::AddHook(aMove, (void*)&orderPlayerMove_hook,
+                                    (void**)&g_orderPlayerMoveOrig) == KenshiLib::SUCCESS) ++ok;
+    if (aNearest && KenshiLib::AddHook(aNearest, (void*)&orderNearestTask_hook,
+                                       (void**)&g_orderNearestOrig) == KenshiLib::SUCCESS) ++ok;
+    if (aPickup && KenshiLib::AddHook(aPickup, (void*)&orderPickup_hook,
+                                      (void**)&g_orderPickupOrig) == KenshiLib::SUCCESS) ++ok;
+    if (aStand && KenshiLib::AddHook(aStand, (void*)&orderStanding_hook,
+                                     (void**)&g_orderStandingOrig) == KenshiLib::SUCCESS) ++ok;
+    if (aStop && KenshiLib::AddHook(aStop, (void*)&orderStop_hook,
+                                    (void**)&g_orderStopOrig) == KenshiLib::SUCCESS) ++ok;
+    if (aAddJob && KenshiLib::AddHook(aAddJob, (void*)&orderAddJob_hook,
+                                      (void**)&g_orderAddJobOrig) == KenshiLib::SUCCESS) ++ok;
+    if (aRemJob && KenshiLib::AddHook(aRemJob, (void*)&orderRemoveJob_hook,
+                                      (void**)&g_orderRemoveJobOrig) == KenshiLib::SUCCESS) ++ok;
+    if (aRemPerma && KenshiLib::AddHook(aRemPerma, (void*)&orderRemovePermaJob_hook,
+                                        (void**)&g_orderRemovePermaOrig) == KenshiLib::SUCCESS) ++ok;
+    char b[96];
+    _snprintf(b, sizeof(b) - 1, "[order] guard detours installed=%u/9", ok);
+    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    return ok == 9;
+}
+
+void setOrderGuard(OrderOwnerClassFn fn, OrderBlockedFn blocked) {
+    g_orderOwnerClass = fn;
+    g_orderBlocked = blocked;
 }
 
 } // namespace engine

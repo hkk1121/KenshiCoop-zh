@@ -2210,6 +2210,20 @@ void setSpeedCombatHint(bool inCombat);
 // user acted this tick" so a genuine same-frame click is not fought.
 void reconcileVoteButtons();
 
+// ---- 小队控制授权：本地命令拦截（第 1 批） -----------------------------------
+// 默认双方只能操控自己的小队：本地玩家对“对方控制的角色”下达的命令在 PlayerInterface
+// 的命令层被拦下（挂钩写法与 installXferBlockHook 同源）。分类器与跨归属拖拽否决共用
+// 同一个（Replicator::ownerClassForHand）：0 = 非玩家小队成员，1 = 本端控制，2 = 对端控制。
+// blocked 回调只用于状态栏提示（引擎层不认识面板 / Replicator）。
+typedef int  (*OrderOwnerClassFn)(const unsigned int ownerHand[5]);
+typedef void (*OrderBlockedFn)();
+void setOrderGuard(OrderOwnerClassFn fn, OrderBlockedFn blocked);
+// 安装 9 个命令入口 detour（newPlayerTaskSelectedCharacters / playerMove /
+// addTaskNearestSelectedCharacter / pickupItem / setOrderSelectedCharacters /
+// stopCharactersMovement / addJobSelectedCharacters / removeJobSelectedCharacters /
+// removePermaJobSelectedCharacters）。全部成功才返回 true。
+bool installPlayerOrderGuardHook();
+
 } // namespace engine
 } // namespace coop
 
