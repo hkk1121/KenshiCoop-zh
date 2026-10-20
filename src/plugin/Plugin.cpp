@@ -1063,7 +1063,7 @@ void coopUiScan() {
 // ONE-CLICK launcher actions (the title-screen HOST GAME / JOIN GAME buttons;
 // also driven by the KENSHICOOP_UI_AUTO rehearsal hook - synthetic mouse input
 // never reaches Kenshi, so the flow test presses the same entry point).
-//   HOST: go ONLINE as a UDP host right away; the player then loads a save.
+//   HOST: 按当前连接方式（配置默认 Steam）立即作为主机上线，玩家随后读档。
 //   JOIN: scan, and when the scan lands (tickDiscovery below) auto-pick a
 //         protocol-matching host, auto-claim the NEXT FREE squad slot from
 //         the advertised player count (1 player in = slot 1; 2 in = slot 2),
@@ -1074,8 +1074,9 @@ void coopUiMenuAction(bool host) {
             coopLog("[coop-ui] menu: already hosting");
             return;
         }
-        coopLog("[coop-ui] menu: one-click HOST (udp)");
-        coopUiConnect(true, false, 0, 0, 0);
+        bool useSteam = g_cfg.transport == "steam";
+        coopLog(useSteam ? "[coop-ui] menu: one-click HOST (steam)" : "[coop-ui] menu: one-click HOST (udp)");
+        coopUiConnect(true, useSteam, 0, 0, 0);
     } else {
         if (g_net.isRunning() && !g_cfg.isHost) {
             coopLog("[coop-ui] menu: already joining/joined (F2 to manage)");

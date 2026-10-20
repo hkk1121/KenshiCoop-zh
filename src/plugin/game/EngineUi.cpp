@@ -338,11 +338,14 @@ void onRoomPageButton(DataPanelLine* line);
 // raw-MyGUI link). A press flips the armed flag and requests a rebuild so the
 // caption reflects the new choice on the next tick.
 void onRoleBtn(DataPanelLine*) {
+    // 在线时角色与连接方式不可切换（切换只在下次上线生效，会与实际会话不符）
+    if (g_panel.connectedFlag) { coop::logLine("[coop-ui] role locked while online"); return; }
     g_panel.hostFlag = !g_panel.hostFlag;
     g_panel.needsRebuild = true;
     coop::logLine(g_panel.hostFlag ? "[coop-ui] role -> Host" : "[coop-ui] role -> Join");
 }
 void onTransBtn(DataPanelLine*) {
+    if (g_panel.connectedFlag) { coop::logLine("[coop-ui] transport locked while online"); return; }
     g_panel.steamFlag = !g_panel.steamFlag;
     g_panel.needsRebuild = true;
     coop::logLine(g_panel.steamFlag ? "[coop-ui] transport -> Steam" : "[coop-ui] transport -> UDP");
@@ -889,10 +892,10 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         fb[sizeof(fb) - 1] = '\0';
         std::string title    = coop::tr("Co-op Session    -    F2 to close");
         std::string roleKey  = "role";
-        _snprintf(fb, sizeof(fb) - 1, coop::tr("Role: %s    (switch)"), coop::tr(g_panel.hostFlag ? "HOST" : "JOIN"));
+        _snprintf(fb, sizeof(fb) - 1, coop::tr(g_panel.connectedFlag ? "Role: %s    (go offline to switch)" : "Role: %s    (switch)"), coop::tr(g_panel.hostFlag ? "HOST" : "JOIN"));
         std::string roleCap  = fb;
         std::string transKey = "trans";
-        _snprintf(fb, sizeof(fb) - 1, coop::tr("Transport: %s    (switch)"), g_panel.steamFlag ? "STEAM" : "UDP");
+        _snprintf(fb, sizeof(fb) - 1, coop::tr(g_panel.connectedFlag ? "Transport: %s    (go offline to switch)" : "Transport: %s    (switch)"), g_panel.steamFlag ? "STEAM" : "UDP");
         std::string transCap = fb;
         std::string connKey  = "conn";
         _snprintf(fb, sizeof(fb) - 1, coop::tr("Connection: %s    (switch)"), coop::tr(g_panel.connectedFlag ? "ONLINE" : "OFFLINE"));
