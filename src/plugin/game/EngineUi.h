@@ -10,6 +10,11 @@
 #ifndef KENSHICOOP_ENGINE_UI_H
 #define KENSHICOOP_ENGINE_UI_H
 
+#include <string>
+#include <vector>
+
+class GameWorld;
+
 namespace coop {
 namespace engine {
 
@@ -96,6 +101,26 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
 // destroyed the widget (world load). Pass show=false to remove it. Main-thread
 // only; SEH-guarded.
 void coopOverlayTick(const char* text, int state, bool show);
+
+
+struct CoopPlayerSquad {
+    unsigned int container, containerSerial;
+    std::string name;
+    std::vector<std::string> members;
+    bool loaded;
+};
+
+struct CoopPlayerBox {
+    unsigned long long playerId;
+    unsigned int rank;
+    bool present, local;
+    std::string name;
+    std::vector<CoopPlayerSquad> squads;
+};
+
+void readPlayerBoxRoster(GameWorld* gw, std::vector<CoopPlayerSquad>& out);
+void coopPlayerBoxesTick(const std::vector<CoopPlayerBox>& boxes, bool active,
+                         unsigned long long world);
 
 } // namespace engine
 } // namespace coop

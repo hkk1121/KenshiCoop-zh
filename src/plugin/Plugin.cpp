@@ -1201,6 +1201,8 @@ void tickDiscovery() {
 // banner, while the panel itself needs no world. Driven from BOTH the in-game
 // mainLoop_hook and the title-screen titleUpdate_hook so a join can go ONLINE
 // (and copy/paste Steam IDs) straight from the main menu.
+void coopPlayerBoxesDrive(GameWorld* gw);
+
 void coopPanelDrive(GameWorld* gw) {
     // Discovery ticks in EVERY mode (the harness autoscan + responder advert
     // must run without the panel); the panel below stays interactive-only.
@@ -1377,6 +1379,7 @@ void coopPanelDrive(GameWorld* gw) {
     coop::engine::coopPanelTick(&ps, &coopUiConnect, &coopUiDisconnect, &coopUiScan,
                                 &coopUiMenuAction, &coopUiAuth, &coopUiCharacter);
     coop::engine::coopOverlayTick(detail.c_str(), ostate, g_net.isRunning());
+    coopPlayerBoxesDrive(gw);
 }
 
 // Main-thread tick hook: the one safe point where we touch game state.
@@ -3407,4 +3410,55 @@ void driveCharacterCreation(GameWorld* gw, bool worldLive) {
     if (g_cfg.isHost && GetTickCount() - g_characterAppearanceTick >= 5000) g_characterAppearanceTick = GetTickCount();
 }
 
+} // namespace
+
+
+namespace {
+void coopPlayerBoxesDrive(GameWorld* gw) {
+    static std::vector<coop::engine::CoopPlayerBox> boxes;
+    static unsigned long sampled = 0;
+    static coop::u64 lastWorld = 0;
+    coop::u64 world = g_repl.ownershipWorld();
+    bool active = g_net.isRunning() && g_gameStarted && gw && world && coop::engine::gameplayLive(gw);
+    unsigned long now = GetTickCount();
+    if (!active) { boxes.clear(); sampled = 0; lastWorld = 0; }
+    else if (!sampled || lastWorld != world || now - sampled >= 250) {
+        sampled = now; lastWorld = world; boxes.clear();
+        std::vector<coop::engine::CoopPlayerSquad> roster;
+        coop::engine::readPlayerBoxRoster(gw, roster);
+        for (std::map<coop::u64, coop::PeerStatusPacket>::const_iterator p = g_repl.players().begin(); p != g_repl.players().end(); ++p) {
+            coop::engine::CoopPlayerBox box;
+            box.playerId = p->first; box.rank = p->second.ownRank;
+            box.present = p->second.present != 0; box.local = p->first == g_repl.playerIdentity();
+            box.name = coop::room::displayText(p->second.name, 63);
+            char text[128];
+            if (box.name.empty()) {
+                _snprintf(text, sizeof(text) - 1, coop::tr("Player %04X"), (unsigned int)(p->first & 0xFFFFu));
+                text[sizeof(text) - 1] = 0; box.name = text;
+            }
+            for (std::map<std::pair<coop::u32, coop::u32>, coop::OwnerRow>::const_iterator o = g_repl.owners().begin(); o != g_repl.owners().end(); ++o) {
+                if (o->second.playerId != p->first) continue;
+                coop::engine::CoopPlayerSquad squad;
+                squad.container = o->first.first; squad.containerSerial = o->first.second; squad.loaded = false;
+                for (unsigned int i = 0; i < roster.size(); ++i) {
+                    std::pair<coop::u32, coop::u32> tab(roster[i].container, roster[i].containerSerial);
+                    if (g_repl.canonicalTab(tab) != o->first) continue;
+                    squad.name = roster[i].name; squad.loaded = squad.loaded || roster[i].loaded;
+                    squad.members.insert(squad.members.end(), roster[i].members.begin(), roster[i].members.end());
+                }
+                if (squad.name.empty()) {
+                    _snprintf(text, sizeof(text) - 1, coop::tr("Squad %u:%u"), squad.container, squad.containerSerial);
+                    text[sizeof(text) - 1] = 0; squad.name = text;
+                }
+                box.squads.push_back(squad);
+            }
+            unsigned int pos = 0;
+            while (pos < boxes.size() && (boxes[pos].rank < box.rank ||
+                (boxes[pos].rank == box.rank && (boxes[pos].present > box.present ||
+                (boxes[pos].present == box.present && boxes[pos].playerId < box.playerId))))) ++pos;
+            boxes.insert(boxes.begin() + pos, box);
+        }
+    }
+    coop::engine::coopPlayerBoxesTick(boxes, active, world);
+}
 } // namespace

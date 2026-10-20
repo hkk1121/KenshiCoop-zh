@@ -712,4 +712,21 @@ int loadFpsLimit() {
     return fps;
 }
 
+
+void savePlayerBoxesHidden(bool hidden) {
+    std::string p = configFilePath();
+    p = p.substr(0, p.find_last_of("\\/") + 1) + "coop_player_boxes_hidden.txt";
+    std::ofstream f(p.c_str(), std::ios::binary | std::ios::trunc);
+    if (!f) { coop::logErrLine("[playerbox] hide preference save failed"); return; }
+    f << (hidden ? 1 : 0) << "\n";
+}
+
+bool loadPlayerBoxesHidden() {
+    std::string p = configFilePath();
+    p = p.substr(0, p.find_last_of("\\/") + 1) + "coop_player_boxes_hidden.txt";
+    std::ifstream f(p.c_str(), std::ios::binary);
+    int hidden = 0;
+    return (f >> hidden) && hidden == 1;
+}
+
 } // namespace coop

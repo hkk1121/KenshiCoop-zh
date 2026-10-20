@@ -20,6 +20,11 @@
 // digit entry.
 #include <kenshi/gui/DatapanelGUI.h>
 #include <kenshi/gui/DataPanelLine.h>
+template<typename T> class ReorderableListItem;
+// VC100 不支持此头文件中依赖模板基类的析构 override，局部屏蔽后立即恢复。
+#define override
+#include <kenshi/gui/ManagementScreen.h>
+#undef override
 #include <mygui/MyGUI_Delegate.h> // MyGUI::newDelegate + CDelegate* (free-fn callbacks)
 #include <windows.h>
 
@@ -1283,4 +1288,242 @@ void onRoomPageButton(DataPanelLine*) {
     ++g_roomPage; g_panel.needsRebuild = true;
 }
 } // namespace
+} } // namespace coop::engine
+
+
+namespace coop { namespace engine { namespace {
+
+struct PlayerBoxTabRead {
+    unsigned int c, cs;
+    bool loaded;
+    char name[256];
+};
+
+unsigned int playerBoxTabsSeh(GameWorld* gw, PlayerBoxTabRead* out, unsigned int cap) {
+    unsigned int count = 0;
+    __try {
+        if (!gw || !gw->player) return 0;
+        Faction* f = gw->player->getFaction();
+        if (!f) return 0;
+        for (int list = 0; list < 2; ++list) {
+            const lektor<Platoon*>* tabs = list ? &f->unloadedPlatoons : &f->activePlatoons;
+            if (tabs->size() > 8192) continue;
+            for (unsigned int i = 0; i < tabs->size() && count < cap; ++i) {
+                Platoon* p = (*tabs)[i];
+                if (!p) continue;
+                const hand& h = p->getHandle();
+                if (!(h.container | h.containerSerial)) continue;
+                out[count].c = h.container; out[count].cs = h.containerSerial;
+                out[count].loaded = p->activePlatoon != 0;
+                out[count].name[0] = 0;
+                if (p->activePlatoon) {
+                    strncpy(out[count].name, p->activePlatoon->getName().c_str(), 255);
+                    out[count].name[255] = 0;
+                }
+                ++count;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return count;
+}
+
+DatapanelGUI* g_playerBoxes[4] = {0, 0, 0, 0};
+DatapanelGUI* g_playerBoxToggle = 0;
+std::string g_playerBoxTitles[4];
+std::vector<std::pair<std::string, std::string> > g_playerBoxRows[4];
+std::string g_playerBoxToggleTitle;
+unsigned long long g_playerBoxWorld = 0;
+unsigned int g_playerBoxPage = 0;
+bool g_playerBoxesHidden = false;
+
+bool playerBoxAliveSeh(ForgottenGUI* g, DatapanelGUI* p) {
+    if (!g || !p) return false;
+    __try {
+        if (g->guiDatapanels.size() > 8192) return false;
+        for (unsigned int i = 0; i < g->guiDatapanels.size(); ++i)
+            if (g->guiDatapanels[i] == p) return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return false;
+}
+
+bool playerBoxAnchorSeh(ForgottenGUI* g, int* w, int* h, MyGUI::IntCoord* bar, bool* fallback) {
+    __try {
+        if (!g || !g->mainbar || !g->mainbar->mMainWidget || !g->isVisible() ||
+            !g->mainbar->mMainWidget->getVisible() || g->isLoading() || g->hasModalMessage() ||
+            g->isCharacterEditorMode() || g->getNumOpenInventoryWindows() > 0 ||
+            g->isStatsWindowOpen() || g->getInDialogue()) return false;
+        ManagementScreen* management = ManagementScreen::getSingleton();
+        if (management && management->getVisible()) return false;
+        *w = g->mainbar->mMainWidget->getWidth();
+        *h = g->mainbar->mMainWidget->getHeight();
+        if (*w < 640 || *h < 480) return false;
+        if (g->mainbar->portraitsTabPanel) {
+            if (!g->mainbar->portraitsTabPanel->getVisible()) return false;
+            *bar = g->mainbar->portraitsTabPanel->getAbsoluteCoord();
+            if (bar->width > 0 && bar->height > 0 && bar->top > 0 && bar->top < *h) return true;
+        }
+        *fallback = true;
+        *bar = MyGUI::IntCoord((int)(*w * 0.308854f), (int)(*h * 0.787963f),
+                               (int)(*w * 0.396875f), (int)(*h * 0.214815f));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+void playerBoxPlaceSeh(DatapanelGUI* p, int x, int y, int w, int h, bool show) {
+    if (!p) return;
+    __try {
+        if (show) {
+            if (p->win && (p->win->getWidth() != w || p->win->getHeight() != h)) p->_NV_resize(w, h);
+            p->_NV_setPosition(x, y);
+        }
+        p->_NV_show(show);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+void onPlayerBoxPage(DataPanelLine*);
+
+bool playerBoxBuildSeh(DatapanelGUI* p, const std::string* title,
+                      const std::vector<std::pair<std::string, std::string> >* rows,
+                      bool toggle, const std::string* hide, const std::string* page) {
+    __try {
+        p->_NV_clear();
+        p->setCaption(*title);
+        p->_NV_setAutomaticTargeting(false);
+        if (toggle) {
+            p->setLineCheckbox(*hide, &g_playerBoxesHidden, 0);
+            if (!page->empty()) p->setLineButton(*page, *page, 0)->callback = MyGUI::newDelegate(&onPlayerBoxPage);
+        } else {
+            MyGUI::Align align = MyGUI::Align::Left;
+            for (unsigned int i = 0; i < rows->size(); ++i)
+                p->setLineText((*rows)[i].first, (*rows)[i].second, 0, true, align);
+        }
+        p->_NV_update();
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+void onPlayerBoxPage(DataPanelLine*) { ++g_playerBoxPage; }
+
+} // namespace
+
+void readPlayerBoxRoster(GameWorld* gw, std::vector<CoopPlayerSquad>& out) {
+    out.clear();
+    PlayerBoxTabRead tabs[512];
+    unsigned int n = playerBoxTabsSeh(gw, tabs, 512);
+    for (unsigned int i = 0; i < n; ++i) {
+        CoopPlayerSquad row;
+        row.container = tabs[i].c; row.containerSerial = tabs[i].cs;
+        row.name = room::displayText(tabs[i].name, 192); row.loaded = tabs[i].loaded;
+        out.push_back(row);
+    }
+    EntityState members[160];
+    n = captureSquad(gw, false, members, 160);
+    for (unsigned int i = 0; i < n; ++i) {
+        char name[256];
+        charName(resolve(members[i]), name, sizeof(name));
+        for (unsigned int j = 0; j < out.size(); ++j)
+            if (out[j].container == members[i].hContainer && out[j].containerSerial == members[i].hContainerSerial) {
+                out[j].members.push_back(room::displayText(name, 192)); break;
+            }
+    }
+}
+
+void coopPlayerBoxesTick(const std::vector<CoopPlayerBox>& boxes, bool active,
+                         unsigned long long world) {
+    static bool loaded = false, savedHidden = false, loggedFallback = false;
+    if (!loaded) { g_playerBoxesHidden = savedHidden = loadPlayerBoxesHidden(); loaded = true; }
+    if (savedHidden != g_playerBoxesHidden) {
+        savePlayerBoxesHidden(g_playerBoxesHidden); savedHidden = g_playerBoxesHidden;
+    }
+    ForgottenGUI* g = ::gui;
+    for (int i = 0; i < 4; ++i) if (g_playerBoxes[i] && !playerBoxAliveSeh(g, g_playerBoxes[i])) {
+        g_playerBoxes[i] = 0; g_playerBoxTitles[i].clear(); g_playerBoxRows[i].clear();
+    }
+    if (g_playerBoxToggle && !playerBoxAliveSeh(g, g_playerBoxToggle)) {
+        g_playerBoxToggle = 0; g_playerBoxToggleTitle.clear();
+    }
+    if (!active || world != g_playerBoxWorld) {
+        for (int i = 0; i < 4; ++i) {
+            panelDestroySeh(g, g_playerBoxes[i]); g_playerBoxes[i] = 0;
+            g_playerBoxTitles[i].clear(); g_playerBoxRows[i].clear();
+        }
+        panelDestroySeh(g, g_playerBoxToggle); g_playerBoxToggle = 0; g_playerBoxToggleTitle.clear();
+        g_playerBoxWorld = world; g_playerBoxPage = 0;
+        if (!active) return;
+    }
+    int screenW = 0, screenH = 0;
+    MyGUI::IntCoord bar;
+    bool fallback = false;
+    bool show = !g_panel.open && playerBoxAnchorSeh(g, &screenW, &screenH, &bar, &fallback);
+    if (!show || boxes.empty()) {
+        for (int i = 0; i < 4; ++i) playerBoxPlaceSeh(g_playerBoxes[i], 0, 0, 0, 0, false);
+        playerBoxPlaceSeh(g_playerBoxToggle, 0, 0, 0, 0, false);
+        return;
+    }
+    if (fallback && !loggedFallback) {
+        coop::logLine("[playerbox] squad tab widget unavailable; using mainbar layout proportions"); loggedFallback = true;
+    }
+    unsigned int pages = ((unsigned int)boxes.size() + 3) / 4;
+    g_playerBoxPage %= pages;
+    unsigned int start = g_playerBoxPage * 4;
+    unsigned int count = (unsigned int)boxes.size() - start;
+    if (count > 4) count = 4;
+    float scale = (float)screenH / 1080.0f;
+    int gap = (int)(6 * scale), boxH = (int)(280 * scale), stripH = (int)((pages > 1 ? 98 : 72) * scale);
+    int totalW = (int)(count * 270 * scale) + ((int)count - 1) * gap;
+    if (totalW < bar.width) totalW = bar.width;
+    if (totalW > screenW - 2 * gap) totalW = screenW - 2 * gap;
+    int left = bar.left + bar.width / 2 - totalW / 2;
+    if (left < gap) left = gap;
+    if (left + totalW > screenW - gap) left = screenW - gap - totalW;
+    int bottom = bar.top - gap;
+    if (boxH + stripH > bottom - gap) boxH = bottom - stripH - gap;
+    int boxW = (totalW - ((int)count - 1) * gap) / (int)count;
+    int stripW = (int)(310 * scale);
+    if (stripW > totalW) stripW = totalW;
+    std::string layer = "MiddleFront", hide = coop::tr("Hide player boxes"), page;
+    char b[256];
+    if (pages > 1) {
+        _snprintf(b, sizeof(b) - 1, coop::tr("Players %u/%u - next page"), g_playerBoxPage + 1, pages);
+        b[sizeof(b) - 1] = 0; page = b;
+    }
+    std::string toggleTitle = coop::tr("Co-op players");
+    std::string toggleFingerprint = toggleTitle + page;
+    if (!g_playerBoxToggle) {
+        g_playerBoxToggle = g->createDatapanel(0.1f, 0.2f, 0.2f, 0.1f, false, layer, true);
+        uiPanelArmSeh(g, g_playerBoxToggle);
+    }
+    if (g_playerBoxToggle && toggleFingerprint != g_playerBoxToggleTitle &&
+        playerBoxBuildSeh(g_playerBoxToggle, &toggleTitle, 0, true, &hide, &page)) g_playerBoxToggleTitle = toggleFingerprint;
+    playerBoxPlaceSeh(g_playerBoxToggle, left, bottom - stripH - (g_playerBoxesHidden ? 0 : boxH + gap), stripW, stripH, true);
+    for (unsigned int i = 0; i < 4; ++i) {
+        if (i >= count || g_playerBoxesHidden) { playerBoxPlaceSeh(g_playerBoxes[i], 0, 0, 0, 0, false); continue; }
+        const CoopPlayerBox& box = boxes[start + i];
+        std::string title = box.name + " - " + (box.present ? coop::tr("Online") : coop::tr("Offline"));
+        if (box.local) title += coop::tr(" (me)");
+        std::vector<std::pair<std::string, std::string> > rows;
+        if (box.squads.empty()) rows.push_back(std::make_pair("empty", std::string(coop::tr("No assigned squads"))));
+        for (unsigned int j = 0; j < box.squads.size(); ++j) {
+            const CoopPlayerSquad& squad = box.squads[j];
+            _snprintf(b, sizeof(b) - 1, "s%u", j); b[sizeof(b) - 1] = 0;
+            std::string key = b;
+            rows.push_back(std::make_pair(key, squad.name));
+            if (squad.members.empty()) rows.push_back(std::make_pair(key + "e", std::string(squad.loaded ? coop::tr("No loaded members") : coop::tr("Members not loaded"))));
+            for (unsigned int k = 0; k < squad.members.size(); ++k) {
+                _snprintf(b, sizeof(b) - 1, "s%um%u", j, k); b[sizeof(b) - 1] = 0;
+                rows.push_back(std::make_pair(std::string(b), "  " + (squad.members[k].empty() ? std::string(coop::tr("Unnamed character")) : squad.members[k])));
+            }
+        }
+        if (!g_playerBoxes[i]) {
+            g_playerBoxes[i] = g->createDatapanel(0.2f, 0.2f, 0.2f, 0.2f, true, layer, true);
+            uiPanelArmSeh(g, g_playerBoxes[i]);
+        }
+        if (g_playerBoxes[i] && (g_playerBoxTitles[i] != title || g_playerBoxRows[i] != rows) &&
+            playerBoxBuildSeh(g_playerBoxes[i], &title, &rows, false, &hide, &page)) {
+            g_playerBoxTitles[i] = title; g_playerBoxRows[i] = rows;
+        }
+        playerBoxPlaceSeh(g_playerBoxes[i], left + (int)i * (boxW + gap), bottom - boxH, boxW, boxH, true);
+    }
+}
+
 } } // namespace coop::engine

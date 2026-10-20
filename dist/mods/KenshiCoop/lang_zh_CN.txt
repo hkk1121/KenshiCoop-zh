@@ -143,3 +143,17 @@ No friend rooms found - you can paste a host ID=未发现好友房间，可粘�
 More rooms (%u/%u)=更多房间（%u/%u 页）
 
 Steam room join timed out - try pasting the host ID=Steam 房间加入超时，请尝试粘贴主机 ID
+
+# 第三阶段玩家框
+Hide player boxes=隐藏玩家框
+Players %u/%u - next page=玩家 %u/%u 页：下一页
+Co-op players=联机玩家
+Online=在线
+Offline=离线
+ (me)=（我）
+No assigned squads=尚无所属编队
+No loaded members=没有已载入成员
+Members not loaded=成员未载入
+Unnamed character=未命名角色
+Player %04X=玩家 %04X
+Squad %u:%u=编队 %u:%u

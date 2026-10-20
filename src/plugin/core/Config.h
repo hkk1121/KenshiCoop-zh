@@ -676,6 +676,10 @@ unsigned long long loadLastPeer();
 void saveFpsLimit(int fps);
 int loadFpsLimit();
 
+
+void savePlayerBoxesHidden(bool hidden);
+bool loadPlayerBoxesHidden();
+
 } // namespace coop
 
 #endif // KENSHICOOP_CONFIG_H
