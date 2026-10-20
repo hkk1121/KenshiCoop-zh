@@ -448,6 +448,7 @@ void onFpsBtn(DataPanelLine*) {
     g_panel.needsRebuild = true;
 }
 void onPlayerBoxBtn(DataPanelLine*) {
+    if (!g_panel.lastConnected) return;
     g_playerBoxesHidden = !g_playerBoxesHidden;
     g_panel.needsRebuild = true;
     coop::logLine(g_playerBoxesHidden ? "[playerbox] hidden from F2 panel" : "[playerbox] shown from F2 panel");
@@ -1034,8 +1035,9 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         _snprintf(fb, sizeof(fb) - 1, coop::tr("FPS limit: %s    (switch)"), fpsVal.c_str());
         std::string fpsCap   = fb;
         std::string playerBoxKey = "playerboxes";
-        std::string playerBoxCap = coop::tr(g_playerBoxesHidden ? "Player boxes: hidden    (click to show)"
-                                                                : "Player boxes: shown    (click to hide)");
+        std::string playerBoxCap = coop::tr(!st->running ? "Player boxes: available when online"
+                                            : g_playerBoxesHidden ? "Player boxes: hidden    (click to show)"
+                                                                  : "Player boxes: shown    (click to hide)");
         // 小队控制授权（第 3 批）：状态行文字 + 按钮文案 + 条件显示标志
         std::string authKey = coop::tr("Squad control");
         std::string authVal;
