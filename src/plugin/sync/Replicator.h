@@ -2502,10 +2502,14 @@ public:
     // 每帧调用：发出发件箱（申请 / 同意 / 拒绝 / 收回 / 归还）+ 挂起申请超时清理。
     void squadAuthTick(GameWorld* gw, NetLink& net, u32 ownerId);
     // 面板动作（申请 / 同意 / 拒绝 / 收回）。
-    void requestSquadAuth(NetLink& net, u32 ownerId);
-    void grantSquadAuth(GameWorld* gw, NetLink& net, u32 ownerId);
-    void denySquadAuth(NetLink& net, u32 ownerId);
-    void revokeSquadAuth(GameWorld* gw, NetLink& net, u32 ownerId);
+    void requestSquadAuth(NetLink& net, u32 ownerId, u64 targetPlayer = 0,
+                         const std::pair<u32, u32>* singleTab = 0);
+    void grantSquadAuth(GameWorld* gw, NetLink& net, u32 ownerId, u64 targetPlayer = 0,
+                         const std::pair<u32, u32>* singleTab = 0);
+    void denySquadAuth(NetLink& net, u32 ownerId, u64 targetPlayer = 0,
+                         const std::pair<u32, u32>* singleTab = 0);
+    void revokeSquadAuth(GameWorld* gw, NetLink& net, u32 ownerId, u64 targetPlayer = 0,
+                         const std::pair<u32, u32>* singleTab = 0);
     // 面板状态查询。
     int  squadAuthPendingPeer() const;    // 1 = 有对方申请待处理（要 [同意]/[拒绝]）
     int  squadAuthGrantedMine() const;    // 本端已授权出去的标签数（可 [收回]）
@@ -2821,6 +2825,13 @@ private:
     u32 characterWorldEpoch_;
 public:
     const std::map<Tab, OwnerRow>& owners() const { return owners_; }
+    struct SquadAuthView {
+        int authMode, requestMode;
+        u64 authPlayerId, requestPlayerId;
+        bool requestable;
+    };
+    void squadAuthView(const std::pair<u32, u32>& tab, SquadAuthView& out) const;
+
 };
 
 } // namespace coop

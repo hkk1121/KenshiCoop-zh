@@ -974,7 +974,10 @@ void Replicator::applySquadAuth(GameWorld* gw, const EventPacket& ev) {
               tab.first, tab.second, mine ? 1 : 0, rank);
     b[sizeof(b) - 1] = '\0'; coop::logLine(b);
     if (kind == 1) {                      // REQUEST：对方申请控制这个标签
-        if (mine && (!ownersAttached_ || tabOwnerIdentity(tab) == playerIdentity_)) {
+        std::map<Tab, AuthPeer>::const_iterator pending = tabReq_.find(tab);
+        bool available = pending == tabReq_.end() ||
+            (pending->second.mode == 2 && pending->second.ownerId == ev.ownerId);
+        if (mine && available && (!ownersAttached_ || tabOwnerIdentity(tab) == playerIdentity_)) {
             tabReq_[tab].ownerId = ev.ownerId;
             tabReq_[tab].mode = 2;
             tabReq_[tab].ms = nowMs();
@@ -1069,19 +1072,29 @@ void Replicator::squadAuthTick(GameWorld* gw, NetLink& net, u32 ownerId) {
     }
 }
 
-// 面板动作：申请控制“不归本端”的每个标签（标准两标签存档下就是对方那一个）。
-void Replicator::requestSquadAuth(NetLink& net, u32 ownerId) {
+// 面板动作：按永久主人及可选标签申请，默认仍处理全部可申请编队。
+void Replicator::requestSquadAuth(NetLink& net, u32 ownerId, u64 targetPlayer,
+                                  const std::pair<u32, u32>* singleTab) {
     (void)net; (void)ownerId;
-    if (!squadSync_) return;
+    if (!squadSync_ || !sessionLive_) return;
+    std::set<Tab> candidates;
+    if (ownersAttached_) {
+        for (std::map<Tab, OwnerRow>::const_iterator it = owners_.begin(); it != owners_.end(); ++it)
+            candidates.insert(it->first);
+    } else {
+        for (std::map<Tab, unsigned int>::const_iterator it = tabRank_.begin(); it != tabRank_.end(); ++it)
+            candidates.insert(canonicalTab(it->first));
+    }
     unsigned long now = nowMs();
-    for (std::map<std::pair<u32, u32>, unsigned int>::const_iterator it = tabRank_.begin();
-         it != tabRank_.end(); ++it) {
-        Tab tab = canonicalTab(it->first);
-        if (ownsTabEffective(tab, it->second)) continue;
-        if (tabAuth_.find(tab) != tabAuth_.end()) continue; // 本端借出的标签
+    for (std::set<Tab>::const_iterator it = candidates.begin(); it != candidates.end(); ++it) {
+        Tab tab = *it;
+        if (singleTab && tab != canonicalTab(*singleTab)) continue;
+        SquadAuthView view;
+        squadAuthView(tab, view);
+        if (!view.requestable) continue;
         u32 target = driverOwnerForTab(tab);
-        if (target == OWNER_ID_ALL) continue; // 双方都不拥有的标签：没人能同意
-        if (tabReq_.find(tab) != tabReq_.end()) continue; // 已有挂起申请
+        u64 identity = ownersAttached_ ? tabOwnerIdentity(tab) : identityForOwner(target);
+        if (targetPlayer && identity != targetPlayer) continue;
         tabReq_[tab].ownerId = target;
         tabReq_[tab].mode = 1;
         tabReq_[tab].ms = now;
@@ -1092,11 +1105,18 @@ void Replicator::requestSquadAuth(NetLink& net, u32 ownerId) {
 }
 
 // 面板 [同意]：先把本侧停发（归属翻成对方，命令拦截同帧生效），再回 GRANT。
-void Replicator::grantSquadAuth(GameWorld* gw, NetLink& net, u32 ownerId) {
+void Replicator::grantSquadAuth(GameWorld* gw, NetLink& net, u32 ownerId, u64 targetPlayer,
+                                  const std::pair<u32, u32>* singleTab) {
     (void)net; (void)ownerId;
+    if (!squadSync_ || !sessionLive_) return;
+    unsigned long now = nowMs();
     for (std::map<std::pair<u32, u32>, AuthPeer>::iterator it = tabReq_.begin();
          it != tabReq_.end(); ) {
-        if (it->second.mode != 2) { ++it; continue; }
+        if (it->second.mode != 2 || (targetPlayer && identityForOwner(it->second.ownerId) != targetPlayer) ||
+            (singleTab && it->first != canonicalTab(*singleTab)) ||
+            (it->second.ms && now - it->second.ms > (unsigned long)TAB_AUTH_TIMEOUT_MS) ||
+            (ownersAttached_ && (ownersInvalid_ || tabOwnerIdentity(it->first) != playerIdentity_)) ||
+            !ownsTabEffective(it->first, 0xFFFFFFFFu)) { ++it; continue; }
         std::pair<u32, u32> tab = it->first;
         u32 target = it->second.ownerId;
         tabReq_.erase(it++);
@@ -1111,11 +1131,13 @@ void Replicator::grantSquadAuth(GameWorld* gw, NetLink& net, u32 ownerId) {
 }
 
 // 面板 [拒绝]：清挂起并回 DENY。
-void Replicator::denySquadAuth(NetLink& net, u32 ownerId) {
+void Replicator::denySquadAuth(NetLink& net, u32 ownerId, u64 targetPlayer,
+                                  const std::pair<u32, u32>* singleTab) {
     (void)net; (void)ownerId;
     for (std::map<std::pair<u32, u32>, AuthPeer>::iterator it = tabReq_.begin();
          it != tabReq_.end(); ) {
-        if (it->second.mode != 2) { ++it; continue; }
+        if (it->second.mode != 2 || (targetPlayer && identityForOwner(it->second.ownerId) != targetPlayer) ||
+            (singleTab && it->first != canonicalTab(*singleTab))) { ++it; continue; }
         std::pair<u32, u32> tab = it->first;
         u32 target = it->second.ownerId;
         tabReq_.erase(it++);
@@ -1128,12 +1150,15 @@ void Replicator::denySquadAuth(NetLink& net, u32 ownerId) {
 // 面板 [收回控制权] / [归还控制权]。授权出去的标签：发 REVOKE 并记“收回中”，等对方
 // RETURN 后才真正接管（先停发再接管，避免两端同时发布的窗口，见设计说明第 5 节）。
 // 借到的标签：本端先停发，再发 RETURN，对方收到后接管。
-void Replicator::revokeSquadAuth(GameWorld* gw, NetLink& net, u32 ownerId) {
+void Replicator::revokeSquadAuth(GameWorld* gw, NetLink& net, u32 ownerId, u64 targetPlayer,
+                                  const std::pair<u32, u32>* singleTab) {
     (void)net; (void)ownerId;
     std::vector<std::pair<u32, u32> > borrowed;
     unsigned long now = nowMs();
     for (std::map<std::pair<u32, u32>, AuthPeer>::iterator it = tabAuth_.begin();
          it != tabAuth_.end(); ++it) {
+        if ((targetPlayer && identityForOwner(it->second.ownerId) != targetPlayer) ||
+            (singleTab && it->first != canonicalTab(*singleTab))) continue;
         if (it->second.mode == 2) { borrowed.push_back(it->first); continue; }
         tabReq_[it->first].ownerId = it->second.ownerId;
         tabReq_[it->first].mode = 3;
@@ -1185,12 +1210,19 @@ int Replicator::squadAuthRequesting() const {
 }
 
 bool Replicator::squadAuthHasRequestable() const {
-    for (std::map<std::pair<u32, u32>, unsigned int>::const_iterator it = tabRank_.begin();
-         it != tabRank_.end(); ++it)
-        if (!ownsTabEffective(it->first, it->second) &&
-            tabAuth_.find(canonicalTab(it->first)) == tabAuth_.end() &&
-            driverOwnerForTab(it->first) != OWNER_ID_ALL)
-            return true;
+    if (ownersAttached_) {
+        for (std::map<Tab, OwnerRow>::const_iterator it = owners_.begin(); it != owners_.end(); ++it) {
+            SquadAuthView view;
+            squadAuthView(it->first, view);
+            if (view.requestable) return true;
+        }
+    } else {
+        for (std::map<Tab, unsigned int>::const_iterator it = tabRank_.begin(); it != tabRank_.end(); ++it) {
+            SquadAuthView view;
+            squadAuthView(it->first, view);
+            if (view.requestable) return true;
+        }
+    }
     return false;
 }
 
@@ -1664,6 +1696,36 @@ bool Replicator::createdCharacterArrived(u32 author, const unsigned int h[5]) co
     Key key; key.t = h[0]; key.c = h[1]; key.cs = h[2]; key.i = h[3]; key.s = h[4];
     std::map<Key, Driven>::const_iterator stream = targets_.find(key);
     return stream != targets_.end() && stream->second.owner == author && stream->second.lastSeenMs != 0;
+}
+
+void Replicator::squadAuthView(const std::pair<u32, u32>& source, SquadAuthView& out) const {
+    out.authMode = out.requestMode = 0;
+    out.authPlayerId = out.requestPlayerId = 0;
+    out.requestable = false;
+    if (!squadSync_ || !sessionLive_ || (ownersAttached_ && ownersInvalid_)) return;
+    Tab tab = canonicalTab(source);
+    std::map<Tab, AuthPeer>::const_iterator auth = tabAuth_.find(tab);
+    if (auth != tabAuth_.end()) {
+        out.authMode = auth->second.mode;
+        out.authPlayerId = identityForOwner(auth->second.ownerId);
+    }
+    std::map<Tab, AuthPeer>::const_iterator request = tabReq_.find(tab);
+    if (request != tabReq_.end() && (!request->second.ms ||
+        nowMs() - request->second.ms <= (unsigned long)TAB_AUTH_TIMEOUT_MS)) {
+        out.requestMode = request->second.mode;
+        out.requestPlayerId = identityForOwner(request->second.ownerId);
+    }
+    if (auth != tabAuth_.end() || request != tabReq_.end()) return;
+    u32 target = driverOwnerForTab(tab);
+    if (target == OWNER_ID_ALL || target == localId_) return;
+    if (ownersAttached_) {
+        u64 owner = tabOwnerIdentity(tab);
+        if (!owner || owner == playerIdentity_ || ownerForIdentity(owner) != target) return;
+    }
+    unsigned int rank = 0xFFFFFFFFu;
+    for (std::map<Tab, unsigned int>::const_iterator it = tabRank_.begin(); it != tabRank_.end(); ++it)
+        if (canonicalTab(it->first) == tab) { rank = it->second; break; }
+    out.requestable = !ownsTabEffective(tab, rank);
 }
 
 } // namespace coop
