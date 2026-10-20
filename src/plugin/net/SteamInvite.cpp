@@ -123,7 +123,8 @@ bool               g_creating     = false;// CreateLobby call in flight
 bool               g_picker       = false;// in-panel friend picker is active
 unsigned long long g_pendingInvitee = 0;  // friend clicked before the lobby existed
 char               g_status[128]  = {0};
-bool g_wantHost = false;
+bool g_wantHost = false, g_createAbandoned = false;
+DWORD g_lastLobbyAttempt = 0;
 SteamAPICall_t g_createCall = 0;
 typedef void (*UnregisterCrFn)(void*, SteamAPICall_t);
 UnregisterCrFn g_unregCr = 0;
@@ -138,9 +139,11 @@ SteamCallback g_cbLobbyData;
 room::Info g_watched, g_advert;
 std::map<std::string, std::string> g_published;
 std::vector<room::Info> g_rooms;
+bool g_browser = false;
 void queryRoom(room::Info& info);
 void readRoom(room::Info& info, room::LobbyDataUpdate* data);
 void publishRoom();
+void createLobbyIfNeeded();
 
 // Cached friend list for the in-panel picker (our own copy - GetFriendPersonaName
 // returns a Steam-owned pointer only valid until the next call). Sorted in-Kenshi
@@ -181,32 +184,25 @@ bool friendInKenshi(unsigned long long fid) {
 // and sort in-Kenshi > online > offline so the useful ones surface first.
 void refreshFriends() {
     g_friendN = 0;
-    if (!g_frCount || !g_frByIndex || !g_frName) return;
-    const int k_EFriendFlagImmediate = 0x04;
-    int n = g_frCount(g_friends, k_EFriendFlagImmediate);
-    for (int i = 0; i < n && g_friendN < MAX_FRIENDS; ++i) {
-        unsigned long long fid = g_frByIndex(g_friends, i, k_EFriendFlagImmediate);
-        if (fid == 0) continue;
-        FriendRow& r = g_friendRows[g_friendN];
-        r.id = fid;
-        const char* nm = g_frName(g_friends, fid);
-        _snprintf(r.name, sizeof(r.name) - 1, "%s", nm ? nm : "(unknown)");
-        r.name[sizeof(r.name) - 1] = '\0';
-        int persona = g_frState ? g_frState(g_friends, fid) : 0; // 0 = offline
-        r.state = friendInKenshi(fid) ? 2 : (persona != 0 ? 1 : 0);
-        ++g_friendN;
+    if (!g_ready || !g_frCount || !g_frByIndex || !g_frName) return;
+    std::vector<room::Info> next;
+    int n = g_frCount(g_friends, 0x04);
+    for (int i = 0; i < n; ++i) {
+        SteamId id = g_frByIndex(g_friends, i, 0x04);
+        FriendGameInfo_t game; std::memset(&game, 0, sizeof(game));
+        if (!id || !g_frGame(g_friends, id, &game) || (game.gameId & 0xFFFFFFu) != KENSHI_APPID || !game.lobby) continue;
+        // 先筛选所有好友的游戏/大厅状态，再限制候选缓存数量。
+        if (next.size() >= MAX_FRIENDS) break;
+        room::Info info; info.host = id;
+        for (size_t j = 0; j < g_rooms.size(); ++j) if (g_rooms[j].host == id && g_rooms[j].lobby == game.lobby) { info = g_rooms[j]; break; }
+        queryRoom(info);
+        if (info.state == room::AVAILABLE && GetTickCount() - info.refreshed > 8000) info.state = room::UNKNOWN;
+        next.push_back(info);
+        FriendRow& row = g_friendRows[g_friendN++]; row.id = id; row.state = 2;
+        std::string name = room::displayText(g_frName(g_friends, id), sizeof(row.name)-1);
+        std::memcpy(row.name, name.c_str(), name.size()+1);
     }
-    // Simple insertion sort by state descending (small N).
-    for (int i = 1; i < g_friendN; ++i) {
-        FriendRow key = g_friendRows[i];
-        int j = i - 1;
-        while (j >= 0 && g_friendRows[j].state < key.state) { g_friendRows[j + 1] = g_friendRows[j]; --j; }
-        g_friendRows[j + 1] = key;
-    }
-    char b[96];
-    _snprintf(b, sizeof(b) - 1, "friend list refreshed: %d friend(s)", g_friendN);
-    b[sizeof(b) - 1] = '\0';
-    steamLog(b);
+    g_rooms.swap(next);
 }
 
 // ---- Callback handlers (main thread, via Kenshi's SteamAPI_RunCallbacks) -----
@@ -218,7 +214,12 @@ void onLobbyCreated(LobbyCreated_t* r, bool ioFailure) {
         setStatus("Lobby creation failed - try again or type the ID");
         return;
     }
-    if (!g_wantHost) { if (g_leaveLobby) g_leaveLobby(g_mm, r->lobby); return; }
+    if (!g_wantHost || g_createAbandoned) {
+        if (g_leaveLobby) g_leaveLobby(g_mm, r->lobby);
+        g_createAbandoned = false;
+        if (g_wantHost) createLobbyIfNeeded();
+        return;
+    }
     g_published.clear();
     g_lobby     = r->lobby;
     g_weAreHost = true;
@@ -268,15 +269,20 @@ void onGameLobbyJoinRequested(GameLobbyJoinRequested_t* r) {
 void onLobbyEnter(LobbyEnter_t* r) {
     if (!r || r->response != 1) { g_joiningLobby = 0; return; }
     unsigned long long lobby = r->lobby;
-    if (lobby == g_lobby && g_wantHost) return;
+    unsigned long long owner = g_getOwner ? g_getOwner(g_mm, lobby) : 0;
+    SteamId self = (SteamId)coop::steamp2p::selfId();
+    if (owner == self) {
+        if (g_wantHost && !g_createAbandoned) {
+            if (g_lobby != lobby) g_published.clear();
+            g_lobby = lobby; g_weAreHost = true; publishRoom();
+        } else if (g_leaveLobby) g_leaveLobby(g_mm, lobby);
+        return;
+    }
     if (g_joiningLobby != lobby) {
         if (g_leaveLobby && lobby != g_lobby) g_leaveLobby(g_mm, lobby);
         return;
     }
-    unsigned long long owner = g_getOwner ? g_getOwner(g_mm, lobby) : 0;
-    SteamId self = (SteamId)coop::steamp2p::selfId();
-
-    if (!owner || owner == self || !g_getData || std::strcmp(g_getData(g_mm, lobby, "kc_game"), "KenshiCoop")) {
+    if (!owner || !g_getData || std::strcmp(g_getData(g_mm, lobby, "kc_game"), "KenshiCoop")) {
         if (g_leaveLobby) g_leaveLobby(g_mm, lobby);
         g_joiningLobby = 0; return;
     }
@@ -432,14 +438,10 @@ bool init(ConnectFn onConnect) {
 bool ready() { return g_ready; }
 
 namespace {
-// Kick off the async friends-only lobby if we don't have one yet. Capacity 4
-// (project stage one: MAX_PLAYERS in Wire.h) so three friends can enter; the
-// automated hosting hand-off still fires on the FIRST arrival - a third
-// player over Steam rides the host's steamPeers list (F2 panel / config),
-// not the invite hand-off.
+// 常驻好友大厅只负责发现；游戏在线人数来自 ENet 准入，不随大厅成员变动重连。
 void createLobbyIfNeeded() {
     if (g_lobby != 0 || g_creating) return;
-    g_creating = true;
+    g_creating = true; g_createAbandoned = false; g_lastLobbyAttempt = GetTickCount();
     steamLog("creating friends-only 4-player lobby...");
     SteamAPICall_t call = g_createLobby(g_mm, k_ELobbyTypeFriendsOnly,
                                         (int)coop::MAX_PLAYERS);
@@ -507,13 +509,14 @@ void tick() {
     if (g_watched.host && (!g_watched.requested || GetTickCount() - g_watched.requested >= 4000)) queryRoom(g_watched);
     if (g_watched.state == room::QUERYING && GetTickCount() - g_watched.requested >= 3500) g_watched.state = room::UNKNOWN;
     if (g_watched.state == room::AVAILABLE && GetTickCount() - g_watched.refreshed > 8000) g_watched.state = room::UNKNOWN;
+    if (g_wantHost && !g_lobby && !g_creating && GetTickCount() - g_lastLobbyAttempt >= 5000) createLobbyIfNeeded();
     if (g_wantHost && g_lobby) publishRoom();
 
     // Refresh the picker's friend list every ~3s while it's open (online / in-game
     // status changes over time). Skip once the host has already connected.
-    if (g_picker && !g_hostFired) {
+    if (g_browser || (g_picker && !g_hostFired)) {
         unsigned int now = GetTickCount();
-        if (g_lastFriendRefresh == 0 || now - g_lastFriendRefresh >= 3000) {
+        if (g_lastFriendRefresh == 0 || now - g_lastFriendRefresh >= 4000) {
             g_lastFriendRefresh = now;
             refreshFriends();
         }
@@ -534,10 +537,12 @@ void reset() {
     g_lobby     = 0;
     g_weAreHost = false;
     g_hostFired = false;
-    // 创建仍在途时保留回调；结果到达后按 g_wantHost 接管或立即离开。
+    // 创建仍在途时保留回调；旧请求结果只离开，新主机会话另建大厅。
+    if (g_creating) g_createAbandoned = true;
     g_picker    = false;
     g_pendingInvitee = 0;
     g_friendN   = 0;
+    g_rooms.clear(); g_browser = false; g_lastFriendRefresh = 0;
     g_status[0] = '\0';
     g_wantHost = false; g_connectedHost = 0; g_joiningLobby = 0;
 
@@ -552,7 +557,7 @@ void hostRoom() {
 void updateSession(bool hosting, SteamId connectedHost, const char* saveUtf8,
                    bool world, unsigned int players, unsigned int slots) {
     g_connectedHost = connectedHost;
-    g_advert.name = room::displayText(steamp2p::selfName(), 240);
+    g_advert.name = room::displayText(g_ready ? g_frName(g_friends, steamp2p::selfId()) : steamp2p::selfName(), 240);
     g_advert.save = room::displayText(saveUtf8, 240);
     g_advert.world = world; g_advert.players = players; g_advert.slots = slots;
     if (hosting && !g_wantHost) hostRoom();
@@ -620,6 +625,27 @@ void publishRoom() {
         g_published["presence"] = "1";
 }
 } // namespace
+
+void browseRooms(bool active) {
+    if (active && !g_browser) g_lastFriendRefresh = 0;
+    g_browser = active;
+}
+
+int roomCount() {
+    int count = 0;
+    for (size_t i = 0; i < g_rooms.size(); ++i)
+        if (g_rooms[i].state == room::AVAILABLE && GetTickCount() - g_rooms[i].refreshed <= 8000) ++count;
+    return count;
+}
+
+const room::Info* friendRoom(int index) {
+    if (index < 0) return 0;
+    for (size_t i = 0; i < g_rooms.size(); ++i) {
+        if (g_rooms[i].state != room::AVAILABLE || GetTickCount() - g_rooms[i].refreshed > 8000) continue;
+        if (index-- == 0) return &g_rooms[i];
+    }
+    return 0;
+}
 
 } // namespace steaminvite
 } // namespace coop

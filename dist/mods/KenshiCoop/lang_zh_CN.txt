@@ -133,3 +133,11 @@ Version matches=版本一致
 Version mismatch - update both to the same co-op build=版本不一致，请双方更新到同一个联机包
  - in world= - 已进入世界
  - at menu / loading= - 标题界面或加载中
+
+Room is no longer available - refresh and try again=该房间已不可用，请刷新后重试
+%s | %s | %u/%u | %s=%s | %s | %u/%u 人 | %s
+Version mismatch=版本不一致
+Friend rooms=好友房间
+Click a room to connect=点击房间即可连接
+No friend rooms found - you can paste a host ID=未发现好友房间，可粘贴主机 ID 连接
+More rooms (%u/%u)=更多房间（%u/%u 页）

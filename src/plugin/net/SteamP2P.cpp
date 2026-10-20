@@ -450,7 +450,11 @@ void tick() {
             std::memcpy(&d, bytes, sizeof(d));
             if (g_roomHost && !std::memcmp(d.tag, "KCRQ", 4) && d.reason == 0) {
                 if (!allowedPeer(sender)) rejectPeer(sender, room::REJECT_FRIEND);
-                else if (slotForPeer(sender) < 0) registerPeer(sender);
+                else if (slotForPeer(sender) < 0) {
+                    unsigned int used = 0;
+                    for (unsigned int k = 0; k < g_peerCount; ++k) if (g_peers[k]) ++used;
+                    if (used >= coop::MAX_PLAYERS - 1) rejectPeer(sender, room::REJECT_FULL);
+                }
             } else if (!g_roomHost && sender == g_peers[0] && !std::memcmp(d.tag, "KCRD", 4) &&
                        (d.reason == room::REJECT_FRIEND || d.reason == room::REJECT_FULL))
                 InterlockedExchange(&g_joinRejection, (LONG)d.reason);

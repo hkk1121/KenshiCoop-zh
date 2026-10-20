@@ -321,6 +321,14 @@ unsigned long long g_roomTarget = 0;
 std::string g_lastRoomUi;
 DataPanelLine* g_roomLine = 0;
 std::string roomDescription(const coop::room::Info& room);
+const int ROOM_ROWS = 3;
+DataPanelLine_Button* g_roomButtons[ROOM_ROWS] = { 0 };
+unsigned long long g_roomButtonIds[ROOM_ROWS] = { 0 }, g_clickedRoomId = 0;
+DataPanelLine_Button* g_roomPageButton = 0;
+int g_roomPage = 0;
+std::string g_lastFriendRooms;
+void onRoomButton(DataPanelLine* line);
+void onRoomPageButton(DataPanelLine* line);
 
 // Button callbacks (free functions - MyGUI::newDelegate wraps them without any
 // raw-MyGUI link). A press flips the armed flag and requests a rebuild so the
@@ -450,6 +458,8 @@ struct PanelStrings {
     const std::string *connKey, *connCap;
     const std::string *slotKey, *slotCap;
     const std::string *roomKey, *roomVal;
+    const std::string *roomsKey, *roomsVal, *roomButtonKeys, *roomButtonCaps, *roomPageKey, *roomPageCap;
+    int roomButtonCount;
     const std::string *scanKey, *scanCap;   // null = no Scan button (HOST/Steam)
     const std::string *discKey, *discVal;   // null = no browser row (nothing to show)
     const std::string *dbgKey, *dbgVal;
@@ -485,6 +495,14 @@ void panelBuildSeh(DatapanelGUI* p, const PanelStrings* s) {
         g_discLine = 0;
         if (s->discKey && s->discVal)
             g_discLine = p->setLine(*s->discKey, *s->discVal, *s->empty, 0, false, true);
+        for (int i = 0; i < ROOM_ROWS; ++i) g_roomButtons[i] = 0;
+        g_roomPageButton = 0;
+        if (s->roomsKey) {
+            p->setLine(*s->roomsKey, *s->roomsVal, *s->empty, 0, false, true);
+            for (int i = 0; i < s->roomButtonCount; ++i)
+                g_roomButtons[i] = p->setLineButton(s->roomButtonKeys[i], s->roomButtonCaps[i], 0);
+            if (s->roomPageKey) g_roomPageButton = p->setLineButton(*s->roomPageKey, *s->roomPageCap, 0);
+        }
         p->addSpace(0, 0.35f);
         // Connection-status debug line (coloured white below, outside SEH).
         g_debugLine = p->setLine(*s->dbgKey, *s->dbgVal, *s->empty, 0, false, true);
@@ -713,7 +731,58 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         if (onMenuAction) onMenuAction(req > 0);
     }
 
+    bool showFriendRooms = g_panel.open && !g_panel.hostFlag && g_panel.steamFlag && !st->running;
+    coop::steaminvite::browseRooms(showFriendRooms);
     if (!g_panel.open) return;
+    if (g_clickedRoomId) {
+        unsigned long long clicked = g_clickedRoomId; g_clickedRoomId = 0;
+        const coop::room::Info* found = 0;
+        for (int i = 0; i < coop::steaminvite::roomCount(); ++i) {
+            const coop::room::Info* candidate = coop::steaminvite::friendRoom(i);
+            if (candidate && candidate->host == clicked) { found = candidate; break; }
+        }
+        coop::steaminvite::watchRoom(clicked);
+        if (!found) coop::setNetUiError("Room is no longer available - refresh and try again");
+        else {
+            g_pastedPeers[0] = clicked; g_pastedCount = 1; g_slotManual = false; g_roomTarget = 0;
+            coop::saveLastPeer(clicked);
+            if (found->protocol != coop::PROTOCOL_VERSION)
+                coop::setNetUiError("Version mismatch with host - update both to the same KenshiCoop build");
+            else if (found->players >= found->limit) coop::setNetUiError("Room is full - wait for a free player slot");
+            else if (showFriendRooms) {
+                unsigned int freeSlot = coop::room::firstFreeSlot(found->slots, found->limit);
+                if (freeSlot) g_slotChoice = freeSlot;
+                g_panel.connectedFlag = true;
+            }
+        }
+        g_panel.needsRebuild = true;
+    }
+    int friendRooms = showFriendRooms ? coop::steaminvite::roomCount() : 0;
+    int roomPages = (friendRooms + ROOM_ROWS - 1) / ROOM_ROWS;
+    if (!roomPages || g_roomPage >= roomPages) g_roomPage = 0;
+    std::string roomButtonKeys[ROOM_ROWS], roomButtonCaps[ROOM_ROWS];
+    int roomButtonCount = 0;
+    std::string friendRoomUi;
+    for (int i = g_roomPage * ROOM_ROWS; i < friendRooms && roomButtonCount < ROOM_ROWS; ++i) {
+        const coop::room::Info* info = coop::steaminvite::friendRoom(i);
+        if (!info) continue;
+        std::string name = coop::room::displayText(info->name.c_str(), 36);
+        std::string save = coop::room::displayText(info->save.c_str(), 48);
+        if (name.size() < info->name.size()) name += "...";
+        if (save.size() < info->save.size()) save += "...";
+        char line[512];
+        _snprintf(line, sizeof(line)-1, coop::tr("%s | %s | %u/%u | %s"), name.c_str(),
+            save.empty() ? coop::tr("No save yet") : save.c_str(), info->players, info->limit,
+            coop::tr(info->protocol == coop::PROTOCOL_VERSION ? "Version matches" : "Version mismatch"));
+        line[sizeof(line)-1] = 0;
+        roomButtonKeys[roomButtonCount] = "friendroom" + std::to_string((long long)roomButtonCount);
+        roomButtonCaps[roomButtonCount] = line;
+        g_roomButtonIds[roomButtonCount] = info->host;
+        friendRoomUi += std::to_string(info->host) + line;
+        ++roomButtonCount;
+    }
+    friendRoomUi += std::to_string((long long)roomPages);
+    if (friendRoomUi != g_lastFriendRooms) { g_lastFriendRooms = friendRoomUi; g_panel.needsRebuild = true; }
     std::string characterUi = st->characterTemplate ? st->characterTemplate : "";
     characterUi += st->characterStatus ? st->characterStatus : "";
     characterUi += st->editingCharacter ? "E" : st->canCreateCharacter ? "Y" : "N";
@@ -721,7 +790,7 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
 
     std::string roomDetail;
     if (!g_panel.hostFlag && g_panel.steamFlag) {
-        unsigned long long target = g_pastedCount ? g_pastedPeers[0] : st->peerSteamId;
+        unsigned long long target = st->running ? st->peerSteamId : g_pastedCount ? g_pastedPeers[0] : st->peerSteamId;
         if (g_roomTarget != target) { g_roomTarget = target; g_slotManual = false; }
         coop::steaminvite::watchRoom(target);
         const coop::room::Info& info = coop::steaminvite::watchedRoom();
@@ -746,6 +815,9 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         g_panel.needsRebuild = true;
     }
 
+    if (!st->running && g_panel.connectedFlag && g_panel.lastChkVal) {
+        g_panel.connectedFlag = false; g_panel.lastChkVal = false; g_panel.needsRebuild = true;
+    }
     std::string detail = st->detail ? std::string(st->detail) : std::string();
     if (detail != g_panel.lastStatus) g_panel.needsRebuild = true;
 
@@ -920,7 +992,19 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         std::string characterStatusKey = coop::tr("Character creation");
         std::string characterStatus = st->characterStatus ? st->characterStatus : "";
         std::string roomKey = coop::tr("Room info");
+        std::string roomsKey = coop::tr("Friend rooms");
+        std::string roomsVal = friendRooms ? coop::tr("Click a room to connect") :
+            coop::tr("No friend rooms found - you can paste a host ID");
+        std::string roomPageKey = "roompage";
+        char pageCaption[128];
+        _snprintf(pageCaption, sizeof(pageCaption)-1, coop::tr("More rooms (%u/%u)"), (unsigned)g_roomPage+1, (unsigned)roomPages);
+        pageCaption[sizeof(pageCaption)-1] = 0;
+        std::string roomPageCap = pageCaption;
         PanelStrings ps;
+        ps.roomsKey = showFriendRooms ? &roomsKey : 0; ps.roomsVal = &roomsVal;
+        ps.roomButtonKeys = roomButtonKeys; ps.roomButtonCaps = roomButtonCaps;
+        ps.roomButtonCount = roomButtonCount;
+        ps.roomPageKey = showFriendRooms && roomPages > 1 ? &roomPageKey : 0; ps.roomPageCap = &roomPageCap;
         ps.roomKey = roomDetail.empty() ? 0 : &roomKey; ps.roomVal = roomDetail.empty() ? 0 : &roomDetail;
         ps.characterTemplateKey = &characterTemplateKey; ps.characterTemplateCap = &characterTemplateCap;
         ps.characterCreateKey = &characterCreateKey; ps.characterCreateCap = &characterCreateCap;
@@ -961,6 +1045,8 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         if (g_roleBtn)    g_roleBtn->callback    = MyGUI::newDelegate(&onRoleBtn);
         if (g_transBtn)   g_transBtn->callback   = MyGUI::newDelegate(&onTransBtn);
         if (g_connBtn)    g_connBtn->callback    = MyGUI::newDelegate(&onConnBtn);
+        for (int i = 0; i < ROOM_ROWS; ++i) if (g_roomButtons[i]) g_roomButtons[i]->callback = MyGUI::newDelegate(&onRoomButton);
+        if (g_roomPageButton) g_roomPageButton->callback = MyGUI::newDelegate(&onRoomPageButton);
         if (g_slotBtn)    g_slotBtn->callback    = MyGUI::newDelegate(&onSlotBtn);
         if (g_copyIdBtn)  g_copyIdBtn->callback  = MyGUI::newDelegate(&onCopyIdBtn);
         if (g_pasteIdBtn) g_pasteIdBtn->callback = MyGUI::newDelegate(&onPasteIdBtn);
@@ -1163,6 +1249,16 @@ bool inventoryUiOpen() {
     }
 }
 
+
+} // namespace engine
+} // namespace coop
+
+namespace coop { namespace engine { namespace {
+void onCharacterTemplateBtn(DataPanelLine*) { if (g_characterFn) g_characterFn(0); }
+void onCharacterCreateBtn(DataPanelLine*) { if (g_characterFn) g_characterFn(1); }
+} } }
+
+namespace coop { namespace engine {
 namespace {
 std::string roomDescription(const coop::room::Info& info) {
     if (!info.host) return coop::tr("Paste a host Steam ID to look up their room");
@@ -1181,10 +1277,15 @@ std::string roomDescription(const coop::room::Info& info) {
 }
 } // namespace
 
-} // namespace engine
-} // namespace coop
+namespace {
+void onRoomButton(DataPanelLine* line) {
+    for (int i = 0; i < ROOM_ROWS; ++i) if (g_roomButtons[i] == line) {
+        g_clickedRoomId = g_roomButtonIds[i]; break;
+    }
+}
 
-namespace coop { namespace engine { namespace {
-void onCharacterTemplateBtn(DataPanelLine*) { if (g_characterFn) g_characterFn(0); }
-void onCharacterCreateBtn(DataPanelLine*) { if (g_characterFn) g_characterFn(1); }
-} } }
+void onRoomPageButton(DataPanelLine*) {
+    ++g_roomPage; g_panel.needsRebuild = true;
+}
+} // namespace
+} } // namespace coop::engine

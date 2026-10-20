@@ -83,6 +83,9 @@ void updateSession(bool hosting, SteamId connectedHost, const char* saveUtf8,
                    bool world, unsigned int players, unsigned int slots);
 void watchRoom(SteamId host);
 const room::Info& watchedRoom();
+void browseRooms(bool active);
+int roomCount();
+const room::Info* friendRoom(int index);
 
 } // namespace steaminvite
 } // namespace coop
