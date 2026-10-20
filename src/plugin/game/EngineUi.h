@@ -103,11 +103,22 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
 void coopOverlayTick(const char* text, int state, bool show);
 
 
+struct CoopPlayerBoxAction {
+    int kind;
+    unsigned long long playerId, actorPlayerId, world;
+    unsigned int epoch, selfConnection, targetOwnerId, targetConnection;
+    bool single;
+    unsigned int container, containerSerial;
+    std::string caption;
+};
+
 struct CoopPlayerSquad {
     unsigned int container, containerSerial;
     std::string name;
     std::vector<std::string> members;
     bool loaded;
+    std::vector<std::string> status;
+    std::vector<CoopPlayerBoxAction> actions;
 };
 
 struct CoopPlayerBox {
@@ -116,11 +127,15 @@ struct CoopPlayerBox {
     bool present, local;
     std::string name;
     std::vector<CoopPlayerSquad> squads;
+    std::vector<std::string> status;
+    std::vector<CoopPlayerBoxAction> actions;
 };
 
 void readPlayerBoxRoster(GameWorld* gw, std::vector<CoopPlayerSquad>& out);
 void coopPlayerBoxesTick(const std::vector<CoopPlayerBox>& boxes, bool active,
                          unsigned long long world);
+
+bool takePlayerBoxAction(CoopPlayerBoxAction& out);
 
 } // namespace engine
 } // namespace coop

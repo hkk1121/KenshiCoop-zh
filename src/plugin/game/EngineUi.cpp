@@ -1299,10 +1299,12 @@ struct PlayerBoxTabRead {
     char name[256];
 };
 
-unsigned int playerBoxTabsSeh(GameWorld* gw, PlayerBoxTabRead* out, unsigned int cap) {
+unsigned int playerBoxTabsSeh(GameWorld* gw, PlayerBoxTabRead* out, unsigned int cap, unsigned int* members) {
     unsigned int count = 0;
     __try {
         if (!gw || !gw->player) return 0;
+        *members = gw->player->playerCharacters.size();
+        if (*members > 8192) *members = 0;
         Faction* f = gw->player->getFaction();
         if (!f) return 0;
         for (int list = 0; list < 2; ++list) {
@@ -1335,6 +1337,9 @@ std::string g_playerBoxToggleTitle;
 unsigned long long g_playerBoxWorld = 0;
 unsigned int g_playerBoxPage = 0;
 bool g_playerBoxesHidden = false;
+std::map<DataPanelLine*, CoopPlayerBoxAction> g_playerBoxActions[4];
+CoopPlayerBoxAction g_playerBoxClickedAction;
+bool g_playerBoxClicked = false;
 
 bool playerBoxAliveSeh(ForgottenGUI* g, DatapanelGUI* p) {
     if (!g || !p) return false;
@@ -1381,11 +1386,15 @@ void playerBoxPlaceSeh(DatapanelGUI* p, int x, int y, int w, int h, bool show) {
 }
 
 void onPlayerBoxPage(DataPanelLine*);
+void onPlayerBoxAction(DataPanelLine*);
 
 bool playerBoxBuildSeh(DatapanelGUI* p, const std::string* title,
                       const std::vector<std::pair<std::string, std::string> >* rows,
-                      bool toggle, const std::string* hide, const std::string* page) {
+                      bool toggle, const std::string* hide, const std::string* page,
+                      const std::vector<CoopPlayerBoxAction>* actions,
+                      std::map<DataPanelLine*, CoopPlayerBoxAction>* bindings) {
     __try {
+        if (bindings) bindings->clear();
         p->_NV_clear();
         p->setCaption(*title);
         p->_NV_setAutomaticTargeting(false);
@@ -1394,8 +1403,17 @@ bool playerBoxBuildSeh(DatapanelGUI* p, const std::string* title,
             if (!page->empty()) p->setLineButton(*page, *page, 0)->callback = MyGUI::newDelegate(&onPlayerBoxPage);
         } else {
             MyGUI::Align align = MyGUI::Align::Left;
-            for (unsigned int i = 0; i < rows->size(); ++i)
-                p->setLineText((*rows)[i].first, (*rows)[i].second, 0, true, align);
+            for (unsigned int i = 0; i < rows->size(); ++i) {
+                if ((*rows)[i].first[0] == 'b') {
+                    unsigned int index = (unsigned int)atoi((*rows)[i].first.c_str() + 1);
+                    if (index >= actions->size()) continue;
+                    DataPanelLine_Button* button = p->setLineButton((*rows)[i].first, (*rows)[i].second, 0);
+                    if (button) {
+                        (*bindings)[button] = (*actions)[index];
+                        button->callback = MyGUI::newDelegate(&onPlayerBoxAction);
+                    }
+                } else p->setLineText((*rows)[i].first, (*rows)[i].second, 0, true, align);
+            }
         }
         p->_NV_update();
         return true;
@@ -1408,16 +1426,17 @@ void onPlayerBoxPage(DataPanelLine*) { ++g_playerBoxPage; }
 
 void readPlayerBoxRoster(GameWorld* gw, std::vector<CoopPlayerSquad>& out) {
     out.clear();
-    PlayerBoxTabRead tabs[512];
-    unsigned int n = playerBoxTabsSeh(gw, tabs, 512);
+    PlayerBoxTabRead tabs[OWNERS_MAX];
+    unsigned int memberCount = 0;
+    unsigned int n = playerBoxTabsSeh(gw, tabs, OWNERS_MAX, &memberCount);
     for (unsigned int i = 0; i < n; ++i) {
         CoopPlayerSquad row;
         row.container = tabs[i].c; row.containerSerial = tabs[i].cs;
         row.name = room::displayText(tabs[i].name, 192); row.loaded = tabs[i].loaded;
         out.push_back(row);
     }
-    EntityState members[160];
-    n = captureSquad(gw, false, members, 160);
+    std::vector<EntityState> members(memberCount);
+    n = memberCount ? captureSquad(gw, false, &members[0], memberCount) : 0;
     for (unsigned int i = 0; i < n; ++i) {
         char name[256];
         charName(resolve(members[i]), name, sizeof(name));
@@ -1437,7 +1456,7 @@ void coopPlayerBoxesTick(const std::vector<CoopPlayerBox>& boxes, bool active,
     }
     ForgottenGUI* g = ::gui;
     for (int i = 0; i < 4; ++i) if (g_playerBoxes[i] && !playerBoxAliveSeh(g, g_playerBoxes[i])) {
-        g_playerBoxes[i] = 0; g_playerBoxTitles[i].clear(); g_playerBoxRows[i].clear();
+        g_playerBoxes[i] = 0; g_playerBoxTitles[i].clear(); g_playerBoxRows[i].clear(); g_playerBoxActions[i].clear();
     }
     if (g_playerBoxToggle && !playerBoxAliveSeh(g, g_playerBoxToggle)) {
         g_playerBoxToggle = 0; g_playerBoxToggleTitle.clear();
@@ -1445,10 +1464,10 @@ void coopPlayerBoxesTick(const std::vector<CoopPlayerBox>& boxes, bool active,
     if (!active || world != g_playerBoxWorld) {
         for (int i = 0; i < 4; ++i) {
             panelDestroySeh(g, g_playerBoxes[i]); g_playerBoxes[i] = 0;
-            g_playerBoxTitles[i].clear(); g_playerBoxRows[i].clear();
+            g_playerBoxTitles[i].clear(); g_playerBoxRows[i].clear(); g_playerBoxActions[i].clear();
         }
         panelDestroySeh(g, g_playerBoxToggle); g_playerBoxToggle = 0; g_playerBoxToggleTitle.clear();
-        g_playerBoxWorld = world; g_playerBoxPage = 0;
+        g_playerBoxWorld = world; g_playerBoxPage = 0; g_playerBoxClicked = false;
         if (!active) return;
     }
     int screenW = 0, screenH = 0;
@@ -1477,6 +1496,11 @@ void coopPlayerBoxesTick(const std::vector<CoopPlayerBox>& boxes, bool active,
     if (left < gap) left = gap;
     if (left + totalW > screenW - gap) left = screenW - gap - totalW;
     int bottom = bar.top - gap;
+    if (bottom <= stripH + gap + (int)(80 * scale)) {
+        for (int i = 0; i < 4; ++i) playerBoxPlaceSeh(g_playerBoxes[i], 0, 0, 0, 0, false);
+        playerBoxPlaceSeh(g_playerBoxToggle, 0, 0, 0, 0, false);
+        return;
+    }
     if (boxH + stripH > bottom - gap) boxH = bottom - stripH - gap;
     int boxW = (totalW - ((int)count - 1) * gap) / (int)count;
     int stripW = (int)(310 * scale);
@@ -1491,10 +1515,9 @@ void coopPlayerBoxesTick(const std::vector<CoopPlayerBox>& boxes, bool active,
     std::string toggleFingerprint = toggleTitle + page;
     if (!g_playerBoxToggle) {
         g_playerBoxToggle = g->createDatapanel(0.1f, 0.2f, 0.2f, 0.1f, false, layer, true);
-        uiPanelArmSeh(g, g_playerBoxToggle);
     }
     if (g_playerBoxToggle && toggleFingerprint != g_playerBoxToggleTitle &&
-        playerBoxBuildSeh(g_playerBoxToggle, &toggleTitle, 0, true, &hide, &page)) g_playerBoxToggleTitle = toggleFingerprint;
+        playerBoxBuildSeh(g_playerBoxToggle, &toggleTitle, 0, true, &hide, &page, 0, 0)) g_playerBoxToggleTitle = toggleFingerprint;
     playerBoxPlaceSeh(g_playerBoxToggle, left, bottom - stripH - (g_playerBoxesHidden ? 0 : boxH + gap), stripW, stripH, true);
     for (unsigned int i = 0; i < 4; ++i) {
         if (i >= count || g_playerBoxesHidden) { playerBoxPlaceSeh(g_playerBoxes[i], 0, 0, 0, 0, false); continue; }
@@ -1502,28 +1525,65 @@ void coopPlayerBoxesTick(const std::vector<CoopPlayerBox>& boxes, bool active,
         std::string title = box.name + " - " + (box.present ? coop::tr("Online") : coop::tr("Offline"));
         if (box.local) title += coop::tr(" (me)");
         std::vector<std::pair<std::string, std::string> > rows;
+        std::vector<CoopPlayerBoxAction> actions;
         if (box.squads.empty()) rows.push_back(std::make_pair("empty", std::string(coop::tr("No assigned squads"))));
-        for (unsigned int j = 0; j < box.squads.size(); ++j) {
-            const CoopPlayerSquad& squad = box.squads[j];
-            _snprintf(b, sizeof(b) - 1, "s%u", j); b[sizeof(b) - 1] = 0;
+        for (unsigned int section = 0; section <= box.squads.size(); ++section) {
+            const CoopPlayerSquad* squad = section ? &box.squads[section - 1] : 0;
+            _snprintf(b, sizeof(b) - 1, "s%u", section); b[sizeof(b) - 1] = 0;
             std::string key = b;
-            rows.push_back(std::make_pair(key, squad.name));
-            if (squad.members.empty()) rows.push_back(std::make_pair(key + "e", std::string(squad.loaded ? coop::tr("No loaded members") : coop::tr("Members not loaded"))));
-            for (unsigned int k = 0; k < squad.members.size(); ++k) {
-                _snprintf(b, sizeof(b) - 1, "s%um%u", j, k); b[sizeof(b) - 1] = 0;
-                rows.push_back(std::make_pair(std::string(b), "  " + (squad.members[k].empty() ? std::string(coop::tr("Unnamed character")) : squad.members[k])));
+            if (squad) rows.push_back(std::make_pair(key, squad->name));
+            const std::vector<std::string>& status = squad ? squad->status : box.status;
+            for (unsigned int j = 0; j < status.size(); ++j) {
+                _snprintf(b, sizeof(b) - 1, "s%ut%u", section, j); b[sizeof(b) - 1] = 0;
+                rows.push_back(std::make_pair(std::string(b), status[j]));
+            }
+            const std::vector<CoopPlayerBoxAction>& buttons = squad ? squad->actions : box.actions;
+            for (unsigned int j = 0; j < buttons.size(); ++j) {
+                const CoopPlayerBoxAction& a = buttons[j];
+                _snprintf(b, sizeof(b) - 1, "b%uw%llue%uc%u:%up%llua%llut%u:%us%uk%d", (unsigned int)actions.size(),
+                    a.world, a.epoch, a.selfConnection, a.targetConnection, a.playerId, a.actorPlayerId,
+                    a.container, a.containerSerial, a.targetOwnerId, a.kind);
+                b[sizeof(b) - 1] = 0;
+                rows.push_back(std::make_pair(std::string(b), a.caption)); actions.push_back(a);
+            }
+            if (!squad) continue;
+            if (squad->members.empty()) rows.push_back(std::make_pair(key + "e", std::string(squad->loaded ? coop::tr("No loaded members") : coop::tr("Members not loaded"))));
+            for (unsigned int j = 0; j < squad->members.size(); ++j) {
+                _snprintf(b, sizeof(b) - 1, "s%um%u", section, j); b[sizeof(b) - 1] = 0;
+                rows.push_back(std::make_pair(std::string(b), "  " + (squad->members[j].empty() ? std::string(coop::tr("Unnamed character")) : squad->members[j])));
             }
         }
         if (!g_playerBoxes[i]) {
             g_playerBoxes[i] = g->createDatapanel(0.2f, 0.2f, 0.2f, 0.2f, true, layer, true);
-            uiPanelArmSeh(g, g_playerBoxes[i]);
         }
+        playerBoxPlaceSeh(g_playerBoxes[i], left + (int)i * (boxW + gap), bottom - boxH, boxW, boxH, true);
         if (g_playerBoxes[i] && (g_playerBoxTitles[i] != title || g_playerBoxRows[i] != rows) &&
-            playerBoxBuildSeh(g_playerBoxes[i], &title, &rows, false, &hide, &page)) {
+            playerBoxBuildSeh(g_playerBoxes[i], &title, &rows, false, &hide, &page, &actions, &g_playerBoxActions[i])) {
             g_playerBoxTitles[i] = title; g_playerBoxRows[i] = rows;
         }
         playerBoxPlaceSeh(g_playerBoxes[i], left + (int)i * (boxW + gap), bottom - boxH, boxW, boxH, true);
     }
 }
 
+} } // namespace coop::engine
+
+
+namespace coop { namespace engine { namespace {
+void onPlayerBoxAction(DataPanelLine* line) {
+    if (g_playerBoxesHidden || g_panel.open) return;
+    for (int i = 0; i < 4; ++i) {
+        std::map<DataPanelLine*, CoopPlayerBoxAction>::const_iterator at = g_playerBoxActions[i].find(line);
+        if (at == g_playerBoxActions[i].end()) continue;
+        g_playerBoxClickedAction = at->second; g_playerBoxClicked = true; break;
+    }
+}
+} // namespace
+
+bool takePlayerBoxAction(CoopPlayerBoxAction& out) {
+    if (!g_playerBoxClicked) return false;
+    g_playerBoxClicked = false;
+    if (g_playerBoxesHidden || g_panel.open) return false;
+    out = g_playerBoxClickedAction;
+    return true;
+}
 } } // namespace coop::engine

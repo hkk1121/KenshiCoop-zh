@@ -3421,6 +3421,42 @@ void coopPlayerBoxesDrive(GameWorld* gw) {
     coop::u64 world = g_repl.ownershipWorld();
     bool active = g_net.isRunning() && g_gameStarted && gw && world && coop::engine::gameplayLive(gw);
     unsigned long now = GetTickCount();
+    coop::engine::CoopPlayerBoxAction clicked;
+    if (coop::engine::takePlayerBoxAction(clicked)) {
+        std::map<coop::u64, coop::PeerStatusPacket>::const_iterator self = g_repl.players().find(g_repl.playerIdentity());
+        std::map<coop::u64, coop::PeerStatusPacket>::const_iterator peer = g_repl.players().find(clicked.playerId);
+        bool current = active && clicked.world == world && clicked.epoch == g_repl.ownershipEpoch() &&
+            clicked.actorPlayerId == g_repl.playerIdentity() && self != g_repl.players().end() && self->second.present &&
+            clicked.selfConnection && clicked.selfConnection == self->second.connectionId && self->second.ownerId == g_net.localId() &&
+            peer != g_repl.players().end() && peer->second.present && clicked.targetOwnerId == peer->second.ownerId &&
+            clicked.targetConnection && clicked.targetConnection == peer->second.connectionId;
+        unsigned int matched = 0;
+        if (current) for (std::map<std::pair<coop::u32, coop::u32>, coop::OwnerRow>::const_iterator o = g_repl.owners().begin(); o != g_repl.owners().end(); ++o) {
+            const std::pair<coop::u32, coop::u32>& tab = o->first;
+            if (clicked.single && tab != std::make_pair(clicked.container, clicked.containerSerial)) continue;
+            coop::Replicator::SquadAuthView view;
+            g_repl.squadAuthView(tab, view);
+            if (clicked.kind == 0 && o->second.playerId == clicked.playerId && view.requestable)
+                g_repl.requestSquadAuth(g_net, g_net.localId(), clicked.playerId, &tab);
+            else if (clicked.kind == 1 && o->second.playerId == g_repl.playerIdentity() && view.requestMode == 2 && view.requestPlayerId == clicked.playerId)
+                g_repl.grantSquadAuth(gw, g_net, g_net.localId(), clicked.playerId, &tab);
+            else if (clicked.kind == 2 && o->second.playerId == g_repl.playerIdentity() && view.requestMode == 2 && view.requestPlayerId == clicked.playerId)
+                g_repl.denySquadAuth(g_net, g_net.localId(), clicked.playerId, &tab);
+            else if (clicked.kind == 3 && o->second.playerId == g_repl.playerIdentity() && view.authMode == 1 && view.authPlayerId == clicked.playerId && view.requestMode != 3)
+                g_repl.revokeSquadAuth(gw, g_net, g_net.localId(), clicked.playerId, &tab);
+            else if (clicked.kind == 4 && o->second.playerId == clicked.playerId && view.authMode == 2 && view.authPlayerId == clicked.playerId)
+                g_repl.revokeSquadAuth(gw, g_net, g_net.localId(), clicked.playerId, &tab);
+            else continue;
+            ++matched;
+        }
+        char log[160];
+        _snprintf(log, sizeof(log) - 1, "[playerbox] action=%d single=%d target=%04X current=%d matched=%u", clicked.kind,
+            clicked.single ? 1 : 0, (unsigned int)(clicked.playerId & 0xFFFFu), current ? 1 : 0, matched);
+        log[sizeof(log) - 1] = 0; coopLog(log);
+        g_toastText = matched ? coop::tr("Control action submitted") : coop::tr("Player or squad changed - try again");
+        g_toastState = matched ? 2 : 0; g_toastArmMs = now;
+        sampled = 0;
+    }
     if (!active) { boxes.clear(); sampled = 0; lastWorld = 0; }
     else if (!sampled || lastWorld != world || now - sampled >= 250) {
         sampled = now; lastWorld = world; boxes.clear();
@@ -3457,6 +3493,98 @@ void coopPlayerBoxesDrive(GameWorld* gw) {
                 (boxes[pos].rank == box.rank && (boxes[pos].present > box.present ||
                 (boxes[pos].present == box.present && boxes[pos].playerId < box.playerId))))) ++pos;
             boxes.insert(boxes.begin() + pos, box);
+        }
+        for (unsigned int i = 0; i < boxes.size(); ++i) {
+            coop::engine::CoopPlayerBox& box = boxes[i];
+            unsigned int incoming = 0, lent = 0, borrowed = 0, requestable = 0;
+            char text[512];
+            if (!box.present) box.status.push_back(coop::tr("Offline - control requests unavailable"));
+            for (unsigned int j = 0; j < box.squads.size(); ++j) {
+                coop::engine::CoopPlayerSquad& squad = box.squads[j];
+                std::pair<coop::u32, coop::u32> tab(squad.container, squad.containerSerial);
+                coop::Replicator::SquadAuthView view;
+                g_repl.squadAuthView(tab, view);
+                std::string authName = coop::tr("Unknown player"), requestName = authName;
+                for (unsigned int k = 0; k < boxes.size(); ++k) {
+                    if (boxes[k].playerId == view.authPlayerId) authName = boxes[k].name;
+                    if (boxes[k].playerId == view.requestPlayerId) requestName = boxes[k].name;
+                }
+                const char* authFormat = view.requestMode == 3 ? coop::tr("Reclaiming from %s") :
+                    view.authMode == 1 ? coop::tr("Lent to %s") : view.authMode == 2 ? coop::tr("Borrowed from %s") : 0;
+                if (authFormat) {
+                    _snprintf(text, sizeof(text) - 1, authFormat, authName.c_str()); text[sizeof(text) - 1] = 0;
+                    squad.status.push_back(text);
+                }
+                const char* requestFormat = view.requestMode == 1 ? coop::tr("Request sent to %s") :
+                    view.requestMode == 2 ? coop::tr("Request from %s") : 0;
+                if (requestFormat) {
+                    _snprintf(text, sizeof(text) - 1, requestFormat, requestName.c_str()); text[sizeof(text) - 1] = 0;
+                    squad.status.push_back(text);
+                }
+                coop::engine::CoopPlayerBoxAction a = {};
+                if (!box.local && view.requestable) {
+                    ++requestable; a.kind = 0; a.playerId = box.playerId; a.caption = coop::tr("Request this squad"); squad.actions.push_back(a);
+                }
+                if (view.authMode == 2 && view.authPlayerId == box.playerId) {
+                    ++borrowed; a.kind = 4; a.playerId = box.playerId; a.caption = coop::tr("Return this squad"); squad.actions.push_back(a);
+                }
+                if (box.local && view.requestMode == 2 && view.requestPlayerId) {
+                    a.playerId = view.requestPlayerId;
+                    a.kind = 1; a.caption = coop::tr("Approve this squad"); squad.actions.push_back(a);
+                    a.kind = 2; a.caption = coop::tr("Deny this squad"); squad.actions.push_back(a);
+                }
+                if (box.local && view.authMode == 1 && view.authPlayerId && view.requestMode != 3) {
+                    a.playerId = view.authPlayerId; a.kind = 3; a.caption = coop::tr("Reclaim this squad"); squad.actions.push_back(a);
+                }
+            }
+            if (!box.local) {
+                for (std::map<std::pair<coop::u32, coop::u32>, coop::OwnerRow>::const_iterator o = g_repl.owners().begin(); o != g_repl.owners().end(); ++o) {
+                    if (o->second.playerId != g_repl.playerIdentity()) continue;
+                    coop::Replicator::SquadAuthView view;
+                    g_repl.squadAuthView(o->first, view);
+                    if (view.requestMode == 2 && view.requestPlayerId == box.playerId) ++incoming;
+                    if (view.authMode == 1 && view.authPlayerId == box.playerId && view.requestMode != 3) ++lent;
+                }
+                if (incoming) {
+                    _snprintf(text, sizeof(text) - 1, coop::tr("Requests your squads: %u"), incoming); text[sizeof(text) - 1] = 0;
+                    box.status.push_back(text);
+                }
+                coop::engine::CoopPlayerBoxAction a = {}; a.playerId = box.playerId;
+                if (requestable) { a.kind = 0; a.caption = coop::tr("Request all available squads"); box.actions.push_back(a); }
+                if (borrowed) { a.kind = 4; a.caption = coop::tr("Return all borrowed squads"); box.actions.push_back(a); }
+                if (lent) { a.kind = 3; a.caption = coop::tr("Reclaim your squads"); box.actions.push_back(a); }
+            } else {
+                for (unsigned int k = 0; k < boxes.size(); ++k) {
+                    if (boxes[k].local || !boxes[k].present) continue;
+                    bool pending = false;
+                    for (unsigned int j = 0; j < box.squads.size(); ++j) {
+                        coop::Replicator::SquadAuthView view;
+                        g_repl.squadAuthView(std::make_pair(box.squads[j].container, box.squads[j].containerSerial), view);
+                        if (view.requestMode == 2 && view.requestPlayerId == boxes[k].playerId) { pending = true; break; }
+                    }
+                    if (!pending) continue;
+                    coop::engine::CoopPlayerBoxAction a = {}; a.playerId = boxes[k].playerId;
+                    _snprintf(text, sizeof(text) - 1, coop::tr("Approve all requests from %s"), boxes[k].name.c_str()); text[sizeof(text) - 1] = 0;
+                    a.kind = 1; a.caption = text; box.actions.push_back(a);
+                    _snprintf(text, sizeof(text) - 1, coop::tr("Deny all requests from %s"), boxes[k].name.c_str()); text[sizeof(text) - 1] = 0;
+                    a.kind = 2; a.caption = text; box.actions.push_back(a);
+                }
+            }
+            for (unsigned int section = 0; section <= box.squads.size(); ++section) {
+                coop::engine::CoopPlayerSquad* squad = section ? &box.squads[section - 1] : 0;
+                std::vector<coop::engine::CoopPlayerBoxAction>& actions = squad ? squad->actions : box.actions;
+                for (unsigned int j = 0; j < actions.size();) {
+                    coop::engine::CoopPlayerBoxAction& a = actions[j];
+                    std::map<coop::u64, coop::PeerStatusPacket>::const_iterator peer = g_repl.players().find(a.playerId);
+                    if (peer == g_repl.players().end() || !peer->second.present || !peer->second.connectionId) { actions.erase(actions.begin() + j); continue; }
+                    a.single = squad != 0; a.container = squad ? squad->container : 0; a.containerSerial = squad ? squad->containerSerial : 0;
+                    a.actorPlayerId = g_repl.playerIdentity(); a.world = world; a.epoch = g_repl.ownershipEpoch();
+                    a.selfConnection = g_repl.characterConnection(g_net.localId());
+                    a.targetOwnerId = peer->second.ownerId; a.targetConnection = peer->second.connectionId;
+                    if (!a.selfConnection) { actions.erase(actions.begin() + j); continue; }
+                    ++j;
+                }
+            }
         }
     }
     coop::engine::coopPlayerBoxesTick(boxes, active, world);
