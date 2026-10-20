@@ -1652,8 +1652,10 @@ bool Replicator::applyCreatedAppearance(GameWorld* gw, const unsigned int h[5], 
     if (!c || !engine::readObjectHand(reinterpret_cast<RootObject*>(c), local)) { createdAppearanceApplied_.erase(key); return false; }
     std::map<Key, Character*>::const_iterator applied = createdAppearanceApplied_.find(key);
     if (applied != createdAppearanceApplied_.end() && applied->second == c) return true;
-    if (!engine::applyCharacterDraft(gw, c, draft)) return false;
+    // 失败也按指针记一次，避免每帧重试并刷错误日志；代理重建后指针变化会再试一次。
+    bool ok = engine::applyCharacterDraft(gw, c, draft);
     createdAppearanceApplied_[key] = c;
+    if (!ok) return false;
     coop::logLine("[chargen] host appearance applied to resolved native or proxy character");
     return true;
 }
