@@ -274,6 +274,9 @@ DataPanelLine_Button*   g_slotBtn      = 0; // JOIN squad-slot toggle (protocol 
 DataPanelLine_Button*   g_copyIdBtn    = 0;
 DataPanelLine_Button*   g_pasteIdBtn   = 0; // "Paste friend's Steam ID" from clipboard
 DataPanelLine_Button*   g_fpsBtn       = 0; // 帧数上限切换
+DataPanelLine_Button*   g_playerBoxBtn = 0; // 玩家框显示/隐藏（备用开关）
+bool                    g_playerBoxesHidden = false; // 玩家框隐藏设置，由玩家框驱动负责读写设置文件
+bool                    g_lastPlayerBoxesHidden = false;
 DataPanelLine_Button*   g_authReqBtn   = 0; // 申请控制好友的小队（第 3 批）
 DataPanelLine_Button*   g_authYesBtn   = 0; // 同意对方申请
 DataPanelLine_Button*   g_authNoBtn    = 0; // 拒绝对方申请
@@ -444,6 +447,11 @@ void onFpsBtn(DataPanelLine*) {
     coop::fpslimit::cycle();
     g_panel.needsRebuild = true;
 }
+void onPlayerBoxBtn(DataPanelLine*) {
+    g_playerBoxesHidden = !g_playerBoxesHidden;
+    g_panel.needsRebuild = true;
+    coop::logLine(g_playerBoxesHidden ? "[playerbox] hidden from F2 panel" : "[playerbox] shown from F2 panel");
+}
 
 // 小队控制授权按钮（第 3 批）：把动作码交回插件，由插件调用 Replicator。
 void onAuthReqBtn(DataPanelLine*) {
@@ -479,6 +487,7 @@ struct PanelStrings {
     const std::string *peerKey, *peerVal, *pasteKey, *pasteCap;
     const std::string *selfKey, *selfVal, *copyKey, *copyCap;
     const std::string *fpsKey, *fpsCap;
+    const std::string *playerBoxKey, *playerBoxCap;
     const std::string *authKey, *authVal, *authReqCap;
     const std::string *authYesCap, *authNoCap, *authRevokeCap;
     const std::string *authReqKey, *authYesKey, *authNoKey, *authRevokeKey;
@@ -531,6 +540,7 @@ void panelBuildSeh(DatapanelGUI* p, const PanelStrings* s) {
         g_copyIdBtn = p->setLineButton(*s->copyKey, *s->copyCap, 0);
         p->addSpace(0, 0.35f);
         g_fpsBtn = p->setLineButton(*s->fpsKey, *s->fpsCap, 0);
+        g_playerBoxBtn = p->setLineButton(*s->playerBoxKey, *s->playerBoxCap, 0);
         p->addSpace(0, 0.35f);
         // 小队控制授权（第 3 批）：状态行 + 申请按钮（+ 条件出现的同意/拒绝/收回）
         g_authLine   = p->setLine(*s->authKey, *s->authVal, *s->empty, 0, false, true);
@@ -727,7 +737,7 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
             g_copyIdBtn = 0;
             g_pasteIdBtn = 0; g_scanBtn = 0;
             g_debugLine = 0; g_discLine = 0; g_peerLine = 0; g_selfLine = 0;
-            g_fpsBtn = 0;
+            g_fpsBtn = 0; g_playerBoxBtn = 0;
             g_authReqBtn = 0; g_authYesBtn = 0; g_authNoBtn = 0;
             g_authRevokeBtn = 0; g_authLine = 0;
             g_panel.open = false;
@@ -747,15 +757,20 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         if (onMenuAction) onMenuAction(req > 0);
     }
 
-    // 房间列表：Steam 可用时所有人可见；只有“加入 + STEAM + 离线”时点击房间才连接
+    // 房间列表：Steam 可用时所有人可见；离线时点击房间才连接（自动切到“加入 + STEAM”）
     bool showFriendRooms = g_panel.open && !g_panel.hostFlag && g_panel.steamFlag && !st->running;
     bool showRooms = g_panel.open && st->selfSteamId != 0;
     coop::steaminvite::browseRooms(showRooms);
     if (!g_panel.open) return;
     if (g_roomRefreshClicked) { g_roomRefreshClicked = false; coop::steaminvite::refreshRooms(); g_panel.needsRebuild = true; }
+    if (g_clickedRoomId && !st->running && !showFriendRooms) {
+        // 离线时点击好友房间即表示加入：自动切到“加入 + STEAM”
+        g_panel.hostFlag = false; g_panel.steamFlag = true; showFriendRooms = true;
+        coop::logLine("[coop-ui] room click: switching to JOIN over Steam");
+    }
     if (g_clickedRoomId && !showFriendRooms) {
         g_clickedRoomId = 0;
-        coop::logLine("[coop-ui] room click ignored (connect only as JOIN + Steam + offline)");
+        coop::logLine("[coop-ui] room click ignored (go offline to join another room)");
     }
     if (g_clickedRoomId) {
         unsigned long long clicked = g_clickedRoomId; g_clickedRoomId = 0;
@@ -904,6 +919,7 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
     std::string discDetail = st->discDetail ? std::string(st->discDetail)
                                             : std::string();
     if (discDetail != g_panel.lastDisc) g_panel.needsRebuild = true;
+    if (g_playerBoxesHidden != g_lastPlayerBoxesHidden) { g_lastPlayerBoxesHidden = g_playerBoxesHidden; g_panel.needsRebuild = true; }
 
     // Create the window once (outside SEH - see the header note on C2712).
     // Layer MUST be "Info": spike 48 proved createFloatingLabel renders non-null
@@ -1017,6 +1033,9 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
                                                              : std::string(coop::tr("Unlimited"));
         _snprintf(fb, sizeof(fb) - 1, coop::tr("FPS limit: %s    (switch)"), fpsVal.c_str());
         std::string fpsCap   = fb;
+        std::string playerBoxKey = "playerboxes";
+        std::string playerBoxCap = coop::tr(g_playerBoxesHidden ? "Player boxes: hidden    (click to show)"
+                                                                : "Player boxes: shown    (click to hide)");
         // 小队控制授权（第 3 批）：状态行文字 + 按钮文案 + 条件显示标志
         std::string authKey = coop::tr("Squad control");
         std::string authVal;
@@ -1051,7 +1070,7 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         std::string characterStatusKey = coop::tr("Character creation");
         std::string characterStatus = st->characterStatus ? st->characterStatus : "";
         std::string roomKey = coop::tr("Room info");
-        std::string roomsKey = coop::tr(showFriendRooms ? "Rooms - click to connect" : "Rooms");
+        std::string roomsKey = coop::tr(!st->running ? "Rooms - click to connect" : "Rooms");
         std::string roomsVal = (friendRooms || !ownRoomUi.empty()) ? coop::tr("Latency    Player    Joined/Max") :
             showFriendRooms ? coop::tr("No friend rooms found - you can paste a host ID") : coop::tr("No rooms found");
         std::string ownRoomKey = coop::tr("My room");
@@ -1087,6 +1106,7 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         ps.selfKey = &selfKey; ps.selfVal = &selfVal;
         ps.copyKey = &copyKey; ps.copyCap = &copyCap;
         ps.fpsKey = &fpsKey; ps.fpsCap = &fpsCap;
+        ps.playerBoxKey = &playerBoxKey; ps.playerBoxCap = &playerBoxCap;
         ps.authKey = &authKey; ps.authVal = &authVal; ps.authReqCap = &authReqCap;
         ps.authYesCap = &authYesCap; ps.authNoCap = &authNoCap;
         ps.authRevokeCap = &authRevokeCap;
@@ -1115,6 +1135,7 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         if (g_copyIdBtn)  g_copyIdBtn->callback  = MyGUI::newDelegate(&onCopyIdBtn);
         if (g_pasteIdBtn) g_pasteIdBtn->callback = MyGUI::newDelegate(&onPasteIdBtn);
         if (g_fpsBtn)     g_fpsBtn->callback     = MyGUI::newDelegate(&onFpsBtn);
+        if (g_playerBoxBtn) g_playerBoxBtn->callback = MyGUI::newDelegate(&onPlayerBoxBtn);
         if (g_characterTemplateBtn) g_characterTemplateBtn->callback = MyGUI::newDelegate(&onCharacterTemplateBtn);
         if (g_characterCreateBtn) g_characterCreateBtn->callback = MyGUI::newDelegate(&onCharacterCreateBtn);
         if (g_scanBtn)    g_scanBtn->callback    = MyGUI::newDelegate(&onScanBtn);
@@ -1388,7 +1409,6 @@ std::vector<std::pair<std::string, std::string> > g_playerBoxRows[4];
 std::string g_playerBoxToggleTitle;
 unsigned long long g_playerBoxWorld = 0;
 unsigned int g_playerBoxPage = 0;
-bool g_playerBoxesHidden = false;
 std::map<DataPanelLine*, CoopPlayerBoxAction> g_playerBoxActions[4];
 CoopPlayerBoxAction g_playerBoxClickedAction;
 bool g_playerBoxClicked = false;
@@ -1438,6 +1458,7 @@ void playerBoxPlaceSeh(DatapanelGUI* p, int x, int y, int w, int h, bool show) {
 }
 
 void onPlayerBoxPage(DataPanelLine*);
+void onPlayerBoxHide(DataPanelLine*);
 void onPlayerBoxAction(DataPanelLine*);
 
 bool playerBoxBuildSeh(DatapanelGUI* p, const std::string* title,
@@ -1451,7 +1472,8 @@ bool playerBoxBuildSeh(DatapanelGUI* p, const std::string* title,
         p->setCaption(*title);
         p->_NV_setAutomaticTargeting(false);
         if (toggle) {
-            p->setLineCheckbox(*hide, &g_playerBoxesHidden, 0);
+            DataPanelLine_Button* hideButton = p->setLineButton(*hide, *hide, 0);
+            if (hideButton) hideButton->callback = MyGUI::newDelegate(&onPlayerBoxHide);
             if (!page->empty()) p->setLineButton(*page, *page, 0)->callback = MyGUI::newDelegate(&onPlayerBoxPage);
         } else {
             MyGUI::Align align = MyGUI::Align::Left;
@@ -1557,14 +1579,14 @@ void coopPlayerBoxesTick(const std::vector<CoopPlayerBox>& boxes, bool active,
     int boxW = (totalW - ((int)count - 1) * gap) / (int)count;
     int stripW = (int)(310 * scale);
     if (stripW > totalW) stripW = totalW;
-    std::string layer = "MiddleFront", hide = coop::tr("Hide player boxes"), page;
+    std::string layer = "MiddleFront", hide = coop::tr(g_playerBoxesHidden ? "Show player boxes" : "Hide player boxes"), page;
     char b[256];
     if (pages > 1) {
         _snprintf(b, sizeof(b) - 1, coop::tr("Players %u/%u - next page"), g_playerBoxPage + 1, pages);
         b[sizeof(b) - 1] = 0; page = b;
     }
     std::string toggleTitle = coop::tr("Co-op players");
-    std::string toggleFingerprint = toggleTitle + page;
+    std::string toggleFingerprint = toggleTitle + page + hide;
     if (!g_playerBoxToggle) {
         g_playerBoxToggle = g->createDatapanel(0.1f, 0.2f, 0.2f, 0.1f, false, layer, true);
     }
@@ -1621,6 +1643,11 @@ void coopPlayerBoxesTick(const std::vector<CoopPlayerBox>& boxes, bool active,
 
 
 namespace coop { namespace engine { namespace {
+void onPlayerBoxHide(DataPanelLine*) {
+    g_playerBoxesHidden = !g_playerBoxesHidden;
+    coop::logLine(g_playerBoxesHidden ? "[playerbox] hidden from player box" : "[playerbox] shown from player box");
+}
+
 void onPlayerBoxAction(DataPanelLine* line) {
     if (g_playerBoxesHidden || g_panel.open) return;
     for (int i = 0; i < 4; ++i) {
