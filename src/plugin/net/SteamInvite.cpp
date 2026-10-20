@@ -1,6 +1,7 @@
-#define _CRT_SECURE_NO_WARNINGS 1 // _snprintf is fine here; silence VC10 C4996
+﻿#define _CRT_SECURE_NO_WARNINGS 1 // _snprintf is fine here; silence VC10 C4996
 
 #include "SteamInvite.h"
+#include "SteamRoom.h"
 #include "SteamP2P.h"        // selfId() + accept() (shared Steam client)
 #include "../CoopLog.h"
 #include "../../netproto/Wire.h" // coop::PROTOCOL_VERSION (lobby-data version gate)
@@ -44,26 +45,14 @@ public:
 };
 
 // ---- Callback ids ------------------------------------------------------------
-const int k_iSteamFriendsCallbacks     = 300;
-const int k_iSteamMatchmakingCallbacks = 500;
-const int k_iSteamNetworkingCallbacks  = 1200;
-const int cb_LobbyCreated           = k_iSteamMatchmakingCallbacks + 13; // 513
-const int cb_LobbyEnter             = k_iSteamMatchmakingCallbacks + 4;  // 504
-const int cb_GameLobbyJoinRequested = k_iSteamMatchmakingCallbacks + 33; // 533
-const int cb_P2PSessionRequest      = k_iSteamNetworkingCallbacks  + 2;  // 1202
-
-// ---- Callback param structs (Steamworks #pragma pack(8) layouts) -------------
-#pragma pack(push, 8)
-struct LobbyCreated_t          { int m_eResult; unsigned long long m_ulSteamIDLobby; };
-struct GameLobbyJoinRequested_t{ unsigned long long m_steamIDLobby; unsigned long long m_steamIDFriend; };
-struct P2PSessionRequest_t     { unsigned long long m_steamIDRemote; };
-struct LobbyEnter_t {
-    unsigned long long m_ulSteamIDLobby;
-    unsigned int       m_rgfChatPermissions;
-    unsigned char      m_bLocked;
-    unsigned int       m_EChatRoomEnterResponse;
-};
-#pragma pack(pop)
+const int cb_LobbyCreated = room::LOBBY_CREATED;
+const int cb_LobbyEnter = room::LOBBY_ENTER;
+const int cb_GameLobbyJoinRequested = room::JOIN_REQUESTED;
+const int cb_P2PSessionRequest = room::P2P_REQUEST;
+typedef room::LobbyCreated LobbyCreated_t;
+typedef room::LobbyEnter LobbyEnter_t;
+typedef room::JoinRequested GameLobbyJoinRequested_t;
+typedef room::P2PRequest P2PSessionRequest_t;
 
 const int k_EResultOK           = 1;
 const int k_ELobbyTypeFriendsOnly = 1;
@@ -88,20 +77,12 @@ typedef unsigned long long (*FrGetByIndexFn)(void* friends, int i, int eFriendFl
 typedef const char* (*FrGetNameFn)(void* friends, unsigned long long id);
 typedef int   (*FrGetStateFn)(void* friends, unsigned long long id);
 
-#pragma pack(push, 8)
-struct FriendGameInfo_t {
-    unsigned long long m_gameID;       // CGameID (appID in low 24 bits for app type)
-    unsigned int       m_unGameIP;
-    unsigned short     m_usGamePort;
-    unsigned short     m_usQueryPort;
-    unsigned long long m_steamIDLobby;
-};
-#pragma pack(pop)
+typedef room::FriendGameInfo FriendGameInfo_t;
 typedef bool  (*FrGetGamePlayedFn)(void* friends, unsigned long long id, FriendGameInfo_t* out);
 
 const unsigned KENSHI_APPID = 233860;
 typedef void  (*RegisterCbFn)(void* cb, int iCallback);
-typedef void  (*RegisterCrFn)(void* cb, SteamAPICall_t call, int iCallback);
+typedef void  (*RegisterCrFn)(void* cb, SteamAPICall_t call);
 typedef void  (*UnregisterCbFn)(void* cb);
 typedef void  (*RunCallbacksFn)();
 
@@ -138,6 +119,11 @@ bool               g_creating     = false;// CreateLobby call in flight
 bool               g_picker       = false;// in-panel friend picker is active
 unsigned long long g_pendingInvitee = 0;  // friend clicked before the lobby existed
 char               g_status[128]  = {0};
+bool g_wantHost = false;
+SteamAPICall_t g_createCall = 0;
+typedef void (*UnregisterCrFn)(void*, SteamAPICall_t);
+UnregisterCrFn g_unregCr = 0;
+unsigned long long g_joiningLobby = 0, g_connectedHost = 0;
 
 // Cached friend list for the in-panel picker (our own copy - GetFriendPersonaName
 // returns a Steam-owned pointer only valid until the next call). Sorted in-Kenshi
@@ -170,7 +156,7 @@ bool friendInKenshi(unsigned long long fid) {
     FriendGameInfo_t gi;
     std::memset(&gi, 0, sizeof(gi));
     if (!g_frGame(g_friends, fid, &gi)) return false;
-    return (unsigned)(gi.m_gameID & 0xFFFFFFu) == KENSHI_APPID;
+    return (unsigned)(gi.gameId & 0xFFFFFFu) == KENSHI_APPID;
 }
 
 // (Re)build the friend cache for the in-panel picker: enumerate immediate friends,
@@ -209,13 +195,14 @@ void refreshFriends() {
 // ---- Callback handlers (main thread, via Kenshi's SteamAPI_RunCallbacks) -----
 
 void onLobbyCreated(LobbyCreated_t* r, bool ioFailure) {
-    g_creating = false;
-    if (ioFailure || !r || r->m_eResult != k_EResultOK) {
+    g_creating = false; g_createCall = 0;
+    if (ioFailure || !r || r->result != k_EResultOK) {
         steamLog("lobby creation FAILED");
         setStatus("Lobby creation failed - try again or type the ID");
         return;
     }
-    g_lobby     = r->m_ulSteamIDLobby;
+    if (!g_wantHost) { if (g_leaveLobby) g_leaveLobby(g_mm, r->lobby); return; }
+    g_lobby     = r->lobby;
     g_weAreHost = true;
     g_hostFired = false;
     char pv[16];
@@ -245,23 +232,27 @@ void onLobbyCreated(LobbyCreated_t* r, bool ioFailure) {
 }
 
 void onGameLobbyJoinRequested(GameLobbyJoinRequested_t* r) {
-    if (!r || !g_joinLobby) return;
+    if (!r || !g_joinLobby || r->lobby == g_lobby || r->lobby == g_joiningLobby) return;
+    g_joiningLobby = r->lobby;
     // The friend clicked our invite / "Join Game". Enter their lobby; the actual
     // connect happens in onLobbyEnter once membership + owner are known.
     g_weAreHost = false;
     g_hostFired = false;
     char b[96];
     _snprintf(b, sizeof(b) - 1, "join requested for lobby %llu - entering...",
-              r->m_steamIDLobby);
+              r->lobby);
     b[sizeof(b) - 1] = '\0';
     steamLog(b);
     setStatus("Joining friend's game...");
-    g_joinLobby(g_mm, r->m_steamIDLobby);
+    g_joinLobby(g_mm, r->lobby);
 }
 
 void onLobbyEnter(LobbyEnter_t* r) {
-    if (!r) return;
-    unsigned long long lobby = r->m_ulSteamIDLobby;
+    if (!r || r->response != 1) { g_joiningLobby = 0; return; }
+    unsigned long long lobby = r->lobby;
+    if (g_joiningLobby != lobby && lobby != g_lobby && !g_wantHost) {
+        if (g_leaveLobby) g_leaveLobby(g_mm, lobby); return;
+    }
     g_lobby = lobby;
     unsigned long long owner = g_getOwner ? g_getOwner(g_mm, lobby) : 0;
     SteamId self = (SteamId)coop::steamp2p::selfId();
@@ -286,11 +277,17 @@ void onLobbyEnter(LobbyEnter_t* r) {
                 b[sizeof(b) - 1] = '\0';
                 steamLog(b);
                 setStatus("Version mismatch with host - update both sides");
+                if (g_leaveLobby) g_leaveLobby(g_mm, lobby);
+                g_lobby = 0; g_joiningLobby = 0;
                 return;
             }
         }
     }
 
+    if (g_leaveLobby) g_leaveLobby(g_mm, lobby);
+    g_lobby = 0; g_joiningLobby = 0;
+    if (g_connectedHost == owner) return;
+    g_connectedHost = owner;
     coop::steamp2p::accept(owner); // pre-accept the host's P2P session
     char b[96];
     _snprintf(b, sizeof(b) - 1, "joined host %llu via lobby - connecting as CLIENT", owner);
@@ -304,7 +301,7 @@ void onP2PSessionRequest(P2PSessionRequest_t* r) {
     if (!r) return;
     // Accept any inbound session from within an invite flow so the tunnel opens
     // regardless of which side sends first.
-    coop::steamp2p::accept(r->m_steamIDRemote);
+    coop::steamp2p::accept(r->remote);
 }
 
 void dispatch(int iCallback, void* param, bool ioFailure) {
@@ -362,12 +359,13 @@ bool init(ConnectFn onConnect) {
     g_regCb       = (RegisterCbFn)         GetProcAddress(mod, "SteamAPI_RegisterCallback");
     g_regCr       = (RegisterCrFn)         GetProcAddress(mod, "SteamAPI_RegisterCallResult");
     g_unregCb     = (UnregisterCbFn)       GetProcAddress(mod, "SteamAPI_UnregisterCallback");
+    g_unregCr = (UnregisterCrFn)GetProcAddress(mod, "SteamAPI_UnregisterCallResult");
     g_runCb       = (RunCallbacksFn)       GetProcAddress(mod, "SteamAPI_RunCallbacks");
 
     if (!getUser || !getPipe || !getClient || !getMmIf || !getFrIf || !g_createLobby ||
         !g_joinLobby || !g_setData || !g_getData || !g_getOwner || !g_getNum ||
         !g_getMember || !g_inviteToLobby || !g_frCount || !g_frByIndex || !g_frName ||
-        !g_regCb || !g_regCr || !g_runCb) {
+        !g_regCb || !g_regCr || !g_unregCr || !g_leaveLobby || !g_runCb) {
         steamLog("init FAILED: invite/lobby flat exports missing");
         return false;
     }
@@ -423,9 +421,10 @@ void createLobbyIfNeeded() {
         return;
     }
     // Re-arm the LobbyCreated call-result object for this specific async call.
-    if (g_unregCb) g_unregCb(&g_cbLobbyCreated);
+    if (g_createCall && g_unregCr) g_unregCr(&g_cbLobbyCreated, g_createCall);
+    g_createCall = call;
     g_cbLobbyCreated.arm(cb_LobbyCreated, sizeof(LobbyCreated_t));
-    g_regCr(&g_cbLobbyCreated, call, cb_LobbyCreated);
+    g_regCr(&g_cbLobbyCreated, call);
 }
 } // namespace
 
@@ -487,28 +486,8 @@ void tick() {
         }
     }
 
-    // Host membership poll: once the invited friend enters the lobby, learn their
-    // SteamID and connect. (Avoids needing the LobbyChatUpdate callback.)
-    if (g_weAreHost && g_lobby != 0 && !g_hostFired && g_getNum) {
-        int n = g_getNum(g_mm, g_lobby);
-        if (n >= 2) {
-            SteamId self = (SteamId)coop::steamp2p::selfId();
-            for (int i = 0; i < n; ++i) {
-                unsigned long long m = g_getMember(g_mm, g_lobby, i);
-                if (m != 0 && m != self) {
-                    g_hostFired = true;
-                    coop::steamp2p::accept(m);
-                    char b[96];
-                    _snprintf(b, sizeof(b) - 1, "friend %llu joined the lobby - hosting for them", m);
-                    b[sizeof(b) - 1] = '\0';
-                    steamLog(b);
-                    setStatus("Friend joined - hosting...");
-                    if (g_onConnect) { SteamId one = m; g_onConnect(true, true, &one, 1, 0); }
-                    break;
-                }
-            }
-        }
-    }
+    // 大厅常驻；成员加入由 P2P 回调与 HELLO 准入处理，不重启主机会话。
+
 }
 
 const char* status() { return g_status; }
@@ -518,12 +497,19 @@ void reset() {
     g_lobby     = 0;
     g_weAreHost = false;
     g_hostFired = false;
-    g_creating  = false;
+    // 创建仍在途时保留回调；结果到达后按 g_wantHost 接管或立即离开。
     g_picker    = false;
     g_pendingInvitee = 0;
     g_friendN   = 0;
     g_status[0] = '\0';
-    if (g_ready && g_unregCb) g_unregCb(&g_cbLobbyCreated);
+    g_wantHost = false; g_connectedHost = 0; g_joiningLobby = 0;
+
+}
+
+void hostRoom() {
+    if (!g_ready) return;
+    g_wantHost = true;
+    createLobbyIfNeeded();
 }
 
 } // namespace steaminvite

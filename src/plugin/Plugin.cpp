@@ -1268,6 +1268,12 @@ void coopPanelDrive(GameWorld* gw) {
             g_toastState = 0; g_toastArmMs = GetTickCount();
         }
     }
+    unsigned int roomRejected = coop::steamp2p::takeHostRejection();
+    if (roomRejected) {
+        g_toastText = roomRejected == 3 ? coop::tr("Rejected a joiner: room full") :
+            coop::tr("Rejected a joiner: not a Steam friend or on the allowlist");
+        g_toastState = 0; g_toastArmMs = GetTickCount();
+    }
     std::string detail;
     int ostate;
     if (!g_peersPresent.empty()) {
@@ -2407,35 +2413,22 @@ void startNetworking() {
         else coopErr("[steam] KENSHICOOP_STEAM_PING set but Steam init failed");
     }
 
-    // Steam P2P transport: connect by SteamID (NAT punch + Valve relay) with the
-    // ENet protocol unchanged. Requires the partner's steamid64 (the HOST may
-    // list several, protocol 49); falls back to UDP loudly when Steam is
-    // unavailable so a misconfigured session still behaves like the stock
-    // build instead of silently doing nothing.
-    // 回退 UDP 的原因同时显示在状态栏（startHost/startClient 会清空，须在其后设置）
     const char* steamFallback = 0;
+    g_net.setSteamTransport(0);
     if (g_cfg.transport == "steam") {
-        // Effective friend list: steamPeers when set, else the single
-        // steamPeer (the classic 2-player exchange). Joins only ever talk to
-        // the host, so their list is that one id.
         std::vector<unsigned long long> ids = g_cfg.steamPeers;
-        if (ids.empty() && g_cfg.steamPeer != 0) ids.push_back(g_cfg.steamPeer);
-        if (ids.empty()) {
-            coopErr("[steam] KENSHICOOP_TRANSPORT=steam requires KENSHICOOP_STEAM_PEER(S)=<friend steamid64>; falling back to UDP");
-            steamFallback = "No friend's Steam ID - paste it in the F2 panel, then reconnect (using UDP for now)";
-        } else if (!coop::steamp2p::init()) {
-            coopErr("[steam] init failed (Steam not running / offline?); falling back to UDP");
-            steamFallback = "Steam is not running - start Steam, then reconnect (using UDP for now)";
-        } else {
-            if (g_cfg.isHost) coop::steamp2p::setPeers(&ids[0], (unsigned int)ids.size());
-            else              coop::steamp2p::setPeer(ids[0]);
-            g_net.setSteamTransport(ids[0]);
-            char b[128];
-            _snprintf(b, sizeof(b) - 1,
-                      "[steam] transport=steam armed (%u friend id%s; no port forwarding)",
-                      (unsigned)ids.size(), ids.size() == 1 ? "" : "s");
-            b[sizeof(b) - 1] = '\0'; coopLog(b);
+        if (!g_cfg.isHost) { ids.clear(); if (g_cfg.steamPeer) ids.push_back(g_cfg.steamPeer); }
+        else if (ids.empty() && g_cfg.steamPeer) ids.push_back(g_cfg.steamPeer);
+        if (!g_cfg.isHost && ids.empty()) {
+            coop::setNetUiError("No host Steam ID - paste it in the F2 panel"); return;
         }
+        if (!coop::steamp2p::init()) {
+            coop::setNetUiError("Steam is unavailable - start Steam and reconnect"); return;
+        }
+        coop::steaminvite::init(&coopUiConnect);
+        coop::steamp2p::setPeers(ids.empty() ? 0 : &ids[0], (unsigned int)ids.size(), g_cfg.isHost);
+        g_net.setSteamTransport(g_cfg.isHost ? coop::steamp2p::selfId() : ids[0]);
+        coopLog("[room] Steam transport armed; host accepts direct friends and manual allowlist");
     }
 
     bool useSteamId = g_cfg.transport == "steam" && !steamFallback;
@@ -2469,6 +2462,7 @@ void startNetworking() {
         b[sizeof(b) - 1] = '\0'; coopLog(b);
         ok = g_net.startClient(g_cfg.ip, g_cfg.port, &g_inbound);
     }
+    if (ok && g_cfg.isHost && g_cfg.transport == "steam") coop::steaminvite::hostRoom();
     if (!ok) coopErr("KenshiCoop: networking failed to start");
     if (steamFallback) coop::setNetUiError(steamFallback);
 }
@@ -2480,7 +2474,8 @@ void startNetworking() {
 void coopUiConnect(bool isHost, bool useSteam, const unsigned long long* peerIds,
                    unsigned int peerCount, unsigned int ownRank) {
     coop::disc::responderStop(); // startNetworking re-arms it for a UDP host
-    if (g_net.isRunning()) g_net.stop();
+    g_net.stop();
+    coop::steaminvite::reset();
     coop::steamp2p::shutdown();
     // World is live here (reconnect from within a running game): despawn minted
     // proxies before clearing maps so a re-connect leaves no orphaned duplicates.
@@ -2566,7 +2561,7 @@ void coopUiConnect(bool isHost, bool useSteam, const unsigned long long* peerIds
 void coopUiDisconnect() {
     coopLog("[coop-ui] disconnect");
     coop::disc::responderStop();
-    if (g_net.isRunning()) g_net.stop();
+    g_net.stop();
     coop::steaminvite::reset(); // leave any Steam lobby
     coop::steamp2p::shutdown();
     // World stays live on a manual disconnect: despawn minted proxies before
@@ -2580,7 +2575,7 @@ void coopUiDisconnect() {
 void (*g_steamShutdown_orig)() = 0;
 void steamShutdown_hook() {
     coopLog("[steam] SteamAPI_Shutdown: stopping net thread before Steam unloads");
-    if (g_net.isRunning()) g_net.stop();
+    g_net.stop();
     coop::steaminvite::reset();
     coop::steamp2p::shutdown();
     g_steamShutdown_orig();

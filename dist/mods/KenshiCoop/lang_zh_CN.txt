@@ -41,8 +41,6 @@ Peer connected=好友已连接
 Peer disconnected=好友已断开连接
 Version mismatch with host - update both to the same KenshiCoop build=与主机版本不一致 - 请双方更新到相同版本的 KenshiCoop
 Rejected a joiner: version mismatch - update both to the same KenshiCoop build=已拒绝一名玩家加入：版本不一致 - 请双方更新到相同版本的 KenshiCoop
-No friend's Steam ID - paste it in the F2 panel, then reconnect (using UDP for now)=缺少好友 Steam ID - 请在 F2 面板粘贴后重新连接（当前改用 UDP）
-Steam is not running - start Steam, then reconnect (using UDP for now)=Steam 未运行 - 请启动 Steam 后重新连接（当前改用 UDP）
 
 # 网络发现与小队槽位
 Squad slot: %u    (switch)=小队槽位：%u    （点击切换）
@@ -108,3 +106,9 @@ Load the host save and wait for ownership synchronization=请读取主机存档�
 Creating a character requires that you own no characters=只有目前没有自己角色时才可创建
 No character templates found in loaded game starts=当前加载的开局中没有可用角色模板
 Wait for the current save or transfer to finish=请等待当前存档或传输完成
+
+# 好友房间连接提示
+No host Steam ID - paste it in the F2 panel=没有主机 Steam ID，请在 F2 面板粘贴
+Steam is unavailable - start Steam and reconnect=Steam 不可用，请启动 Steam 后重新联机
+Rejected a joiner: room full=已拒绝加入：房间已满
+Rejected a joiner: not a Steam friend or on the allowlist=已拒绝加入：不是 Steam 好友，也不在放行名单中

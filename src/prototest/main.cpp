@@ -25,6 +25,7 @@
 
 #include "../netproto/Wire.h"
 #include "../netproto/CharacterCreation.h"
+#include "../plugin/net/SteamRoom.h"
 #include "../netproto/Discovery.h"
 #include "../netproto/ContentHash.h"
 #include "../plugin/sync/Interp.h"
@@ -74,6 +75,19 @@ static int g_total  = 0;
 
 static void testSizes() {
     std::printf("== wire struct sizes (the packed contract both clients memcpy) ==\n");
+    CHECK_EQ("Steam LobbyCreated size", sizeof(room::LobbyCreated), 16);
+    CHECK_EQ("Steam LobbyCreated lobby", offsetof(room::LobbyCreated, lobby), 8);
+    CHECK_EQ("Steam LobbyEnter size", sizeof(room::LobbyEnter), 24);
+    CHECK_EQ("Steam LobbyEnter response", offsetof(room::LobbyEnter, response), 16);
+    CHECK_EQ("Steam LobbyData size", sizeof(room::LobbyDataUpdate), 24);
+    CHECK_EQ("Steam LobbyData success", offsetof(room::LobbyDataUpdate, success), 16);
+    CHECK_EQ("Steam FriendGame size", sizeof(room::FriendGameInfo), 24);
+    CHECK_EQ("Steam FriendGame lobby", offsetof(room::FriendGameInfo, lobby), 16);
+    CHECK_EQ("Steam JoinRequested size", sizeof(room::JoinRequested), 16);
+    CHECK_EQ("Steam P2PRequest size", sizeof(room::P2PRequest), 8);
+    CHECK_EQ("Steam lobby data callback", room::LOBBY_DATA, 505);
+    CHECK_EQ("Steam join callback", room::JOIN_REQUESTED, 333);
+    CHECK_EQ("Steam diagnostic size", sizeof(room::Diagnostic), 8);
     CHECK_EQ("sizeof(OwnerRow)", sizeof(OwnerRow), 25);
     CHECK_EQ("sizeof(OwnersHeader)", sizeof(OwnersHeader), 19);
     CHECK_EQ("sizeof(OwnerRequestPacket)", sizeof(OwnerRequestPacket), 21);

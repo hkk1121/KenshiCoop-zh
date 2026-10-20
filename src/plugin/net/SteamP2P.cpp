@@ -1,12 +1,16 @@
-#define _CRT_SECURE_NO_WARNINGS 1 // _snprintf is fine here; silence VC10 C4996
+﻿#define _CRT_SECURE_NO_WARNINGS 1 // _snprintf is fine here; silence VC10 C4996
 
 #include "SteamP2P.h"
 #include "../CoopLog.h"
+#include "SteamRoom.h"
+#include "../core/SteamId.h"
+#include "../../netproto/Wire.h"
 
 #include <windows.h>
 #include <enet/enet.h>
 #include <cstring>
 #include <cstdio>
+#include <vector>
 
 namespace coop {
 namespace steamp2p {
@@ -71,7 +75,26 @@ char g_selfName[64] = { 0 };
 // same contract the single g_peer had).
 const unsigned int MAX_TUNNEL_PEERS = 8; // matches NetLink's ENet slot count
 SteamId g_peers[MAX_TUNNEL_PEERS] = { 0, 0, 0, 0, 0, 0, 0, 0 };
-unsigned int g_peerCount = 0;
+unsigned int g_peerCount = MAX_TUNNEL_PEERS;
+bool g_transport = false, g_roomHost = false;
+std::vector<SteamId> g_allowlist;
+DWORD g_peerBorn[MAX_TUNNEL_PEERS] = { 0 };
+bool g_peerUsed[MAX_TUNNEL_PEERS] = { false };
+void* g_friends = 0;
+typedef bool (*HasFriendFn)(void*, SteamId, int);
+HasFriendFn g_hasFriend = 0;
+volatile LONG g_joinRejection = 0, g_hostRejection = 0;
+DWORD g_lastRoomProbe = 0, g_lastRejectNotice = 0;
+struct SessionRequests {
+    CRITICAL_SECTION cs;
+    SteamId ids[32];
+    unsigned int count;
+    SessionRequests() : count(0) { InitializeCriticalSection(&cs); }
+    ~SessionRequests() { DeleteCriticalSection(&cs); }
+} g_requests;
+bool allowedPeer(SteamId id);
+void rejectPeer(SteamId id, unsigned int reason);
+int registerPeer(SteamId id);
 SteamId g_pingPeer = 0; // spike peer (channel 1)
 
 // Fake identity the tunnel reports to ENet: "1.0.0.(1+slot)":port.
@@ -93,13 +116,12 @@ inline int slotForFakeHost(enet_uint32 host) {
 // Slot holding SteamId 'id', or -1.
 inline int slotForPeer(SteamId id) {
     for (unsigned int i = 0; i < g_peerCount; ++i)
-        if (g_peers[i] == id) return (int)i;
+        if (id && g_peers[i] == id) return (int)i;
     return -1;
 }
 
 // Net-thread-only diagnostics state.
 bool  g_loggedFirstRecv   = false;
-bool  g_loggedStraySender = false;
 DWORD g_lastStateTick     = 0;
 SessionState g_lastState; // zero-initialised (file scope)
 bool  g_haveLastState     = false;
@@ -143,7 +165,7 @@ int ENET_CALLBACK hookSend(ENetSocket s, const ENetAddress* address,
     // (ENet never does this for peer traffic) falls back to slot 0 - the
     // classic single-peer behavior.
     slot = address ? slotForFakeHost(address->host) : 0;
-    if (slot < 0) return -1;
+    if (slot < 0 || !g_peers[slot]) return -1;
     for (i = 0; i < bufferCount; ++i) {
         if (len + buffers[i].dataLength > sizeof(buf)) return -1;
         std::memcpy(buf + len, buffers[i].data, buffers[i].dataLength);
@@ -164,17 +186,8 @@ int ENET_CALLBACK hookReceive(ENetSocket s, ENetAddress* address,
     if (!g_isAvail(g_iface, &avail, CH_TUNNEL)) return 0;
     if (!g_read(g_iface, buf, sizeof(buf), &got, &sender, CH_TUNNEL)) return 0;
     slot = slotForPeer(sender);
-    if (slot < 0) {
-        // Someone else sent to us (not a configured co-op friend): drop.
-        if (!g_loggedStraySender) {
-            g_loggedStraySender = true;
-            char b[96];
-            _snprintf(b, sizeof(b) - 1, "dropping packets from unexpected peer %llu", sender);
-            b[sizeof(b) - 1] = '\0';
-            steamLog(b);
-        }
-        return 0;
-    }
+    if (slot < 0 && g_roomHost && g_transport) slot = registerPeer(sender);
+    if (slot < 0) return 0;
     if (got > buffers[0].dataLength) return -2; // oversized (like WSAEMSGSIZE)
     std::memcpy(buffers[0].data, buf, got);
     if (address != 0) {
@@ -346,10 +359,12 @@ bool init() {
     typedef const char* (*PersonaFn)(void*);
     PersonaFn persona = (PersonaFn)GetProcAddress(mod, "SteamAPI_ISteamFriends_GetPersonaName");
     if (getFriends && persona) {
-        void* friends = getFriends(client, hUser, hPipe, "SteamFriends015");
-        const char* name = friends ? persona(friends) : 0;
+        g_friends = getFriends(client, hUser, hPipe, "SteamFriends015");
+        const char* name = g_friends ? persona(g_friends) : 0;
         if (name) { strncpy(g_selfName, name, sizeof(g_selfName) - 1); g_selfName[63] = 0; }
     }
+    g_hasFriend = (HasFriendFn)GetProcAddress(mod, "SteamAPI_ISteamFriends_HasFriend");
+    if (!g_friends || !g_hasFriend) { coop::logErrLine("[room] direct-friend check unavailable"); return false; }
     if (allowRelay != 0) allowRelay(g_iface, true); // Valve-relay fallback ON
 
     g_ready = true;
@@ -367,20 +382,21 @@ bool init() {
 bool ready()      { return g_ready; }
 SteamId selfId()  { return g_selfId; }
 
-void setPeers(const SteamId* ids, unsigned int count) {
-    g_peerCount = 0;
-    for (unsigned int i = 0; i < count && g_peerCount < MAX_TUNNEL_PEERS; ++i) {
-        if (ids[i] == 0) continue;
-        g_peers[g_peerCount++] = ids[i];
-        if (g_ready) {
-            g_accept(g_iface, ids[i]); // proactive accept (code exchange, no callbacks)
-            char b[112];
-            _snprintf(b, sizeof(b) - 1,
-                      "tunnel peer[%u]=%llu at 1.0.0.%u (session pre-accepted)",
-                      g_peerCount - 1, ids[i], g_peerCount);
-            b[sizeof(b) - 1] = '\0';
-            steamLog(b);
-        }
+void setPeers(const SteamId* ids, unsigned int count, bool hosting) {
+    g_transport = true; g_roomHost = hosting;
+    g_allowlist.clear();
+    std::memset(g_peers, 0, sizeof(g_peers));
+    std::memset(g_peerBorn, 0, sizeof(g_peerBorn));
+    std::memset(g_peerUsed, 0, sizeof(g_peerUsed));
+    InterlockedExchange(&g_joinRejection, 0); InterlockedExchange(&g_hostRejection, 0);
+    g_lastRoomProbe = 0; g_lastRejectNotice = 0;
+    for (unsigned int i = 0; ids && i < count; ++i) {
+        if (!ids[i] || ids[i] == g_selfId) continue;
+        g_allowlist.push_back(ids[i]);
+    }
+    if (!hosting && !g_allowlist.empty()) {
+        g_peers[0] = g_allowlist[0];
+        if (g_ready) g_accept(g_iface, g_peers[0]);
     }
 }
 
@@ -389,12 +405,12 @@ void setPeer(SteamId id) {
 }
 
 void accept(SteamId id) {
-    if (!g_ready || id == 0) return;
-    g_accept(g_iface, id);
-    char b[96];
-    _snprintf(b, sizeof(b) - 1, "accepted inbound session from %llu", id);
-    b[sizeof(b) - 1] = '\0';
-    steamLog(b);
+    if (!g_ready || !id) return;
+    EnterCriticalSection(&g_requests.cs);
+    bool duplicate = false;
+    for (unsigned int i = 0; i < g_requests.count; ++i) if (g_requests.ids[i] == id) duplicate = true;
+    if (!duplicate && g_requests.count < 32) g_requests.ids[g_requests.count++] = id;
+    LeaveCriticalSection(&g_requests.cs);
 }
 
 void setPingPeer(SteamId id) {
@@ -411,6 +427,40 @@ void setPingPeer(SteamId id) {
 void tick() {
     if (!g_ready) return;
     DWORD now = GetTickCount();
+    SteamId requests[32]; unsigned int requestCount;
+    EnterCriticalSection(&g_requests.cs);
+    requestCount = g_requests.count;
+    std::memcpy(requests, g_requests.ids, requestCount * sizeof(SteamId));
+    g_requests.count = 0;
+    LeaveCriticalSection(&g_requests.cs);
+    for (unsigned int i = 0; i < requestCount; ++i) {
+        if (g_transport && g_roomHost) {
+            if (allowedPeer(requests[i])) g_accept(g_iface, requests[i]);
+            else rejectPeer(requests[i], room::REJECT_FRIEND);
+        } else if ((g_transport && requests[i] == g_peers[0]) || requests[i] == g_pingPeer)
+            g_accept(g_iface, requests[i]);
+    }
+    if (g_transport) {
+        for (int i = 0; i < 16; ++i) {
+            room::Diagnostic d; unsigned int avail = 0, got = 0; SteamId sender = 0;
+            if (!g_isAvail(g_iface, &avail, 2)) break;
+            unsigned char bytes[4096];
+            if (!g_read(g_iface, bytes, sizeof(bytes), &got, &sender, 2)) break;
+            if (got != sizeof(d)) continue;
+            std::memcpy(&d, bytes, sizeof(d));
+            if (g_roomHost && !std::memcmp(d.tag, "KCRQ", 4) && d.reason == 0) {
+                if (!allowedPeer(sender)) rejectPeer(sender, room::REJECT_FRIEND);
+                else if (slotForPeer(sender) < 0) registerPeer(sender);
+            } else if (!g_roomHost && sender == g_peers[0] && !std::memcmp(d.tag, "KCRD", 4) &&
+                       (d.reason == room::REJECT_FRIEND || d.reason == room::REJECT_FULL))
+                InterlockedExchange(&g_joinRejection, (LONG)d.reason);
+        }
+        if (!g_roomHost && g_peers[0] && (!g_lastRoomProbe || now - g_lastRoomProbe >= 2000)) {
+            g_lastRoomProbe = now;
+            room::Diagnostic d; std::memcpy(d.tag, "KCRQ", 4); d.reason = 0;
+            g_send(g_iface, g_peers[0], &d, sizeof(d), SEND_UNRELIABLE, 2);
+        }
+    }
     // Session-state transitions, logged at most every ~1 s (and only on change).
     // With several tunnel peers the first slot is watched (the host link on a
     // join; friend 1 on the host) - the spike stays a single-peer diagnostic.
@@ -423,7 +473,7 @@ void tick() {
 }
 
 bool installEnetHooks(int port) {
-    if (!g_ready || g_peerCount == 0) return false;
+    if (!g_ready || !g_transport) return false;
     g_fakePort = (unsigned short)port;
     std::memset(&g_hooks, 0, sizeof(g_hooks));
     g_hooks.socket_create  = &hookCreate;
@@ -450,7 +500,9 @@ void shutdown() {
         if (g_peers[i] == g_pingPeer) pingClosed = true;
     }
     if (g_pingPeer != 0 && !pingClosed) g_close(g_iface, g_pingPeer);
-    g_peerCount = 0;
+    std::memset(g_peers, 0, sizeof(g_peers));
+    g_allowlist.clear(); g_transport = false; g_roomHost = false; g_pingPeer = 0;
+    EnterCriticalSection(&g_requests.cs); g_requests.count = 0; LeaveCriticalSection(&g_requests.cs);
 }
 
 SteamId peerIdForHost(unsigned int host) {
@@ -459,6 +511,68 @@ SteamId peerIdForHost(unsigned int host) {
 }
 
 const char* selfName() { return g_selfName; }
+
+namespace {
+bool allowedPeer(SteamId id) {
+    if (!id || id == g_selfId) return false;
+    for (size_t i = 0; i < g_allowlist.size(); ++i) if (g_allowlist[i] == id) return true;
+    return g_hasFriend && g_friends && g_hasFriend(g_friends, id, 0x04);
+}
+
+void rejectPeer(SteamId id, unsigned int reason) {
+    // 仅发送诊断，绝不把未授权身份登记到 ENet 通道。
+    room::Diagnostic d; std::memcpy(d.tag, "KCRD", 4); d.reason = reason;
+    g_accept(g_iface, id);
+    g_send(g_iface, id, &d, sizeof(d), SEND_UNRELIABLE, 2);
+    DWORD now = GetTickCount();
+    if (!g_lastRejectNotice || now - g_lastRejectNotice >= 4000) {
+        g_lastRejectNotice = now;
+        char b[160];
+        _snprintf(b, sizeof(b) - 1, "[room] rejected %s: %s", coop::maskSteamId64(id).c_str(),
+                  reason == room::REJECT_FULL ? "room full" : "not a friend");
+        b[sizeof(b) - 1] = 0; coop::logLine(b);
+        InterlockedExchange(&g_hostRejection, (LONG)reason);
+    }
+}
+
+int registerPeer(SteamId id) {
+    if (!allowedPeer(id)) { rejectPeer(id, room::REJECT_FRIEND); return -1; }
+    unsigned int used = 0;
+    int freeSlot = -1;
+    for (unsigned int i = 0; i < g_peerCount; ++i) {
+        if (g_peers[i] == id) return (int)i;
+        if (g_peers[i]) ++used;
+        else if (freeSlot < 0) freeSlot = (int)i;
+    }
+    if (used >= coop::MAX_PLAYERS - 1 || freeSlot < 0) { rejectPeer(id, room::REJECT_FULL); return -1; }
+    g_peers[freeSlot] = id; g_peerBorn[freeSlot] = GetTickCount(); g_peerUsed[freeSlot] = false;
+    g_accept(g_iface, id);
+    char b[128];
+    _snprintf(b, sizeof(b) - 1, "[room] registered %s in tunnel slot %d", coop::maskSteamId64(id).c_str(), freeSlot);
+    b[sizeof(b) - 1] = 0; coop::logLine(b);
+    return freeSlot;
+}
+} // namespace
+
+void updateTunnelPeers(_ENetHost* host) {
+    if (!g_transport || !g_roomHost || !host) return;
+    for (unsigned int i = 0; i < g_peerCount; ++i) {
+        if (!g_peers[i]) continue;
+        bool referenced = false;
+        for (size_t j = 0; j < host->peerCount; ++j) {
+            ENetPeer& peer = host->peers[j];
+            if (peer.state != ENET_PEER_STATE_DISCONNECTED && peer.address.host == fakeHostForSlot(i)) {
+                referenced = true; g_peerUsed[i] = true; break;
+            }
+        }
+        if (!referenced && (g_peerUsed[i] || GetTickCount() - g_peerBorn[i] >= 15000)) {
+            g_close(g_iface, g_peers[i]); g_peers[i] = 0; g_peerUsed[i] = false;
+        }
+    }
+}
+
+unsigned int takeJoinRejection() { return (unsigned int)InterlockedExchange(&g_joinRejection, 0); }
+unsigned int takeHostRejection() { return (unsigned int)InterlockedExchange(&g_hostRejection, 0); }
 
 } // namespace steamp2p
 } // namespace coop

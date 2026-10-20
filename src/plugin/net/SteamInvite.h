@@ -1,4 +1,4 @@
-// SteamInvite - Steam overlay invite + lobby-based automatic SteamID exchange.
+﻿// SteamInvite - Steam overlay invite + lobby-based automatic SteamID exchange.
 //
 // The two-code exchange (SteamP2P's setPeer) is callback-free but forces players
 // to read out and type 17-digit SteamIDs. This module layers Steam's native
@@ -74,6 +74,9 @@ const char* status();
 
 // Leave any lobby and clear invite state (called on disconnect / teardown).
 void reset();
+
+// 主线程：Steam 主机会话常驻大厅，成员到达不触发重连。
+void hostRoom();
 
 } // namespace steaminvite
 } // namespace coop

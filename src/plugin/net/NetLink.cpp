@@ -549,7 +549,9 @@ void NetLink::threadLoop() {
         if (steamp2p::installEnetHooks(port_)) {
             netLog("transport=steam (ENet tunnelled over Steam P2P)");
         } else {
-            netErr("steam transport requested but hooks failed; falling back to UDP");
+            coop::logErrLine("[room] Steam tunnel unavailable; refusing UDP fallback");
+            setNetUiError("Steam is unavailable - start Steam and reconnect");
+            InterlockedExchange(&running_, 0); return;
         }
     }
 
@@ -613,6 +615,7 @@ void NetLink::threadLoop() {
     while (!stopFlag_) {
         // Steam heartbeat: spike ping/echo + session-state change logging.
         // Cheap no-op when Steam isn't initialised (pure-UDP sessions).
+        if (steam) steamp2p::updateTunnelPeers(enetHost_);
         steamp2p::tick();
 
         // Client reconnect: if we have no live connection, retry every 2 s so

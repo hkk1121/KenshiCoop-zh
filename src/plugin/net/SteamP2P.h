@@ -1,4 +1,4 @@
-// SteamP2P - Steam P2P datagram transport over Kenshi's own steam_api64.dll.
+﻿// SteamP2P - Steam P2P datagram transport over Kenshi's own steam_api64.dll.
 //
 // Kenshi ships the legacy ISteamNetworking P2P API (SendP2PPacket/ReadP2PPacket,
 // confirmed in the DLL's flat exports; interface era SteamClient017/SteamUser019).
@@ -28,6 +28,8 @@
 #ifndef KENSHICOOP_STEAMP2P_H
 #define KENSHICOOP_STEAMP2P_H
 
+struct _ENetHost;
+
 namespace coop {
 namespace steamp2p {
 
@@ -44,7 +46,7 @@ SteamId selfId();
 // fabricated ENet address 1.0.0.(1+i). Proactively accepts each id's inbound
 // session; Valve-relay fallback stays on. Call before the net thread starts.
 // setPeer is the single-counterparty convenience (a join's host link).
-void setPeers(const SteamId* ids, unsigned int count);
+void setPeers(const SteamId* ids, unsigned int count, bool hosting = false);
 void setPeer(SteamId id);
 
 // Accept an inbound P2P session from a specific SteamID. Used by the Steam
@@ -72,6 +74,11 @@ void shutdown();
 
 SteamId peerIdForHost(unsigned int host);
 const char* selfName();
+
+// 网络线程独占登记表；主线程会话回调仅经有锁队列提交身份。
+void updateTunnelPeers(_ENetHost* host);
+unsigned int takeJoinRejection();
+unsigned int takeHostRejection();
 
 } // namespace steamp2p
 } // namespace coop
