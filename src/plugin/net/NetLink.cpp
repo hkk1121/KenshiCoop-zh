@@ -622,9 +622,11 @@ void NetLink::threadLoop() {
         // Cheap no-op when Steam isn't initialised (pure-UDP sessions).
         if (steam) steamp2p::updateTunnelPeers(enetHost_);
         steamp2p::tick();
+        unsigned int roomReason = steam && !isHost_ ? steamp2p::takeJoinRejection() : 0;
         if (steam && !isHost_ && !welcomed && !rejected) {
-            unsigned int reason = steamp2p::takeJoinRejection();
+            unsigned int reason = roomReason;
             if (reason) {
+                steamp2p::setJoinProbe(false);
                 rejected = true;
                 if (reason == room::REJECT_FULL) setNetUiError("Room is full - wait for a free player slot");
                 else setNetUiError("The host rejected you: not a Steam friend or on the allowlist");
@@ -831,7 +833,7 @@ void NetLink::threadLoop() {
                                 netErr(b);
                                 setNetUiError("Version mismatch with host - update both to the same KenshiCoop build");
                             } else {
-                                welcomed = true; clearNetUiError();
+                                welcomed = true; if (steam) steamp2p::setJoinProbe(false); clearNetUiError();
                                 InterlockedExchange(&myId_, (LONG)w.playerId);
                                 char b[96];
                                 _snprintf(b, sizeof(b) - 1,
@@ -1408,6 +1410,7 @@ void NetLink::threadLoop() {
                         else if (ev.data == room::REJECT_FULL) setNetUiError("Room is full - wait for a free player slot");
                         else if (ev.data == room::REJECT_FRIEND) setNetUiError("The host rejected you: not a Steam friend or on the allowlist");
                         else if (ev.data == room::REJECT_IDENTITY) setNetUiError("The host rejected an invalid player identity");
+                        if (steam) steamp2p::setJoinProbe(!rejected);
                         netLog("disconnected from host");
                     }
                     break;

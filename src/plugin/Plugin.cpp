@@ -2447,7 +2447,10 @@ void startNetworking() {
     g_net.setSteamTransport(0);
     if (g_cfg.transport == "steam") {
         std::vector<unsigned long long> ids = g_cfg.steamPeers;
-        if (!g_cfg.isHost) { ids.clear(); if (g_cfg.steamPeer) ids.push_back(g_cfg.steamPeer); }
+        if (!g_cfg.isHost) {
+            if (ids.empty() && g_cfg.steamPeer) ids.push_back(g_cfg.steamPeer);
+            if (!ids.empty()) { ids.resize(1); g_cfg.steamPeer = ids[0]; }
+        }
         else if (ids.empty() && g_cfg.steamPeer) ids.push_back(g_cfg.steamPeer);
         if (!g_cfg.isHost && ids.empty()) {
             coop::setNetUiError("No host Steam ID - paste it in the F2 panel"); return;
@@ -2559,6 +2562,7 @@ void coopUiConnect(bool isHost, bool useSteam, const unsigned long long* peerIds
                 if (peerIds[i] != 0) g_cfg.steamPeers.push_back(peerIds[i]);
             if (!g_cfg.steamPeers.empty()) g_cfg.steamPeer = g_cfg.steamPeers[0];
         } else {
+            g_cfg.steamPeers.clear();
             g_cfg.steamPeer = peerIds[0];
         }
     }

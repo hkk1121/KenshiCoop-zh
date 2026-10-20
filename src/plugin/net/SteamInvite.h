@@ -1,26 +1,7 @@
-﻿// SteamInvite - Steam overlay invite + lobby-based automatic SteamID exchange.
-//
-// The two-code exchange (SteamP2P's setPeer) is callback-free but forces players
-// to read out and type 17-digit SteamIDs. This module layers Steam's native
-// invite flow on top of the SAME P2P tunnel so nobody types an ID:
-//
-//   HOST : creates a 2-player friends-only Steam lobby, then opens the Steam
-//          overlay's invite dialog. When the friend accepts and enters the lobby
-//          the host learns their SteamID from lobby membership and connects.
-//   JOIN : Steam delivers GameLobbyJoinRequested when the friend clicks the
-//          invite (both players must already be in-game - Kenshi's launcher does
-//          not forward +connect_lobby from a cold start). We join the lobby,
-//          read the owner (= host SteamID) and connect as the client.
-//
-// Everything runs on the MAIN thread: tick() drives the Steam callback pump
-// itself (SteamAPI_RunCallbacks) because Kenshi does not - its async CreateLobby
-// result never dispatched until we added the call. This is safe even if the game
-// also pumped: RunCallbacks just drains the message queue, so sequential
-// main-thread calls can't double-deliver a single posted callback. tick() also
-// polls lobby membership. The
-// resolved peer is handed back through the ConnectFn (the plugin's coopUiConnect),
-// which reuses the normal Steam-transport connect path. Manual ID entry stays as
-// a fallback for setups where the overlay is unavailable.
+﻿// SteamInvite：常驻好友大厅、房间查询与 Steam 菜单加入。
+// 所有大厅数据与回调均由主线程 tick 驱动；面板直连只查询、不进入大厅。
+// Steam 菜单加入时临时进入大厅取得主机身份，离开后走同一连接入口。
+// 新成员绝不触发主机重新联机，实际准入仍由 SteamP2P 与 NetLink 校验。
 
 #ifndef KENSHICOOP_STEAMINVITE_H
 #define KENSHICOOP_STEAMINVITE_H

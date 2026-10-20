@@ -129,6 +129,7 @@ SteamAPICall_t g_createCall = 0;
 typedef void (*UnregisterCrFn)(void*, SteamAPICall_t);
 UnregisterCrFn g_unregCr = 0;
 unsigned long long g_joiningLobby = 0, g_connectedHost = 0;
+DWORD g_joinStarted = 0;
 typedef bool (*RequestDataFn)(void*, SteamId);
 typedef bool (*RichPresenceFn)(void*, const char*, const char*);
 typedef bool (*HasFriendFn)(void*, SteamId, int);
@@ -254,7 +255,13 @@ void onLobbyCreated(LobbyCreated_t* r, bool ioFailure) {
 void onGameLobbyJoinRequested(GameLobbyJoinRequested_t* r) {
     if (!r || !g_joinLobby || r->lobby == g_lobby || r->lobby == g_joiningLobby) return;
     if (g_connectedHost && g_getOwner && g_getOwner(g_mm, r->lobby) == g_connectedHost) return;
-    g_joiningLobby = r->lobby;
+    // Steam 每人只能在一个普通大厅中，临时入房前先关闭自己的发现大厅。
+    if (g_wantHost) {
+        if (g_lobby) { g_setData(g_mm, g_lobby, "kc_open", "0"); g_leaveLobby(g_mm, g_lobby); }
+        g_lobby = 0; g_weAreHost = false; g_wantHost = false; g_published.clear();
+        if (g_creating) g_createAbandoned = true;
+    }
+    g_joiningLobby = r->lobby; g_joinStarted = GetTickCount();
     // The friend clicked our invite / "Join Game". Enter their lobby; the actual
     // connect happens in onLobbyEnter once membership + owner are known.
     char b[96];
@@ -263,7 +270,7 @@ void onGameLobbyJoinRequested(GameLobbyJoinRequested_t* r) {
     b[sizeof(b) - 1] = '\0';
     steamLog(b);
     setStatus("Joining friend's game...");
-    g_joinLobby(g_mm, r->lobby);
+    if (!g_joinLobby(g_mm, r->lobby)) g_joiningLobby = 0;
 }
 
 void onLobbyEnter(LobbyEnter_t* r) {
@@ -325,8 +332,7 @@ void onLobbyEnter(LobbyEnter_t* r) {
 
 void onP2PSessionRequest(P2PSessionRequest_t* r) {
     if (!r) return;
-    // Accept any inbound session from within an invite flow so the tunnel opens
-    // regardless of which side sends first.
+    // 主线程仅排队，网络线程按好友/放行名单决定接受或诊断拒绝。
     coop::steamp2p::accept(r->remote);
 }
 
@@ -506,6 +512,10 @@ void tick() {
     // the message queue, so sequential main-thread calls can't double-deliver a
     // single posted callback. Main thread only (this runs inside mainLoop_hook).
     if (g_runCb) g_runCb();
+    if (g_joiningLobby && GetTickCount() - g_joinStarted >= 12000) {
+        g_leaveLobby(g_mm, g_joiningLobby); g_joiningLobby = 0;
+        setNetUiError("Steam room join timed out - try pasting the host ID");
+    }
     if (g_watched.host && (!g_watched.requested || GetTickCount() - g_watched.requested >= 4000)) queryRoom(g_watched);
     if (g_watched.state == room::QUERYING && GetTickCount() - g_watched.requested >= 3500) g_watched.state = room::UNKNOWN;
     if (g_watched.state == room::AVAILABLE && GetTickCount() - g_watched.refreshed > 8000) g_watched.state = room::UNKNOWN;
@@ -560,7 +570,7 @@ void updateSession(bool hosting, SteamId connectedHost, const char* saveUtf8,
     g_advert.name = room::displayText(g_ready ? g_frName(g_friends, steamp2p::selfId()) : steamp2p::selfName(), 240);
     g_advert.save = room::displayText(saveUtf8, 240);
     g_advert.world = world; g_advert.players = players; g_advert.slots = slots;
-    if (hosting && !g_wantHost) hostRoom();
+    if (hosting && !g_wantHost && !g_joiningLobby) hostRoom();
     else if (!hosting && g_wantHost) reset();
 }
 

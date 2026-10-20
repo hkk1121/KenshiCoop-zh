@@ -11,6 +11,7 @@
 #include <cstring>
 #include <cstdio>
 #include <vector>
+#include <map>
 
 namespace coop {
 namespace steamp2p {
@@ -67,16 +68,14 @@ UserBLoggedOnFn   g_loggedOn    = 0;
 bool    g_ready    = false;
 SteamId g_selfId   = 0;
 char g_selfName[64] = { 0 };
-// Tunnel peer registry (channel 0; protocol 49). Slot i talks to fabricated
-// ENet address 1.0.0.(1+i):port, so ENet's per-address peer routing can hold
-// several Steam counterparties at once. A JOIN registers exactly one entry
-// (the host, slot 0 = the classic "1.0.0.1"); the HOST registers every
-// friend. Written on the main thread before the net thread launches (the
-// same contract the single g_peer had).
+// 隧道槽表运行时由网络线程独占，主线程只在启动前配置、停止后清理。
+// 手动名单是放行名单，不预占席位；固定假地址在仍被 ENet 引用时不复用。
 const unsigned int MAX_TUNNEL_PEERS = 8; // matches NetLink's ENet slot count
 SteamId g_peers[MAX_TUNNEL_PEERS] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 unsigned int g_peerCount = MAX_TUNNEL_PEERS;
-bool g_transport = false, g_roomHost = false;
+bool g_transport = false, g_roomHost = false, g_joinProbe = true;
+struct Refusal { DWORD sent, closeAt; Refusal() : sent(0), closeAt(0) {} };
+std::map<SteamId, Refusal> g_refusals;
 std::vector<SteamId> g_allowlist;
 DWORD g_peerBorn[MAX_TUNNEL_PEERS] = { 0 };
 bool g_peerUsed[MAX_TUNNEL_PEERS] = { false };
@@ -383,7 +382,7 @@ bool ready()      { return g_ready; }
 SteamId selfId()  { return g_selfId; }
 
 void setPeers(const SteamId* ids, unsigned int count, bool hosting) {
-    g_transport = true; g_roomHost = hosting;
+    g_transport = true; g_roomHost = hosting; g_joinProbe = true; g_refusals.clear();
     g_allowlist.clear();
     std::memset(g_peers, 0, sizeof(g_peers));
     std::memset(g_peerBorn, 0, sizeof(g_peerBorn));
@@ -459,18 +458,24 @@ void tick() {
                        (d.reason == room::REJECT_FRIEND || d.reason == room::REJECT_FULL))
                 InterlockedExchange(&g_joinRejection, (LONG)d.reason);
         }
-        if (!g_roomHost && g_peers[0] && (!g_lastRoomProbe || now - g_lastRoomProbe >= 2000)) {
+        if (!g_roomHost && g_joinProbe && g_peers[0] && (!g_lastRoomProbe || now - g_lastRoomProbe >= 2000)) {
             g_lastRoomProbe = now;
             room::Diagnostic d; std::memcpy(d.tag, "KCRQ", 4); d.reason = 0;
             g_send(g_iface, g_peers[0], &d, sizeof(d), SEND_UNRELIABLE, 2);
         }
+    }
+    for (std::map<SteamId, Refusal>::iterator it = g_refusals.begin(); it != g_refusals.end();) {
+        if (slotForPeer(it->first) >= 0) g_refusals.erase(it++);
+        else if ((long)(now - it->second.closeAt) >= 0) { g_close(g_iface, it->first); g_refusals.erase(it++); }
+        else ++it;
     }
     // Session-state transitions, logged at most every ~1 s (and only on change).
     // With several tunnel peers the first slot is watched (the host link on a
     // join; friend 1 on the host) - the spike stays a single-peer diagnostic.
     if (now - g_lastStateTick >= 1000) {
         g_lastStateTick = now;
-        SteamId watch = (g_peerCount != 0) ? g_peers[0] : g_pingPeer;
+        SteamId watch = g_pingPeer;
+        for (unsigned int i = 0; i < g_peerCount; ++i) if (g_peers[i]) { watch = g_peers[i]; break; }
         if (watch != 0) logSessionState(watch);
     }
     if (g_pingPeer != 0) spikeTick();
@@ -504,6 +509,9 @@ void shutdown() {
         if (g_peers[i] == g_pingPeer) pingClosed = true;
     }
     if (g_pingPeer != 0 && !pingClosed) g_close(g_iface, g_pingPeer);
+    for (std::map<SteamId, Refusal>::const_iterator it = g_refusals.begin(); it != g_refusals.end(); ++it)
+        g_close(g_iface, it->first);
+    g_refusals.clear();
     std::memset(g_peers, 0, sizeof(g_peers));
     g_allowlist.clear(); g_transport = false; g_roomHost = false; g_pingPeer = 0;
     EnterCriticalSection(&g_requests.cs); g_requests.count = 0; LeaveCriticalSection(&g_requests.cs);
@@ -525,10 +533,18 @@ bool allowedPeer(SteamId id) {
 
 void rejectPeer(SteamId id, unsigned int reason) {
     // 仅发送诊断，绝不把未授权身份登记到 ENet 通道。
-    room::Diagnostic d; std::memcpy(d.tag, "KCRD", 4); d.reason = reason;
-    g_accept(g_iface, id);
-    g_send(g_iface, id, &d, sizeof(d), SEND_UNRELIABLE, 2);
     DWORD now = GetTickCount();
+    if (g_refusals.size() >= 32 && g_refusals.find(id) == g_refusals.end()) {
+        g_close(g_iface, g_refusals.begin()->first); g_refusals.erase(g_refusals.begin());
+    }
+    Refusal& refusal = g_refusals[id];
+    if (!refusal.sent || now - refusal.sent >= 1000) {
+        room::Diagnostic d; std::memcpy(d.tag, "KCRD", 4); d.reason = reason;
+        g_accept(g_iface, id);
+        g_send(g_iface, id, &d, sizeof(d), SEND_UNRELIABLE, 2);
+        refusal.sent = now;
+    }
+    refusal.closeAt = now + 5000;
     if (!g_lastRejectNotice || now - g_lastRejectNotice >= 4000) {
         g_lastRejectNotice = now;
         char b[160];
@@ -577,6 +593,7 @@ void updateTunnelPeers(_ENetHost* host) {
 
 unsigned int takeJoinRejection() { return (unsigned int)InterlockedExchange(&g_joinRejection, 0); }
 unsigned int takeHostRejection() { return (unsigned int)InterlockedExchange(&g_hostRejection, 0); }
+void setJoinProbe(bool enabled) { g_joinProbe = enabled; }
 
 } // namespace steamp2p
 } // namespace coop

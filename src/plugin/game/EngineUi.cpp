@@ -320,7 +320,6 @@ bool g_slotManual = false;
 unsigned long long g_roomTarget = 0;
 std::string g_lastRoomUi;
 DataPanelLine* g_roomLine = 0;
-std::string roomDescription(const coop::room::Info& room);
 const int ROOM_ROWS = 3;
 DataPanelLine_Button* g_roomButtons[ROOM_ROWS] = { 0 };
 unsigned long long g_roomButtonIds[ROOM_ROWS] = { 0 }, g_clickedRoomId = 0;
@@ -748,7 +747,6 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
             coop::saveLastPeer(clicked);
             if (found->protocol != coop::PROTOCOL_VERSION)
                 coop::setNetUiError("Version mismatch with host - update both to the same KenshiCoop build");
-            else if (found->players >= found->limit) coop::setNetUiError("Room is full - wait for a free player slot");
             else if (showFriendRooms) {
                 unsigned int freeSlot = coop::room::firstFreeSlot(found->slots, found->limit);
                 if (freeSlot) g_slotChoice = freeSlot;
@@ -798,7 +796,20 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
             unsigned int freeSlot = coop::room::firstFreeSlot(info.slots, info.limit);
             if (freeSlot && g_slotChoice != freeSlot) { g_slotChoice = freeSlot; g_panel.needsRebuild = true; }
         }
-        roomDetail = roomDescription(info);
+        if (!info.host) roomDetail = coop::tr("Paste a host Steam ID to look up their room");
+        else if (info.state == coop::room::QUERYING) roomDetail = coop::tr("Looking up the host's room...");
+        else if (info.state == coop::room::NOT_PLAYING) roomDetail = coop::tr("The host is not playing Kenshi");
+        else if (info.state == coop::room::NO_ROOM) roomDetail = coop::tr("The host has not opened a room");
+        else if (info.state != coop::room::AVAILABLE) roomDetail = coop::tr("Room not found - you can still try connecting");
+        else {
+            char text[1024];
+            _snprintf(text, sizeof(text)-1, coop::tr("%s's room: %s, %u/%u players, %s"), info.name.c_str(),
+                info.save.empty() ? coop::tr("No save yet") : info.save.c_str(), info.players, info.limit,
+                coop::tr(info.protocol == coop::PROTOCOL_VERSION ? "Version matches" : "Version mismatch - update both to the same co-op build"));
+            text[sizeof(text)-1] = 0;
+            roomDetail = text;
+            roomDetail += coop::tr(info.world ? " - in world" : " - at menu / loading");
+        }
         if (info.state == coop::room::AVAILABLE && (info.slots & (1u << g_slotChoice)))
             roomDetail += coop::tr(" - selected squad slot is occupied");
     }
@@ -1259,23 +1270,6 @@ void onCharacterCreateBtn(DataPanelLine*) { if (g_characterFn) g_characterFn(1);
 } } }
 
 namespace coop { namespace engine {
-namespace {
-std::string roomDescription(const coop::room::Info& info) {
-    if (!info.host) return coop::tr("Paste a host Steam ID to look up their room");
-    if (info.state == coop::room::QUERYING) return coop::tr("Looking up the host's room...");
-    if (info.state == coop::room::NOT_PLAYING) return coop::tr("The host is not playing Kenshi");
-    if (info.state == coop::room::NO_ROOM) return coop::tr("The host has not opened a room");
-    if (info.state != coop::room::AVAILABLE) return coop::tr("Room not found - you can still try connecting");
-    char text[1024];
-    _snprintf(text, sizeof(text)-1, coop::tr("%s's room: %s, %u/%u players, %s"), info.name.c_str(),
-              info.save.empty() ? coop::tr("No save yet") : info.save.c_str(), info.players, info.limit,
-              coop::tr(info.protocol == coop::PROTOCOL_VERSION ? "Version matches" : "Version mismatch - update both to the same co-op build"));
-    text[sizeof(text)-1] = 0;
-    std::string result = text;
-    result += coop::tr(info.world ? " - in world" : " - at menu / loading");
-    return result;
-}
-} // namespace
 
 namespace {
 void onRoomButton(DataPanelLine* line) {

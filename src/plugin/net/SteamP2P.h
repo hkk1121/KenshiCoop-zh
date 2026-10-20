@@ -12,18 +12,9 @@
 // via enet_set_socket_hooks() (patch 0002), so every ENet datagram rides one
 // unreliable Steam P2P packet on channel 0. UDP stays the default transport.
 //
-// Multi-peer tunnel (protocol 49): up to MAX_TUNNEL_PEERS counterparties,
-// configured up front with their steamid64s (code exchange; sending to a
-// SteamID implicitly accepts its inbound session, so no Steam callback
-// plumbing needed). Each registered peer is mapped to a fabricated ENet
-// address 1.0.0.(1+slot):port so ENet's per-address peer routing multiplexes
-// them over the one Steam socket. A JOIN registers exactly one (the host);
-// the HOST registers every friend.
-//
-// Threading: init()/setPeer(s)()/setPingPeer() are called on the main thread
-// before the net thread launches; the ENet hooks and tick() run on the net
-// thread. The flat ISteamNetworking calls are thread-safe (IPC into the
-// Steam client).
+// 网络线程独占动态隧道表；主线程会话回调只写有锁队列。
+// 启动前配置直接好友/手动放行策略，停止网络线程后才能 shutdown。
+// Steam 旧接口的 IPC 调用可跨线程，游戏对象与界面仍只在主线程访问。
 
 #ifndef KENSHICOOP_STEAMP2P_H
 #define KENSHICOOP_STEAMP2P_H
@@ -42,16 +33,11 @@ bool init();
 bool ready();
 SteamId selfId();
 
-// Configure the tunnel peer registry (protocol 49): slot i talks to the
-// fabricated ENet address 1.0.0.(1+i). Proactively accepts each id's inbound
-// session; Valve-relay fallback stays on. Call before the net thread starts.
-// setPeer is the single-counterparty convenience (a join's host link).
+// 启动前设置手动放行名单与角色；主机允许空名单，加入方只登记主机。
 void setPeers(const SteamId* ids, unsigned int count, bool hosting = false);
 void setPeer(SteamId id);
 
-// Accept an inbound P2P session from a specific SteamID. Used by the Steam
-// invite layer's P2PSessionRequest_t callback so a session opens even if the
-// request arrives before setPeer() pre-accepts it. No-op until init() succeeds.
+// 主线程回调排队，由网络线程验证身份与人数，不直接修改隧道表。
 void accept(SteamId id);
 
 // Spike harness (KENSHICOOP_STEAM_PING=<steamid64>): ping/echo on P2P channel 1
@@ -79,6 +65,7 @@ const char* selfName();
 void updateTunnelPeers(_ENetHost* host);
 unsigned int takeJoinRejection();
 unsigned int takeHostRejection();
+void setJoinProbe(bool enabled);
 
 } // namespace steamp2p
 } // namespace coop

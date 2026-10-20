@@ -141,3 +141,5 @@ Friend rooms=好友房间
 Click a room to connect=点击房间即可连接
 No friend rooms found - you can paste a host ID=未发现好友房间，可粘贴主机 ID 连接
 More rooms (%u/%u)=更多房间（%u/%u 页）
+
+Steam room join timed out - try pasting the host ID=Steam 房间加入超时，请尝试粘贴主机 ID
