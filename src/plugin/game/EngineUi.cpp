@@ -792,7 +792,8 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         if (g_roomTarget != target) { g_roomTarget = target; g_slotManual = false; }
         coop::steaminvite::watchRoom(target);
         const coop::room::Info& info = coop::steaminvite::watchedRoom();
-        if (!g_slotManual && info.state == coop::room::AVAILABLE) {
+        // 已连接时房间里占的槽位含自己，不自动改选也不提示占用
+        if (!st->running && !g_slotManual && info.state == coop::room::AVAILABLE) {
             unsigned int freeSlot = coop::room::firstFreeSlot(info.slots, info.limit);
             if (freeSlot && g_slotChoice != freeSlot) { g_slotChoice = freeSlot; g_panel.needsRebuild = true; }
         }
@@ -810,7 +811,7 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
             roomDetail = text;
             roomDetail += coop::tr(info.world ? " - in world" : " - at menu / loading");
         }
-        if (info.state == coop::room::AVAILABLE && (info.slots & (1u << g_slotChoice)))
+        if (!st->running && info.state == coop::room::AVAILABLE && (info.slots & (1u << g_slotChoice)))
             roomDetail += coop::tr(" - selected squad slot is occupied");
     }
     if (roomDetail != g_lastRoomUi) { g_lastRoomUi = roomDetail; g_panel.needsRebuild = true; }
