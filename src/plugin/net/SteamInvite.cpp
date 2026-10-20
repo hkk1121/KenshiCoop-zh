@@ -2,6 +2,7 @@
 
 #include "SteamInvite.h"
 #include "SteamRoom.h"
+#include "NetLink.h"
 #include "SteamP2P.h"        // selfId() + accept() (shared Steam client)
 #include "../CoopLog.h"
 #include "../../netproto/Wire.h" // coop::PROTOCOL_VERSION (lobby-data version gate)
@@ -9,6 +10,9 @@
 #include <windows.h>
 #include <cstdio>
 #include <cstring>
+#include <map>
+#include <string>
+#include <vector>
 #include <cstdlib> // atoi (lobby protocol-version gate)
 
 namespace coop {
@@ -124,6 +128,19 @@ SteamAPICall_t g_createCall = 0;
 typedef void (*UnregisterCrFn)(void*, SteamAPICall_t);
 UnregisterCrFn g_unregCr = 0;
 unsigned long long g_joiningLobby = 0, g_connectedHost = 0;
+typedef bool (*RequestDataFn)(void*, SteamId);
+typedef bool (*RichPresenceFn)(void*, const char*, const char*);
+typedef bool (*HasFriendFn)(void*, SteamId, int);
+RequestDataFn g_requestData = 0;
+RichPresenceFn g_richPresence = 0;
+HasFriendFn g_hasFriend = 0;
+SteamCallback g_cbLobbyData;
+room::Info g_watched, g_advert;
+std::map<std::string, std::string> g_published;
+std::vector<room::Info> g_rooms;
+void queryRoom(room::Info& info);
+void readRoom(room::Info& info, room::LobbyDataUpdate* data);
+void publishRoom();
 
 // Cached friend list for the in-panel picker (our own copy - GetFriendPersonaName
 // returns a Steam-owned pointer only valid until the next call). Sorted in-Kenshi
@@ -202,6 +219,7 @@ void onLobbyCreated(LobbyCreated_t* r, bool ioFailure) {
         return;
     }
     if (!g_wantHost) { if (g_leaveLobby) g_leaveLobby(g_mm, r->lobby); return; }
+    g_published.clear();
     g_lobby     = r->lobby;
     g_weAreHost = true;
     g_hostFired = false;
@@ -212,6 +230,7 @@ void onLobbyCreated(LobbyCreated_t* r, bool ioFailure) {
         g_setData(g_mm, g_lobby, "kc_protocol", pv);
         g_setData(g_mm, g_lobby, "kc_game", "KenshiCoop");
     }
+    publishRoom();
     char b[96];
     _snprintf(b, sizeof(b) - 1, "lobby created %llu (protocol %s)", g_lobby, pv);
     b[sizeof(b) - 1] = '\0';
@@ -233,11 +252,10 @@ void onLobbyCreated(LobbyCreated_t* r, bool ioFailure) {
 
 void onGameLobbyJoinRequested(GameLobbyJoinRequested_t* r) {
     if (!r || !g_joinLobby || r->lobby == g_lobby || r->lobby == g_joiningLobby) return;
+    if (g_connectedHost && g_getOwner && g_getOwner(g_mm, r->lobby) == g_connectedHost) return;
     g_joiningLobby = r->lobby;
     // The friend clicked our invite / "Join Game". Enter their lobby; the actual
     // connect happens in onLobbyEnter once membership + owner are known.
-    g_weAreHost = false;
-    g_hostFired = false;
     char b[96];
     _snprintf(b, sizeof(b) - 1, "join requested for lobby %llu - entering...",
               r->lobby);
@@ -250,20 +268,18 @@ void onGameLobbyJoinRequested(GameLobbyJoinRequested_t* r) {
 void onLobbyEnter(LobbyEnter_t* r) {
     if (!r || r->response != 1) { g_joiningLobby = 0; return; }
     unsigned long long lobby = r->lobby;
-    if (g_joiningLobby != lobby && lobby != g_lobby && !g_wantHost) {
-        if (g_leaveLobby) g_leaveLobby(g_mm, lobby); return;
+    if (lobby == g_lobby && g_wantHost) return;
+    if (g_joiningLobby != lobby) {
+        if (g_leaveLobby && lobby != g_lobby) g_leaveLobby(g_mm, lobby);
+        return;
     }
-    g_lobby = lobby;
     unsigned long long owner = g_getOwner ? g_getOwner(g_mm, lobby) : 0;
     SteamId self = (SteamId)coop::steamp2p::selfId();
 
-    if (owner == 0) { steamLog("entered lobby but owner unknown"); return; }
-    if (owner == self) {
-        // We are the host entering our own lobby - wait for the friend (tick()).
-        steamLog("entered own lobby - waiting for friend to join");
-        return;
+    if (!owner || owner == self || !g_getData || std::strcmp(g_getData(g_mm, lobby, "kc_game"), "KenshiCoop")) {
+        if (g_leaveLobby) g_leaveLobby(g_mm, lobby);
+        g_joiningLobby = 0; return;
     }
-
     // Joiner path: the owner is the host. Optionally gate on protocol version.
     if (g_getData) {
         const char* hp = g_getData(g_mm, lobby, "kc_protocol");
@@ -277,24 +293,28 @@ void onLobbyEnter(LobbyEnter_t* r) {
                 b[sizeof(b) - 1] = '\0';
                 steamLog(b);
                 setStatus("Version mismatch with host - update both sides");
+                setNetUiError("Version mismatch with host - update both to the same KenshiCoop build");
                 if (g_leaveLobby) g_leaveLobby(g_mm, lobby);
-                g_lobby = 0; g_joiningLobby = 0;
+                g_joiningLobby = 0;
                 return;
             }
         }
     }
 
+    room::Info joined; joined.host = owner; joined.lobby = lobby;
+    room::LobbyDataUpdate update; update.lobby = lobby; update.member = lobby; update.success = 1;
+    readRoom(joined, &update);
+    unsigned int rank = joined.state == room::AVAILABLE ? room::firstFreeSlot(joined.slots, joined.limit) : 0;
     if (g_leaveLobby) g_leaveLobby(g_mm, lobby);
-    g_lobby = 0; g_joiningLobby = 0;
+    g_joiningLobby = 0;
     if (g_connectedHost == owner) return;
-    g_connectedHost = owner;
     coop::steamp2p::accept(owner); // pre-accept the host's P2P session
     char b[96];
     _snprintf(b, sizeof(b) - 1, "joined host %llu via lobby - connecting as CLIENT", owner);
     b[sizeof(b) - 1] = '\0';
     steamLog(b);
     setStatus("Connecting to host...");
-    if (g_onConnect) { SteamId one = owner; g_onConnect(false, true, &one, 1, 0); }
+    if (g_onConnect) { SteamId one = owner; g_onConnect(false, true, &one, 1, rank); }
 }
 
 void onP2PSessionRequest(P2PSessionRequest_t* r) {
@@ -309,6 +329,10 @@ void dispatch(int iCallback, void* param, bool ioFailure) {
         case cb_LobbyCreated:           onLobbyCreated((LobbyCreated_t*)param, ioFailure); break;
         case cb_LobbyEnter:             onLobbyEnter((LobbyEnter_t*)param); break;
         case cb_GameLobbyJoinRequested: onGameLobbyJoinRequested((GameLobbyJoinRequested_t*)param); break;
+        case room::LOBBY_DATA:
+            readRoom(g_watched, (room::LobbyDataUpdate*)param);
+            for (size_t i = 0; i < g_rooms.size(); ++i) readRoom(g_rooms[i], (room::LobbyDataUpdate*)param);
+            break;
         case cb_P2PSessionRequest:      onP2PSessionRequest((P2PSessionRequest_t*)param); break;
         default: break;
     }
@@ -359,13 +383,16 @@ bool init(ConnectFn onConnect) {
     g_regCb       = (RegisterCbFn)         GetProcAddress(mod, "SteamAPI_RegisterCallback");
     g_regCr       = (RegisterCrFn)         GetProcAddress(mod, "SteamAPI_RegisterCallResult");
     g_unregCb     = (UnregisterCbFn)       GetProcAddress(mod, "SteamAPI_UnregisterCallback");
+    g_requestData = (RequestDataFn)GetProcAddress(mod, "SteamAPI_ISteamMatchmaking_RequestLobbyData");
+    g_richPresence = (RichPresenceFn)GetProcAddress(mod, "SteamAPI_ISteamFriends_SetRichPresence");
+    g_hasFriend = (HasFriendFn)GetProcAddress(mod, "SteamAPI_ISteamFriends_HasFriend");
     g_unregCr = (UnregisterCrFn)GetProcAddress(mod, "SteamAPI_UnregisterCallResult");
     g_runCb       = (RunCallbacksFn)       GetProcAddress(mod, "SteamAPI_RunCallbacks");
 
     if (!getUser || !getPipe || !getClient || !getMmIf || !getFrIf || !g_createLobby ||
         !g_joinLobby || !g_setData || !g_getData || !g_getOwner || !g_getNum ||
         !g_getMember || !g_inviteToLobby || !g_frCount || !g_frByIndex || !g_frName ||
-        !g_regCb || !g_regCr || !g_unregCr || !g_leaveLobby || !g_runCb) {
+        !g_frGame || !g_hasFriend || !g_requestData || !g_regCb || !g_regCr || !g_unregCr || !g_leaveLobby || !g_runCb) {
         steamLog("init FAILED: invite/lobby flat exports missing");
         return false;
     }
@@ -390,6 +417,8 @@ bool init(ConnectFn onConnect) {
     g_regCb(&g_cbLobbyEnter, cb_LobbyEnter);
     g_regCb(&g_cbJoinRequested, cb_GameLobbyJoinRequested);
     g_regCb(&g_cbP2PRequest, cb_P2PSessionRequest);
+    g_cbLobbyData.arm(room::LOBBY_DATA, sizeof(room::LobbyDataUpdate));
+    g_regCb(&g_cbLobbyData, room::LOBBY_DATA);
 
     g_ready = true;
     char b[160];
@@ -475,6 +504,10 @@ void tick() {
     // the message queue, so sequential main-thread calls can't double-deliver a
     // single posted callback. Main thread only (this runs inside mainLoop_hook).
     if (g_runCb) g_runCb();
+    if (g_watched.host && (!g_watched.requested || GetTickCount() - g_watched.requested >= 4000)) queryRoom(g_watched);
+    if (g_watched.state == room::QUERYING && GetTickCount() - g_watched.requested >= 3500) g_watched.state = room::UNKNOWN;
+    if (g_watched.state == room::AVAILABLE && GetTickCount() - g_watched.refreshed > 8000) g_watched.state = room::UNKNOWN;
+    if (g_wantHost && g_lobby) publishRoom();
 
     // Refresh the picker's friend list every ~3s while it's open (online / in-game
     // status changes over time). Skip once the host has already connected.
@@ -493,7 +526,11 @@ void tick() {
 const char* status() { return g_status; }
 
 void reset() {
+    if (g_ready && g_lobby && g_weAreHost && g_setData) g_setData(g_mm, g_lobby, "kc_open", "0");
     if (g_ready && g_lobby != 0 && g_leaveLobby) g_leaveLobby(g_mm, g_lobby);
+    if (g_ready && g_joiningLobby && g_leaveLobby) g_leaveLobby(g_mm, g_joiningLobby);
+    if (g_ready && g_richPresence) g_richPresence(g_friends, "status", "");
+    g_published.clear();
     g_lobby     = 0;
     g_weAreHost = false;
     g_hostFired = false;
@@ -511,6 +548,78 @@ void hostRoom() {
     g_wantHost = true;
     createLobbyIfNeeded();
 }
+
+void updateSession(bool hosting, SteamId connectedHost, const char* saveUtf8,
+                   bool world, unsigned int players, unsigned int slots) {
+    g_connectedHost = connectedHost;
+    g_advert.name = room::displayText(steamp2p::selfName(), 240);
+    g_advert.save = room::displayText(saveUtf8, 240);
+    g_advert.world = world; g_advert.players = players; g_advert.slots = slots;
+    if (hosting && !g_wantHost) hostRoom();
+    else if (!hosting && g_wantHost) reset();
+}
+
+void watchRoom(SteamId host) {
+    if (g_watched.host == host) return;
+    g_watched = room::Info(); g_watched.host = host;
+    if (g_ready && host) queryRoom(g_watched);
+}
+
+const room::Info& watchedRoom() { return g_watched; }
+
+namespace {
+void queryRoom(room::Info& info) {
+    if (!info.host || !g_ready) return;
+    info.requested = GetTickCount();
+    if (!g_hasFriend(g_friends, info.host, 0x04)) { info.state = room::UNKNOWN; info.lobby = 0; return; }
+    FriendGameInfo_t game; std::memset(&game, 0, sizeof(game));
+    if (!g_frGame(g_friends, info.host, &game) || (game.gameId & 0xFFFFFFu) != KENSHI_APPID) {
+        info.state = room::NOT_PLAYING; info.lobby = 0; return;
+    }
+    if (!game.lobby) { info.state = room::NO_ROOM; info.lobby = 0; return; }
+    if (info.lobby != game.lobby) { info.state = room::QUERYING; info.refreshed = 0; }
+    info.lobby = game.lobby;
+    if (!info.refreshed) info.state = room::QUERYING;
+    info.name = room::displayText(g_frName(g_friends, info.host), 240);
+    if (!g_requestData(g_mm, info.lobby)) info.state = room::UNKNOWN;
+}
+
+void readRoom(room::Info& info, room::LobbyDataUpdate* data) {
+    if (!data || !info.host || info.lobby != data->lobby || data->member != data->lobby) return;
+    info.state = room::UNKNOWN;
+    if (!data->success || g_getOwner(g_mm, info.lobby) != info.host ||
+        std::strcmp(g_getData(g_mm, info.lobby, "kc_game"), "KenshiCoop")) return;
+    unsigned int open = 0, world = 0;
+    if (!room::parseNumber(g_getData(g_mm, info.lobby, "kc_open"), 1, open) || !open) { info.state = room::NO_ROOM; return; }
+    if (!room::parseNumber(g_getData(g_mm, info.lobby, "kc_protocol"), 65535, info.protocol) || !info.protocol ||
+        !room::parseNumber(g_getData(g_mm, info.lobby, "kc_players"), coop::MAX_PLAYERS, info.players) || !info.players ||
+        !room::parseNumber(g_getData(g_mm, info.lobby, "kc_limit"), coop::MAX_PLAYERS, info.limit) || info.limit != coop::MAX_PLAYERS || info.players > info.limit ||
+        !room::parseNumber(g_getData(g_mm, info.lobby, "kc_slots"), (1u << coop::MAX_PLAYERS) - 1, info.slots) || !(info.slots & 1) ||
+        !room::parseNumber(g_getData(g_mm, info.lobby, "kc_world"), 1, world)) return;
+    unsigned int count = 0;
+    for (unsigned int i = 0; i < coop::MAX_PLAYERS; ++i) if (info.slots & (1u << i)) ++count;
+    if (count != info.players) return;
+    info.world = world != 0;
+    info.name = room::displayText(g_getData(g_mm, info.lobby, "kc_host"), 240);
+    info.save = room::displayText(g_getData(g_mm, info.lobby, "kc_save"), 240);
+    info.state = room::AVAILABLE; info.refreshed = GetTickCount();
+}
+
+void publishRoom() {
+    if (!g_wantHost || !g_lobby || !g_setData) return;
+    const char* keys[] = { "kc_game", "kc_protocol", "kc_host", "kc_save", "kc_players", "kc_limit", "kc_slots", "kc_world", "kc_open" };
+    std::string values[] = { "KenshiCoop", std::to_string((unsigned long long)coop::PROTOCOL_VERSION),
+        g_advert.name, g_advert.save, std::to_string((unsigned long long)g_advert.players),
+        std::to_string((unsigned long long)coop::MAX_PLAYERS), std::to_string((unsigned long long)g_advert.slots),
+        g_advert.world ? "1" : "0", "1" };
+    for (unsigned int i = 0; i < sizeof(keys)/sizeof(keys[0]); ++i) {
+        if (g_published.find(keys[i]) != g_published.end() && g_published[keys[i]] == values[i]) continue;
+        if (g_setData(g_mm, g_lobby, keys[i], values[i].c_str())) g_published[keys[i]] = values[i];
+    }
+    if (g_richPresence && g_published["presence"] != "1" && g_richPresence(g_friends, "status", "Hosting KenshiCoop"))
+        g_published["presence"] = "1";
+}
+} // namespace
 
 } // namespace steaminvite
 } // namespace coop

@@ -23,6 +23,8 @@
 #include <mygui/MyGUI_Delegate.h> // MyGUI::newDelegate + CDelegate* (free-fn callbacks)
 #include <windows.h>
 
+#include "../net/SteamInvite.h"
+#include "../net/NetLink.h"
 #include "../core/SteamId.h" // parseSteamId64 (paste button) + maskSteamId64 (id rows)
 #include "../core/Config.h"  // coop::tr (UI text localization)
 #include "../core/FpsLimit.h" // 帧数上限切换按钮
@@ -314,6 +316,11 @@ unsigned int            g_pastedCount  = 0;
 bool                    g_pasteFailed  = false; // last paste wasn't a valid Steam ID
 // JOIN squad-slot choice: 1 = second player, 2 = third player, 3 = fourth.
 unsigned int            g_slotChoice   = 1;
+bool g_slotManual = false;
+unsigned long long g_roomTarget = 0;
+std::string g_lastRoomUi;
+DataPanelLine* g_roomLine = 0;
+std::string roomDescription(const coop::room::Info& room);
 
 // Button callbacks (free functions - MyGUI::newDelegate wraps them without any
 // raw-MyGUI link). A press flips the armed flag and requests a rebuild so the
@@ -339,6 +346,7 @@ void onConnBtn(DataPanelLine*) {
 // JOIN squad-slot toggle: claim the next squad tab. The host rejects a slot
 // another join already holds.
 void onSlotBtn(DataPanelLine*) {
+    g_slotManual = true;
     ++g_slotChoice;
     if (g_slotChoice >= coop::MAX_PLAYERS) g_slotChoice = 1;
     g_panel.needsRebuild = true;
@@ -387,6 +395,7 @@ void onPasteIdBtn(DataPanelLine*) {
     std::string clip;
     unsigned long long id = 0;
     if (clipboardGetText(clip) && coop::parseSteamId64(clip, id)) {
+        if (!g_panel.hostFlag) { g_pastedCount = 0; g_slotManual = false; g_roomTarget = 0; }
         bool dup = false;
         for (unsigned int i = 0; i < g_pastedCount; ++i)
             if (g_pastedPeers[i] == id) { dup = true; break; }
@@ -440,6 +449,7 @@ struct PanelStrings {
     const std::string *title, *roleKey, *roleCap, *transKey, *transCap;
     const std::string *connKey, *connCap;
     const std::string *slotKey, *slotCap;
+    const std::string *roomKey, *roomVal;
     const std::string *scanKey, *scanCap;   // null = no Scan button (HOST/Steam)
     const std::string *discKey, *discVal;   // null = no browser row (nothing to show)
     const std::string *dbgKey, *dbgVal;
@@ -466,6 +476,8 @@ void panelBuildSeh(DatapanelGUI* p, const PanelStrings* s) {
         g_slotBtn = 0;
         if (s->slotKey && s->slotCap)
             g_slotBtn = p->setLineButton(*s->slotKey, *s->slotCap, 0);
+        g_roomLine = 0;
+        if (s->roomKey && s->roomVal) g_roomLine = p->setLine(*s->roomKey, *s->roomVal, *s->empty, 0, false, true);
         // JOIN + UDP: the tailnet/LAN game browser (scan + picked-host row).
         g_scanBtn = 0;
         if (s->scanKey && s->scanCap)
@@ -707,6 +719,22 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
     characterUi += st->editingCharacter ? "E" : st->canCreateCharacter ? "Y" : "N";
     if (characterUi != g_lastCharacterUi) { g_panel.needsRebuild = true; g_lastCharacterUi = characterUi; }
 
+    std::string roomDetail;
+    if (!g_panel.hostFlag && g_panel.steamFlag) {
+        unsigned long long target = g_pastedCount ? g_pastedPeers[0] : st->peerSteamId;
+        if (g_roomTarget != target) { g_roomTarget = target; g_slotManual = false; }
+        coop::steaminvite::watchRoom(target);
+        const coop::room::Info& info = coop::steaminvite::watchedRoom();
+        if (!g_slotManual && info.state == coop::room::AVAILABLE) {
+            unsigned int freeSlot = coop::room::firstFreeSlot(info.slots, info.limit);
+            if (freeSlot && g_slotChoice != freeSlot) { g_slotChoice = freeSlot; g_panel.needsRebuild = true; }
+        }
+        roomDetail = roomDescription(info);
+        if (info.state == coop::room::AVAILABLE && (info.slots & (1u << g_slotChoice)))
+            roomDetail += coop::tr(" - selected squad slot is occupied");
+    }
+    if (roomDetail != g_lastRoomUi) { g_lastRoomUi = roomDetail; g_panel.needsRebuild = true; }
+
     // Keep the Online/Offline toggle honest when the session state changes
     // underneath us (a peer-driven connect, a failed connect that stopped, etc):
     // resync the desired flag to the real state and rebuild so the button caption
@@ -818,6 +846,7 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
                       g_panel.steamFlag ? "Steam" : "UDP");
         }
         std::string dbgVal = fb;
+        if (st->detail && *st->detail) dbgVal = st->detail;
         // A join streaming the host's world at the menu has no leader for the
         // screen overlay, so surface the live progress here instead (amber).
         if (!transfer.empty()) { dbgVal = transfer; dbgKey = coop::tr("World transfer"); }
@@ -840,7 +869,8 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         } else if (g_pasteFailed) {
             peerVal = coop::tr("(clipboard was not a Steam ID - copy theirs and retry)");
         } else {
-            peerVal = coop::tr("(click Paste friend's Steam ID)");
+            peerVal = g_panel.hostFlag ? coop::tr("Friends can join directly; paste IDs for extra access") :
+                coop::tr("(click Paste friend's Steam ID)");
         }
         std::string pasteKey = "pasteid";
         std::string pasteCap = coop::tr("Paste friend's Steam ID");
@@ -889,7 +919,9 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
             st->canCreateCharacter ? coop::tr("Create character") : coop::tr("Create character (unavailable)");
         std::string characterStatusKey = coop::tr("Character creation");
         std::string characterStatus = st->characterStatus ? st->characterStatus : "";
+        std::string roomKey = coop::tr("Room info");
         PanelStrings ps;
+        ps.roomKey = roomDetail.empty() ? 0 : &roomKey; ps.roomVal = roomDetail.empty() ? 0 : &roomDetail;
         ps.characterTemplateKey = &characterTemplateKey; ps.characterTemplateCap = &characterTemplateCap;
         ps.characterCreateKey = &characterCreateKey; ps.characterCreateCap = &characterCreateCap;
         ps.characterStatusKey = &characterStatusKey; ps.characterStatus = &characterStatus;
@@ -943,6 +975,7 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         dbgColourSeh(g_debugLine, !transfer.empty()); // amber while streaming
         // Browser row: amber while a scan is in flight, white once it settled.
         dbgColourSeh(g_discLine, st->discBusy != 0);
+        dbgColourSeh(g_roomLine, false);
         dbgColourSeh(g_peerLine, false);
         dbgColourSeh(g_selfLine, false);
         dbgColourSeh(g_authLine, false);
@@ -969,7 +1002,11 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
                       g_panel.hostFlag ? 0u : g_slotChoice);
             b[sizeof(b) - 1] = '\0';
             coop::logLine(b);
-            if (onConnect) onConnect(g_panel.hostFlag, g_panel.steamFlag,
+            const coop::room::Info& room = coop::steaminvite::watchedRoom();
+            if (!g_panel.hostFlag && g_panel.steamFlag && room.state == coop::room::AVAILABLE && room.protocol != coop::PROTOCOL_VERSION) {
+                coop::setNetUiError("Version mismatch with host - update both to the same KenshiCoop build");
+                g_panel.connectedFlag = false; g_panel.lastChkVal = false; g_panel.needsRebuild = true;
+            } else if (onConnect) onConnect(g_panel.hostFlag, g_panel.steamFlag,
                                      g_pastedPeers, g_pastedCount,
                                      g_panel.hostFlag ? 0u : g_slotChoice);
         } else if (!g_panel.connectedFlag && st->running) {
@@ -1125,6 +1162,24 @@ bool inventoryUiOpen() {
         return false;
     }
 }
+
+namespace {
+std::string roomDescription(const coop::room::Info& info) {
+    if (!info.host) return coop::tr("Paste a host Steam ID to look up their room");
+    if (info.state == coop::room::QUERYING) return coop::tr("Looking up the host's room...");
+    if (info.state == coop::room::NOT_PLAYING) return coop::tr("The host is not playing Kenshi");
+    if (info.state == coop::room::NO_ROOM) return coop::tr("The host has not opened a room");
+    if (info.state != coop::room::AVAILABLE) return coop::tr("Room not found - you can still try connecting");
+    char text[1024];
+    _snprintf(text, sizeof(text)-1, coop::tr("%s's room: %s, %u/%u players, %s"), info.name.c_str(),
+              info.save.empty() ? coop::tr("No save yet") : info.save.c_str(), info.players, info.limit,
+              coop::tr(info.protocol == coop::PROTOCOL_VERSION ? "Version matches" : "Version mismatch - update both to the same co-op build"));
+    text[sizeof(text)-1] = 0;
+    std::string result = text;
+    result += coop::tr(info.world ? " - in world" : " - at menu / loading");
+    return result;
+}
+} // namespace
 
 } // namespace engine
 } // namespace coop

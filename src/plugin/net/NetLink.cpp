@@ -3,6 +3,7 @@
 #include "NetLink.h"
 #include "../../netproto/CharacterCreation.h"
 #include "SteamP2P.h"
+#include "SteamRoom.h"
 #include "../CoopLog.h"
 
 #include <cstring>
@@ -132,8 +133,9 @@ void NetLink::setClaimRank(u32 rank) {
 bool NetLink::launchThread() {
     if (enet_initialize() != 0) { netErr("enet_initialize failed"); return false; }
     stopFlag_ = 0;
+    InterlockedExchange(&running_, 1);
     thread_ = CreateThread(0, 0, &NetLink::threadEntry, this, 0, 0);
-    if (thread_ == 0) { netErr("CreateThread failed"); enet_deinitialize(); return false; }
+    if (thread_ == 0) { InterlockedExchange(&running_, 0); netErr("CreateThread failed"); enet_deinitialize(); return false; }
     return true;
 }
 
@@ -583,6 +585,9 @@ void NetLink::threadLoop() {
     }
 
     DWORD lastConnectAttempt = GetTickCount();
+    DWORD handshakeSince = GetTickCount();
+    bool welcomed = false, rejected = false;
+    std::map<ENetPeer*, DWORD> pendingHello;
 
     // Fresh session: no admitted joins yet (protocol 49). The registries are
     // members only so the net-thread helpers can reach them; they never
@@ -617,10 +622,28 @@ void NetLink::threadLoop() {
         // Cheap no-op when Steam isn't initialised (pure-UDP sessions).
         if (steam) steamp2p::updateTunnelPeers(enetHost_);
         steamp2p::tick();
+        if (steam && !isHost_ && !welcomed && !rejected) {
+            unsigned int reason = steamp2p::takeJoinRejection();
+            if (reason) {
+                rejected = true;
+                if (reason == room::REJECT_FULL) setNetUiError("Room is full - wait for a free player slot");
+                else setNetUiError("The host rejected you: not a Steam friend or on the allowlist");
+                coop::logLine("[room] host rejected the Steam connection");
+                if (serverPeer_) { enet_peer_reset(serverPeer_); serverPeer_ = 0; }
+            }
+        }
+        if (!isHost_ && !welcomed && !rejected && GetTickCount() - handshakeSince >= 10000) {
+            setNetUiError("Host is not responding: check they are online, you are Steam friends, and both use the same co-op build");
+        }
+        for (std::map<ENetPeer*, DWORD>::iterator pi = pendingHello.begin(); pi != pendingHello.end();) {
+            if (GetTickCount() - pi->second >= 10000) {
+                enet_peer_disconnect(pi->first, 0); pendingHello.erase(pi++);
+            } else ++pi;
+        }
 
         // Client reconnect: if we have no live connection, retry every 2 s so
         // dropping/relaunching the host re-establishes.
-        if (!isHost_) {
+        if (!isHost_ && !rejected) {
             bool disconnected =
                 (serverPeer_ == 0) ||
                 (serverPeer_->state == ENET_PEER_STATE_DISCONNECTED) ||
@@ -650,6 +673,7 @@ void NetLink::threadLoop() {
                         // 49): other joins' sessions continue across this
                         // arrival, and ids are never reused, so the newcomer
                         // starts with no entry anyway.
+                        pendingHello[ev.peer] = GetTickCount();
                         netLog("peer connecting (awaiting HELLO)");
                     } else {
                         // A fresh host link restarts OUR whole session: every
@@ -698,7 +722,7 @@ void NetLink::threadLoop() {
                                        ev.packet->dataLength != sizeof(h) + h.nameLen ||
                                        (steam && steamp2p::peerIdForHost(ev.peer->address.host) != h.playerId)) {
                                 netErr("[owners] rejected invalid player identity");
-                                enet_peer_disconnect(ev.peer, 0);
+                                enet_peer_disconnect(ev.peer, room::REJECT_IDENTITY);
                             } else if (ev.peer->data != 0) {
                                 netErr("[owners] repeated HELLO ignored");
                             } else {
@@ -741,7 +765,8 @@ void NetLink::threadLoop() {
                                               (unsigned)rank);
                                     rb[sizeof(rb) - 1] = '\0';
                                     netErr(rb);
-                                    enet_peer_disconnect(ev.peer, 0);
+                                    setNetUiError("Rejected a joiner: squad slot is occupied");
+                                    enet_peer_disconnect(ev.peer, room::REJECT_SLOT);
                                 } else if (peersById_.size() + 1 >= MAX_PLAYERS) {
                                     char fb[96];
                                     _snprintf(fb, sizeof(fb) - 1,
@@ -749,12 +774,14 @@ void NetLink::threadLoop() {
                                               (unsigned)MAX_PLAYERS);
                                     fb[sizeof(fb) - 1] = '\0';
                                     netErr(fb);
-                                    enet_peer_disconnect(ev.peer, 0);
+                                    setNetUiError("Rejected a joiner: room full");
+                                    enet_peer_disconnect(ev.peer, room::REJECT_FULL);
                                 } else {
                                     // 在已登记对端中取最小空闲编号：多对端仍不会重复，
                                     // 断线重连也不会把 id 一路推高。
                                     u32 id = 1;
                                     while (peersById_.find(id) != peersById_.end()) ++id;
+                                    pendingHello.erase(ev.peer);
                                     ev.peer->data = (void*)(size_t)id;
                                     peersById_[id] = ev.peer;
                                     rankById_[id]  = rank;
@@ -804,6 +831,7 @@ void NetLink::threadLoop() {
                                 netErr(b);
                                 setNetUiError("Version mismatch with host - update both to the same KenshiCoop build");
                             } else {
+                                welcomed = true; clearNetUiError();
                                 InterlockedExchange(&myId_, (LONG)w.playerId);
                                 char b[96];
                                 _snprintf(b, sizeof(b) - 1,
@@ -1350,6 +1378,7 @@ void NetLink::threadLoop() {
                     break;
                 }
                 case ENET_EVENT_TYPE_DISCONNECT: {
+                    pendingHello.erase(ev.peer);
                     if (isHost_) {
                         // One join left; the others' sessions continue. dropPeer
                         // erases its registry rows + epoch entries (per owner,
@@ -1364,6 +1393,9 @@ void NetLink::threadLoop() {
                         // us - every owner's epoch sequence (host + relayed
                         // joins) restarts on reconnect (v44).
                         epochSeen_.clear();
+                        if (welcomed) handshakeSince = GetTickCount();
+                        welcomed = false;
+                        InterlockedExchange(&myId_, 0);
                         serverPeer_ = 0;
                         if (inbound_) inbound_->pushLeave(OWNER_ID_ALL);
                         // 主机因版本不一致拒绝时会在断开数据里带上原因
@@ -1371,6 +1403,11 @@ void NetLink::threadLoop() {
                             netErr("host rejected us: protocol/version mismatch");
                             setNetUiError("Version mismatch with host - update both to the same KenshiCoop build");
                         }
+                        if (ev.data >= room::REJECT_VERSION && ev.data <= room::REJECT_IDENTITY) rejected = true;
+                        if (ev.data == room::REJECT_SLOT) setNetUiError("Squad slot is occupied - choose another slot and reconnect");
+                        else if (ev.data == room::REJECT_FULL) setNetUiError("Room is full - wait for a free player slot");
+                        else if (ev.data == room::REJECT_FRIEND) setNetUiError("The host rejected you: not a Steam friend or on the allowlist");
+                        else if (ev.data == room::REJECT_IDENTITY) setNetUiError("The host rejected an invalid player identity");
                         netLog("disconnected from host");
                     }
                     break;

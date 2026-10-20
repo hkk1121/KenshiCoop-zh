@@ -1222,6 +1222,23 @@ void coopPanelDrive(GameWorld* gw) {
             coopUiMenuAction(g_cfg.uiAuto == "host");
         }
     }
+    bool steamHost = g_net.isRunning() && g_cfg.isHost && g_cfg.transport == "steam";
+    unsigned int occupied = 1;
+    const std::map<coop::u64, coop::PeerStatusPacket>& roomPlayers = g_repl.players();
+    for (std::map<coop::u64, coop::PeerStatusPacket>::const_iterator it = roomPlayers.begin(); it != roomPlayers.end(); ++it)
+        if (it->second.present && it->second.ownRank < coop::MAX_PLAYERS &&
+            (it->second.ownerId == 0 || g_peersPresent.count(it->second.ownerId))) occupied |= 1u << it->second.ownRank;
+    char currentSave[512] = { 0 };
+    if (steamHost && gw) coop::engine::saveInfo(currentSave, sizeof(currentSave), 0, 0);
+    std::wstring wideSave = coop::savexfer::widePath(currentSave, CP_ACP);
+    int saveBytes = WideCharToMultiByte(CP_UTF8, 0, wideSave.c_str(), (int)wideSave.size(), 0, 0, 0, 0);
+    std::string roomSave(saveBytes > 0 ? saveBytes : 0, '\0');
+    if (saveBytes > 0) WideCharToMultiByte(CP_UTF8, 0, wideSave.c_str(), (int)wideSave.size(), &roomSave[0], saveBytes, 0, 0);
+    coop::steaminvite::updateSession(steamHost,
+        g_net.isRunning() && !g_cfg.isHost && g_cfg.transport == "steam" ? g_cfg.steamPeer : 0,
+        roomSave.c_str(), gw && coop::engine::gameplayLive(gw), 1 + (unsigned int)g_peersPresent.size(), occupied);
+    if (g_net.isRunning() && !g_cfg.isHost && g_cfg.transport == "steam") coop::steaminvite::watchRoom(g_cfg.steamPeer);
+    coop::steaminvite::tick();
     coop::engine::CoopPanelState ps;
     ps.selfSteamId  = (unsigned long long)coop::steamp2p::selfId();
     ps.peerSteamId  = g_cfg.steamPeer;
@@ -1297,12 +1314,27 @@ void coopPanelDrive(GameWorld* gw) {
     }
     // 连接/断开后 4 秒内状态栏显示提示；未连上时优先显示网络层的拒绝原因（如版本不一致）
     const char* netErrMsg = coop::netUiError();
+    static std::string lastHostRoomError;
+    if (g_cfg.isHost && netErrMsg[0] && lastHostRoomError != netErrMsg) {
+        g_toastText = coop::tr(netErrMsg); g_toastState = 0; g_toastArmMs = GetTickCount();
+    }
+    lastHostRoomError = g_cfg.isHost ? netErrMsg : "";
     if (g_toastText && GetTickCount() - g_toastArmMs < TOAST_SHOW_MS) {
         detail = g_toastText;
         ostate = g_toastState;
     } else if (g_peersPresent.empty() && netErrMsg[0]) {
         detail = coop::tr(netErrMsg);
         ostate = 0;
+    }
+    if (!g_cfg.isHost && g_net.isRunning() && g_peersPresent.empty() &&
+        !std::strcmp(netErrMsg, "Host is not responding: check they are online, you are Steam friends, and both use the same co-op build")) {
+        const coop::room::Info& room = coop::steaminvite::watchedRoom();
+        if (room.state == coop::room::NOT_PLAYING) detail = coop::tr("The host is not playing Kenshi");
+        else if (room.state == coop::room::NO_ROOM) detail = coop::tr("The host has not opened a room");
+        else if (room.state == coop::room::AVAILABLE && room.protocol != coop::PROTOCOL_VERSION)
+            detail = coop::tr("Version mismatch with host - update both to the same KenshiCoop build");
+        else if (room.state == coop::room::AVAILABLE && room.players >= room.limit)
+            detail = coop::tr("Room is full - wait for a free player slot");
     }
     ps.detail = detail.c_str();
 
@@ -1341,7 +1373,6 @@ void coopPanelDrive(GameWorld* gw) {
 
     // Still pump Steam callbacks so an inbound "Join Game" (a friend inviting
     // US) can fire coopUiConnect; the outbound invite/picker UI is gone.
-    coop::steaminvite::tick();
 
     coop::engine::coopPanelTick(&ps, &coopUiConnect, &coopUiDisconnect, &coopUiScan,
                                 &coopUiMenuAction, &coopUiAuth, &coopUiCharacter);
@@ -2413,7 +2444,6 @@ void startNetworking() {
         else coopErr("[steam] KENSHICOOP_STEAM_PING set but Steam init failed");
     }
 
-    const char* steamFallback = 0;
     g_net.setSteamTransport(0);
     if (g_cfg.transport == "steam") {
         std::vector<unsigned long long> ids = g_cfg.steamPeers;
@@ -2431,7 +2461,7 @@ void startNetworking() {
         coopLog("[room] Steam transport armed; host accepts direct friends and manual allowlist");
     }
 
-    bool useSteamId = g_cfg.transport == "steam" && !steamFallback;
+    bool useSteamId = g_cfg.transport == "steam";
     coop::u64 identity = useSteamId ? coop::steamp2p::selfId() : g_cfg.localPlayerId;
     std::string name = useSteamId && coop::steamp2p::selfName()[0]
                          ? coop::steamp2p::selfName() : g_cfg.playerName;
@@ -2464,7 +2494,6 @@ void startNetworking() {
     }
     if (ok && g_cfg.isHost && g_cfg.transport == "steam") coop::steaminvite::hostRoom();
     if (!ok) coopErr("KenshiCoop: networking failed to start");
-    if (steamFallback) coop::setNetUiError(steamFallback);
 }
 
 // In-game panel handlers. coopUiConnect tears down any live session, re-arms the
@@ -2473,6 +2502,18 @@ void startNetworking() {
 // the Replicator/Inbound session state is reset for a clean handshake).
 void coopUiConnect(bool isHost, bool useSteam, const unsigned long long* peerIds,
                    unsigned int peerCount, unsigned int ownRank) {
+    if (!isHost && useSteam && peerIds && peerCount && g_net.isRunning() &&
+        !g_cfg.isHost && g_cfg.transport == "steam" && g_cfg.steamPeer == peerIds[0]) return;
+    if (!isHost && useSteam) {
+        const coop::room::Info& room = coop::steaminvite::watchedRoom();
+        coop::u64 target = peerIds && peerCount ? peerIds[0] : g_cfg.steamPeer;
+        if (room.host == target && room.state == coop::room::AVAILABLE) {
+            if (room.protocol != coop::PROTOCOL_VERSION) {
+                coop::setNetUiError("Version mismatch with host - update both to the same KenshiCoop build"); return;
+            }
+            if (!ownRank) ownRank = coop::room::firstFreeSlot(room.slots, room.limit);
+        }
+    }
     coop::disc::responderStop(); // startNetworking re-arms it for a UDP host
     g_net.stop();
     coop::steaminvite::reset();

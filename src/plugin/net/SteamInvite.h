@@ -25,6 +25,8 @@
 #ifndef KENSHICOOP_STEAMINVITE_H
 #define KENSHICOOP_STEAMINVITE_H
 
+#include "SteamRoom.h"
+
 namespace coop {
 namespace steaminvite {
 
@@ -77,6 +79,10 @@ void reset();
 
 // 主线程：Steam 主机会话常驻大厅，成员到达不触发重连。
 void hostRoom();
+void updateSession(bool hosting, SteamId connectedHost, const char* saveUtf8,
+                   bool world, unsigned int players, unsigned int slots);
+void watchRoom(SteamId host);
+const room::Info& watchedRoom();
 
 } // namespace steaminvite
 } // namespace coop
