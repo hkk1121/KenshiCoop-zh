@@ -67,6 +67,14 @@ unsigned int takeJoinRejection();
 unsigned int takeHostRejection();
 void setJoinProbe(bool enabled);
 
+// 房间列表延迟（通道2探测，主机原样回包）：主线程发探测并读取结果。
+// roomPing 返回往返毫秒；-1 = 测量中，-2 = 无响应。
+void probeRoom(SteamId host);
+int roomPing(SteamId host);
+void resetRoomPings();
+// 主线程：网络线程未在读取通道2（未联机或会话已停）时读取延迟回包。
+void pumpRoomPings();
+
 } // namespace steamp2p
 } // namespace coop
 

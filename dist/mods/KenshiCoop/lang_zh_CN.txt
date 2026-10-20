@@ -137,10 +137,19 @@ Version mismatch - update both to the same co-op build=版本不一致，请双�
  - at menu / loading= - 标题界面或加载中
 
 Room is no longer available - refresh and try again=该房间已不可用，请刷新后重试
-%s | %s | %u/%u | %s=%s | %s | %u/%u 人 | %s
 Version mismatch=版本不一致
-Friend rooms=好友房间
-Click a room to connect=点击房间即可连接
+Rooms=房间列表
+Rooms - click to connect=房间列表（点击房间连接）
+Latency    Player    Joined/Max=延迟    用户    已加入/可加入
+No rooms found=没有找到房间
+My room=我的房间
+Local=本机
+Measuring...=测速中
+No response=无响应
+Refresh rooms=刷新房间
+Creating your room...=正在创建房间……
+Hosting over UDP - Steam friends cannot see this room=正在以 UDP 主持，Steam 好友看不到这个房间
+Room data invalid - switch offline and online to recreate=房间数据异常，切换离线再在线可重建
 No friend rooms found - you can paste a host ID=未发现好友房间，可粘贴主机 ID 连接
 More rooms (%u/%u)=更多房间（%u/%u 页）
 

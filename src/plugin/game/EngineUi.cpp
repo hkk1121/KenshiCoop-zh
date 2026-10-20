@@ -29,6 +29,7 @@ template<typename T> class ReorderableListItem;
 #include <windows.h>
 
 #include "../net/SteamInvite.h"
+#include "../net/SteamP2P.h" // 房间列表延迟
 #include "../net/NetLink.h"
 #include "../core/SteamId.h" // parseSteamId64 (paste button) + maskSteamId64 (id rows)
 #include "../core/Config.h"  // coop::tr (UI text localization)
@@ -333,6 +334,10 @@ int g_roomPage = 0;
 std::string g_lastFriendRooms;
 void onRoomButton(DataPanelLine* line);
 void onRoomPageButton(DataPanelLine* line);
+DataPanelLine_Button* g_roomRefreshButton = 0;
+bool g_roomRefreshClicked = false;
+std::string g_lastOwnRoom;
+void onRoomRefreshButton(DataPanelLine* line);
 
 // Button callbacks (free functions - MyGUI::newDelegate wraps them without any
 // raw-MyGUI link). A press flips the armed flag and requests a rebuild so the
@@ -466,6 +471,7 @@ struct PanelStrings {
     const std::string *slotKey, *slotCap;
     const std::string *roomKey, *roomVal;
     const std::string *roomsKey, *roomsVal, *roomButtonKeys, *roomButtonCaps, *roomPageKey, *roomPageCap;
+    const std::string *ownRoomKey, *ownRoomVal, *roomRefreshKey, *roomRefreshCap; // ownRoomKey 为空 = 无本机房间行
     int roomButtonCount;
     const std::string *scanKey, *scanCap;   // null = no Scan button (HOST/Steam)
     const std::string *discKey, *discVal;   // null = no browser row (nothing to show)
@@ -504,11 +510,14 @@ void panelBuildSeh(DatapanelGUI* p, const PanelStrings* s) {
             g_discLine = p->setLine(*s->discKey, *s->discVal, *s->empty, 0, false, true);
         for (int i = 0; i < ROOM_ROWS; ++i) g_roomButtons[i] = 0;
         g_roomPageButton = 0;
+        g_roomRefreshButton = 0;
         if (s->roomsKey) {
             p->setLine(*s->roomsKey, *s->roomsVal, *s->empty, 0, false, true);
+            if (s->ownRoomKey) p->setLine(*s->ownRoomKey, *s->ownRoomVal, *s->empty, 0, false, true);
             for (int i = 0; i < s->roomButtonCount; ++i)
                 g_roomButtons[i] = p->setLineButton(s->roomButtonKeys[i], s->roomButtonCaps[i], 0);
             if (s->roomPageKey) g_roomPageButton = p->setLineButton(*s->roomPageKey, *s->roomPageCap, 0);
+            g_roomRefreshButton = p->setLineButton(*s->roomRefreshKey, *s->roomRefreshCap, 0);
         }
         p->addSpace(0, 0.35f);
         // Connection-status debug line (coloured white below, outside SEH).
@@ -738,9 +747,16 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         if (onMenuAction) onMenuAction(req > 0);
     }
 
+    // 房间列表：Steam 可用时所有人可见；只有“加入 + STEAM + 离线”时点击房间才连接
     bool showFriendRooms = g_panel.open && !g_panel.hostFlag && g_panel.steamFlag && !st->running;
-    coop::steaminvite::browseRooms(showFriendRooms);
+    bool showRooms = g_panel.open && st->selfSteamId != 0;
+    coop::steaminvite::browseRooms(showRooms);
     if (!g_panel.open) return;
+    if (g_roomRefreshClicked) { g_roomRefreshClicked = false; coop::steaminvite::refreshRooms(); g_panel.needsRebuild = true; }
+    if (g_clickedRoomId && !showFriendRooms) {
+        g_clickedRoomId = 0;
+        coop::logLine("[coop-ui] room click ignored (connect only as JOIN + Steam + offline)");
+    }
     if (g_clickedRoomId) {
         unsigned long long clicked = g_clickedRoomId; g_clickedRoomId = 0;
         const coop::room::Info* found = 0;
@@ -755,7 +771,7 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
             coop::saveLastPeer(clicked);
             if (found->protocol != coop::PROTOCOL_VERSION)
                 coop::setNetUiError("Version mismatch with host - update both to the same KenshiCoop build");
-            else if (showFriendRooms) {
+            else {
                 unsigned int freeSlot = coop::room::firstFreeSlot(found->slots, found->limit);
                 if (freeSlot) g_slotChoice = freeSlot;
                 g_panel.connectedFlag = true;
@@ -763,7 +779,7 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         }
         g_panel.needsRebuild = true;
     }
-    int friendRooms = showFriendRooms ? coop::steaminvite::roomCount() : 0;
+    int friendRooms = showRooms ? coop::steaminvite::roomCount() : 0;
     int roomPages = (friendRooms + ROOM_ROWS - 1) / ROOM_ROWS;
     if (!roomPages || g_roomPage >= roomPages) g_roomPage = 0;
     std::string roomButtonKeys[ROOM_ROWS], roomButtonCaps[ROOM_ROWS];
@@ -773,13 +789,18 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         const coop::room::Info* info = coop::steaminvite::friendRoom(i);
         if (!info) continue;
         std::string name = coop::room::displayText(info->name.c_str(), 36);
-        std::string save = coop::room::displayText(info->save.c_str(), 48);
         if (name.size() < info->name.size()) name += "...";
-        if (save.size() < info->save.size()) save += "...";
+        // 从左至右：延迟、用户（名字 + 打码 Steam ID）、已加入/可加入
+        int ping = coop::steamp2p::roomPing(info->host);
+        char pingText[64];
+        if (ping >= 0) _snprintf(pingText, sizeof(pingText)-1, "%d ms", ping);
+        else _snprintf(pingText, sizeof(pingText)-1, "%s", coop::tr(ping == -1 ? "Measuring..." : "No response"));
+        pingText[sizeof(pingText)-1] = 0;
         char line[512];
-        _snprintf(line, sizeof(line)-1, coop::tr("%s | %s | %u/%u | %s"), name.c_str(),
-            save.empty() ? coop::tr("No save yet") : save.c_str(), info->players, info->limit,
-            coop::tr(info->protocol == coop::PROTOCOL_VERSION ? "Version matches" : "Version mismatch"));
+        _snprintf(line, sizeof(line)-1, "%s    %s(%s)    %u/%u%s%s", pingText, name.c_str(),
+            coop::maskSteamId64(info->host).c_str(), info->players, info->limit,
+            info->protocol == coop::PROTOCOL_VERSION ? "" : "    ",
+            info->protocol == coop::PROTOCOL_VERSION ? "" : coop::tr("Version mismatch"));
         line[sizeof(line)-1] = 0;
         roomButtonKeys[roomButtonCount] = "friendroom" + std::to_string((long long)roomButtonCount);
         roomButtonCaps[roomButtonCount] = line;
@@ -789,6 +810,24 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
     }
     friendRoomUi += std::to_string((long long)roomPages);
     if (friendRoomUi != g_lastFriendRooms) { g_lastFriendRooms = friendRoomUi; g_panel.needsRebuild = true; }
+    // 本机房间：Steam 主持时读回自己已发布的大厅数据，UDP 主持时说明好友看不到
+    std::string ownRoomUi;
+    if (showRooms && st->running && st->isHost) {
+        if (st->transportSel != 0) ownRoomUi = coop::tr("Hosting over UDP - Steam friends cannot see this room");
+        else {
+            const coop::room::Info& own = coop::steaminvite::ownRoom();
+            if (own.state == coop::room::AVAILABLE) {
+                std::string name = coop::room::displayText(own.name.c_str(), 36);
+                char line[512];
+                _snprintf(line, sizeof(line)-1, "%s    %s(%s)    %u/%u", coop::tr("Local"), name.c_str(),
+                    coop::maskSteamId64(own.host).c_str(), own.players, own.limit);
+                line[sizeof(line)-1] = 0;
+                ownRoomUi = line;
+            } else if (own.state == coop::room::QUERYING) ownRoomUi = coop::tr("Creating your room...");
+            else ownRoomUi = coop::tr("Room data invalid - switch offline and online to recreate");
+        }
+    }
+    if (ownRoomUi != g_lastOwnRoom) { g_lastOwnRoom = ownRoomUi; g_panel.needsRebuild = true; }
     std::string characterUi = st->characterTemplate ? st->characterTemplate : "";
     characterUi += st->characterStatus ? st->characterStatus : "";
     characterUi += st->editingCharacter ? "E" : st->canCreateCharacter ? "Y" : "N";
@@ -1012,19 +1051,23 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         std::string characterStatusKey = coop::tr("Character creation");
         std::string characterStatus = st->characterStatus ? st->characterStatus : "";
         std::string roomKey = coop::tr("Room info");
-        std::string roomsKey = coop::tr("Friend rooms");
-        std::string roomsVal = friendRooms ? coop::tr("Click a room to connect") :
-            coop::tr("No friend rooms found - you can paste a host ID");
+        std::string roomsKey = coop::tr(showFriendRooms ? "Rooms - click to connect" : "Rooms");
+        std::string roomsVal = (friendRooms || !ownRoomUi.empty()) ? coop::tr("Latency    Player    Joined/Max") :
+            showFriendRooms ? coop::tr("No friend rooms found - you can paste a host ID") : coop::tr("No rooms found");
+        std::string ownRoomKey = coop::tr("My room");
+        std::string roomRefreshKey = "roomrefresh", roomRefreshCap = coop::tr("Refresh rooms");
         std::string roomPageKey = "roompage";
         char pageCaption[128];
         _snprintf(pageCaption, sizeof(pageCaption)-1, coop::tr("More rooms (%u/%u)"), (unsigned)g_roomPage+1, (unsigned)roomPages);
         pageCaption[sizeof(pageCaption)-1] = 0;
         std::string roomPageCap = pageCaption;
         PanelStrings ps;
-        ps.roomsKey = showFriendRooms ? &roomsKey : 0; ps.roomsVal = &roomsVal;
+        ps.roomsKey = showRooms ? &roomsKey : 0; ps.roomsVal = &roomsVal;
+        ps.ownRoomKey = ownRoomUi.empty() ? 0 : &ownRoomKey; ps.ownRoomVal = &ownRoomUi;
+        ps.roomRefreshKey = &roomRefreshKey; ps.roomRefreshCap = &roomRefreshCap;
         ps.roomButtonKeys = roomButtonKeys; ps.roomButtonCaps = roomButtonCaps;
         ps.roomButtonCount = roomButtonCount;
-        ps.roomPageKey = showFriendRooms && roomPages > 1 ? &roomPageKey : 0; ps.roomPageCap = &roomPageCap;
+        ps.roomPageKey = showRooms && roomPages > 1 ? &roomPageKey : 0; ps.roomPageCap = &roomPageCap;
         ps.roomKey = roomDetail.empty() ? 0 : &roomKey; ps.roomVal = roomDetail.empty() ? 0 : &roomDetail;
         ps.characterTemplateKey = &characterTemplateKey; ps.characterTemplateCap = &characterTemplateCap;
         ps.characterCreateKey = &characterCreateKey; ps.characterCreateCap = &characterCreateCap;
@@ -1067,6 +1110,7 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         if (g_connBtn)    g_connBtn->callback    = MyGUI::newDelegate(&onConnBtn);
         for (int i = 0; i < ROOM_ROWS; ++i) if (g_roomButtons[i]) g_roomButtons[i]->callback = MyGUI::newDelegate(&onRoomButton);
         if (g_roomPageButton) g_roomPageButton->callback = MyGUI::newDelegate(&onRoomPageButton);
+        if (g_roomRefreshButton) g_roomRefreshButton->callback = MyGUI::newDelegate(&onRoomRefreshButton);
         if (g_slotBtn)    g_slotBtn->callback    = MyGUI::newDelegate(&onSlotBtn);
         if (g_copyIdBtn)  g_copyIdBtn->callback  = MyGUI::newDelegate(&onCopyIdBtn);
         if (g_pasteIdBtn) g_pasteIdBtn->callback = MyGUI::newDelegate(&onPasteIdBtn);
@@ -1289,6 +1333,11 @@ void onRoomButton(DataPanelLine* line) {
 
 void onRoomPageButton(DataPanelLine*) {
     ++g_roomPage; g_panel.needsRebuild = true;
+}
+
+void onRoomRefreshButton(DataPanelLine*) {
+    g_roomRefreshClicked = true;
+    coop::logLine("[coop-ui] refresh rooms pressed");
 }
 } // namespace
 } } // namespace coop::engine

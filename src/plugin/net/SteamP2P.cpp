@@ -94,6 +94,9 @@ struct SessionRequests {
 bool allowedPeer(SteamId id);
 void rejectPeer(SteamId id, unsigned int reason);
 int registerPeer(SteamId id);
+bool handleRoomPing(SteamId sender, const room::Diagnostic& d);
+// 网络线程最近一次 tick 的时间：超过 1 秒没有运行（未联机或会话已停）时由主线程读取延迟回包
+volatile DWORD g_lastNetTick = 0;
 SteamId g_pingPeer = 0; // spike peer (channel 1)
 
 // Fake identity the tunnel reports to ENet: "1.0.0.(1+slot)":port.
@@ -426,6 +429,7 @@ void setPingPeer(SteamId id) {
 void tick() {
     if (!g_ready) return;
     DWORD now = GetTickCount();
+    g_lastNetTick = now;
     SteamId requests[32]; unsigned int requestCount;
     EnterCriticalSection(&g_requests.cs);
     requestCount = g_requests.count;
@@ -447,6 +451,7 @@ void tick() {
             if (!g_read(g_iface, bytes, sizeof(bytes), &got, &sender, 2)) break;
             if (got != sizeof(d)) continue;
             std::memcpy(&d, bytes, sizeof(d));
+            if (handleRoomPing(sender, d)) continue;
             if (g_roomHost && !std::memcmp(d.tag, "KCRQ", 4) && d.reason == 0) {
                 if (!allowedPeer(sender)) rejectPeer(sender, room::REJECT_FRIEND);
                 else if (slotForPeer(sender) < 0) {
@@ -594,6 +599,97 @@ void updateTunnelPeers(_ENetHost* host) {
 unsigned int takeJoinRejection() { return (unsigned int)InterlockedExchange(&g_joinRejection, 0); }
 unsigned int takeHostRejection() { return (unsigned int)InterlockedExchange(&g_hostRejection, 0); }
 void setJoinProbe(bool enabled) { g_joinProbe = enabled; }
+
+namespace {
+// 房间延迟表：主线程发探测、读结果；回包由网络线程（有 Steam 会话时）或主线程（无会话时）写入。
+struct RoomPingEntry { SteamId id; DWORD firstSent, lastSent, replied; int rtt; };
+struct RoomPings {
+    CRITICAL_SECTION cs;
+    RoomPingEntry rows[32];
+    unsigned int count;
+    RoomPings() : count(0) { InitializeCriticalSection(&cs); }
+    ~RoomPings() { DeleteCriticalSection(&cs); }
+} g_roomPings;
+const DWORD ROOM_PING_INTERVAL_MS = 3000, ROOM_PING_TIMEOUT_MS = 9000;
+
+// 通道2上的延迟探测：KCPI 由 Steam 主机原样回 KCPO，KCPO 记录往返时间。其他标签返回 false。
+bool handleRoomPing(SteamId sender, const room::Diagnostic& d) {
+    if (!std::memcmp(d.tag, "KCPI", 4)) {
+        if (g_transport && g_roomHost && allowedPeer(sender)) {
+            room::Diagnostic reply; std::memcpy(reply.tag, "KCPO", 4); reply.reason = d.reason;
+            g_send(g_iface, sender, &reply, sizeof(reply), SEND_UNRELIABLE, 2);
+        }
+        return true;
+    }
+    if (std::memcmp(d.tag, "KCPO", 4)) return false;
+    DWORD now = GetTickCount();
+    if (now - d.reason > 60000) return true;
+    EnterCriticalSection(&g_roomPings.cs);
+    for (unsigned int i = 0; i < g_roomPings.count; ++i)
+        if (g_roomPings.rows[i].id == sender) { g_roomPings.rows[i].rtt = (int)(now - d.reason); g_roomPings.rows[i].replied = now; break; }
+    LeaveCriticalSection(&g_roomPings.cs);
+    return true;
+}
+} // namespace
+
+void probeRoom(SteamId host) {
+    if (!g_ready || !host || host == g_selfId) return;
+    DWORD now = GetTickCount();
+    bool send = false;
+    EnterCriticalSection(&g_roomPings.cs);
+    RoomPingEntry* row = 0;
+    for (unsigned int i = 0; i < g_roomPings.count && !row; ++i) if (g_roomPings.rows[i].id == host) row = &g_roomPings.rows[i];
+    if (!row) {
+        unsigned int slot = g_roomPings.count;
+        if (slot >= 32) {
+            slot = 0;
+            for (unsigned int i = 1; i < 32; ++i) if (now - g_roomPings.rows[i].lastSent > now - g_roomPings.rows[slot].lastSent) slot = i;
+        } else ++g_roomPings.count;
+        row = &g_roomPings.rows[slot];
+        row->id = host; row->firstSent = row->lastSent = row->replied = 0; row->rtt = 0;
+    }
+    if (!row->lastSent || now - row->lastSent >= ROOM_PING_INTERVAL_MS) {
+        row->lastSent = now; if (!row->firstSent) row->firstSent = now; send = true;
+    }
+    LeaveCriticalSection(&g_roomPings.cs);
+    if (!send) return;
+    room::Diagnostic d; std::memcpy(d.tag, "KCPI", 4); d.reason = now;
+    g_send(g_iface, host, &d, sizeof(d), SEND_UNRELIABLE, 2);
+}
+
+int roomPing(SteamId host) {
+    DWORD now = GetTickCount();
+    int result = -1;
+    EnterCriticalSection(&g_roomPings.cs);
+    for (unsigned int i = 0; i < g_roomPings.count; ++i) {
+        const RoomPingEntry& row = g_roomPings.rows[i];
+        if (row.id != host) continue;
+        if (row.replied && now - row.replied <= ROOM_PING_TIMEOUT_MS) result = row.rtt;
+        else if (row.replied || (row.firstSent && now - row.firstSent > ROOM_PING_TIMEOUT_MS)) result = -2;
+        break;
+    }
+    LeaveCriticalSection(&g_roomPings.cs);
+    return result;
+}
+
+void resetRoomPings() {
+    EnterCriticalSection(&g_roomPings.cs);
+    g_roomPings.count = 0;
+    LeaveCriticalSection(&g_roomPings.cs);
+}
+
+void pumpRoomPings() {
+    if (!g_ready || (g_transport && GetTickCount() - g_lastNetTick <= 1000)) return;
+    for (int i = 0; i < 16; ++i) {
+        room::Diagnostic d; unsigned int avail = 0, got = 0; SteamId sender = 0;
+        if (!g_isAvail(g_iface, &avail, 2)) break;
+        unsigned char bytes[4096];
+        if (!g_read(g_iface, bytes, sizeof(bytes), &got, &sender, 2)) break;
+        if (got != sizeof(d)) continue;
+        std::memcpy(&d, bytes, sizeof(d));
+        handleRoomPing(sender, d);
+    }
+}
 
 } // namespace steamp2p
 } // namespace coop

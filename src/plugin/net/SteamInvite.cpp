@@ -531,6 +531,12 @@ void tick() {
             refreshFriends();
         }
     }
+    // 房间列表延迟：读回包（无 Steam 会话时）并定期探测每个可见房间的主机
+    if (g_browser) {
+        steamp2p::pumpRoomPings();
+        for (size_t i = 0; i < g_rooms.size(); ++i)
+            if (g_rooms[i].state == room::AVAILABLE) steamp2p::probeRoom(g_rooms[i].host);
+    }
 
     // 大厅常驻；成员加入由 P2P 回调与 HELLO 准入处理，不重启主机会话。
 
@@ -655,6 +661,23 @@ const room::Info* friendRoom(int index) {
         if (index-- == 0) return &g_rooms[i];
     }
     return 0;
+}
+
+void refreshRooms() {
+    g_lastFriendRefresh = 0;
+    steamp2p::resetRoomPings();
+    steamLog("room list refresh requested");
+}
+
+const room::Info& ownRoom() {
+    static room::Info own;
+    own = room::Info();
+    if (!g_ready || !g_wantHost) return own;
+    own.host = steamp2p::selfId(); own.lobby = g_lobby;
+    if (!g_lobby) { own.state = room::QUERYING; return own; }
+    room::LobbyDataUpdate data; data.lobby = data.member = g_lobby; data.success = 1;
+    readRoom(own, &data);
+    return own;
 }
 
 } // namespace steaminvite

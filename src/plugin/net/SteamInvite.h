@@ -67,6 +67,11 @@ const room::Info& watchedRoom();
 void browseRooms(bool active);
 int roomCount();
 const room::Info* friendRoom(int index);
+// 房间列表“刷新房间”：立即重查好友房间并重新测延迟。
+void refreshRooms();
+// 本机 Steam 主持的房间：从 Steam 读回已发布的大厅数据，按好友同样的规则校验。
+// state：UNKNOWN / NO_ROOM = 未主持或数据异常，QUERYING = 大厅创建中，AVAILABLE = 正常。
+const room::Info& ownRoom();
 
 } // namespace steaminvite
 } // namespace coop
