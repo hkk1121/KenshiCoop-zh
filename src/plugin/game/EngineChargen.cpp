@@ -241,11 +241,15 @@ bool createStartSquads(GameWorld* gw, const std::string& startSid, const float a
         }
     }
     completeStartResearch(gw, start->getReferenceListIfExists("research"));
+    // 势力关系全队共用：照原版把开局的关系（v0）双向写进共用关系表，再由势力关系同步发给所有人
+    const Ogre::vector<GameDataReference>::type* relations = start->getReferenceListIfExists("faction relations");
+    for (size_t i = 0; relations && i < relations->size(); ++i)
+        writeRelationBySid(gw, (*relations)[i].sid.c_str(), (float)(*relations)[i].values.value[0], true, 0, 0);
     auto cash = start->idata.find("money");
     if (cash != start->idata.end()) *money = cash->second;
     char b[200];
-    _snprintf(b, sizeof(b) - 1, "[chargen] game start '%s' spawned squads=%u at %.0f,%.0f money=%d",
-              startSid.c_str(), (unsigned)tabs.size(), pos[0], pos[2], *money);
+    _snprintf(b, sizeof(b) - 1, "[chargen] game start '%s' spawned squads=%u at %.0f,%.0f money=%d relations=%u",
+              startSid.c_str(), (unsigned)tabs.size(), pos[0], pos[2], *money, relations ? (unsigned)relations->size() : 0u);
     b[sizeof(b) - 1] = '\0'; coop::logLine(b);
     return !tabs.empty() && first[1] != 0;
 }
