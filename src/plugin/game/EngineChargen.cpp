@@ -277,6 +277,12 @@ bool beginStartEditing(GameWorld* gw, const std::vector<std::pair<unsigned int, 
     for (size_t i = 0; i < chars.size(); ++i) list.stuff[i] = chars[i];
     list.count = list.maxSize = (uint32_t)chars.size();
     editCount = (unsigned int)chars.size(); editWorld = gw; editStart = startSid; editResult = 0; confirming = false;
+    // 原生 NEWGAME 捏人界面构造时，会把外观 bdata["from file"] 为假的角色原地重置并随机化（原版新开局靠它给随机长相）；
+    // 在已有世界里用时，取消后本机长相就和主机、其他玩家不一样。先标记跳过随机化，结束编辑时在 cancelCharacterCreation 去掉
+    for (size_t i = 0; i < chars.size(); ++i) {
+        GameDataCopyStandalone* data = appearanceOf(chars[i]);
+        if (data) data->bdata["from file"] = true;
+    }
     cameraFocusOn(gw, chars[0]);
     const Ogre::vector<GameDataReference>::type* races = start->getReferenceListIfExists("force race");
     if (!showEditor(gw, &list, races && !races->empty() ? races : 0)) { cancelCharacterCreation(true); return false; }
@@ -338,6 +344,10 @@ bool cancelCharacterCreation(bool worldAlive) {
     if (worldAlive && editWorld) {
         if (editor && ::gui && ::gui->characterEditor == editor) ::gui->closeCharacterEditor();
         writeGameSpeed(editWorld, previousSpeed, previousPause);
+        for (unsigned int i = 0; i < editCount; ++i) {
+            GameDataCopyStandalone* data = appearanceOf(resolveCharByHand(editHands[i][3], editHands[i][4], editHands[i][0], editHands[i][1], editHands[i][2]));
+            if (data) data->bdata.erase("from file");
+        }
     }
     editor = 0; editWorld = 0; editResult = 0; confirming = false; editCount = 0; editStart.clear();
     return true;
