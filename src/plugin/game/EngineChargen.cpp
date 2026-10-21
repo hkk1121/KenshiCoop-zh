@@ -176,7 +176,10 @@ bool beginCharacterCreation(GameWorld* gw, const CharacterChoice& choice) {
     preview = createBody(gw, tmpl, previousCamera);
     if (!preview) { previewWorld = 0; return false; }
     detachFromTownAI(preview); clearGoals(preview);
-    lektor<Character*> chars; chars.stuff = &preview; chars.count = chars.maxSize = 1;
+    // showCharacterEditor 按值接收 lektor，返回前会释放 stuff（MSVCR100 free），所以必须放在 CRT 堆上交给它
+    lektor<Character*> chars; chars.stuff = (Character**)malloc(sizeof(Character*));
+    if (!chars.stuff) { cancelCharacterCreation(true); return false; }
+    chars.stuff[0] = preview; chars.count = chars.maxSize = 1;
     const Ogre::vector<GameDataReference>::type* races = start->getReferenceListIfExists("force race");
     if (!showEditor(gw, &chars, races && !races->empty() ? races : 0)) { cancelCharacterCreation(true); return false; }
     coop::logLine("[chargen] native NEWGAME editor opened; preview excluded from replication");
