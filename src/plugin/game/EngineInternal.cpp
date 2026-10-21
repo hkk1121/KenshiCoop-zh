@@ -2838,8 +2838,8 @@ static void __fastcall saveMgrNewGame_hook(SaveManager* self, const std::string*
 
 // ---- 编队栏只显示本端编队 -------------------------------------------------------
 // 引擎按玩家阵营的 activePlatoons 重建编队栏标签（MainBarGUI::refreshPortraitTabs，对这份
-// 名单只读）。重建期间把名单临时换成可见的那几支，结束立即换回：引擎自己的标签 / 头像
-// 数据始终自洽，隐藏编队的标签走“编队已移除”的原路径销毁。
+// 名单只读）。重建期间把名单临时换成可见的那几支，结束立即换回：引擎自己的标签数据
+// 始终自洽，隐藏编队的标签走“编队已移除”的原路径销毁。
 // 当前编队不可见时 updatePotraitsPlatoon 找不到它的标签，会把它的成员头像填进第一个标签，
 // 所以跳过；重建后当前编队不可见就切到第一个可见编队（setCurrentPlatoon 只换当前编队并
 // 刷新头像，不改选中）。
@@ -2914,9 +2914,12 @@ static void __fastcall refreshPortraitTabs_hook(MainBarGUI* self) {
         f->activePlatoons.stuff = saved;
         f->activePlatoons.count = n;
     }
-    if (k == 0 || squadBarShowsSeh(squadBarCurrentSeh())) return;
+    if (squadBarShowsSeh(squadBarCurrentSeh())) return;
+    // 末尾那次头像刷新被跳过时，头像索引仍指向刚随标签销毁的头像框，updatePortraits 会照着它重绘，
+    // 所以先清掉（引擎刷新头像时同样先清再填）
     __try {
-        ou->player->setCurrentPlatoon(g_squadBarList[0]);
+        self->portraitsIndices.clear();
+        if (k) ou->player->setCurrentPlatoon(g_squadBarList[0]);
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
