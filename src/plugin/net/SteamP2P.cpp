@@ -102,12 +102,12 @@ SteamId g_pingPeer = 0; // spike peer (channel 1)
 // Fake identity the tunnel reports to ENet: "1.0.0.(1+slot)":port.
 // ENetAddress.host is a raw in_addr (network byte order); on little-endian
 // x64 the u32 0x01000001 is the byte sequence {1,0,0,1} - slot 0. Slot i
-// lives at byte sequence {1,0,0,1+i}, i.e. 0x01000001 | (i << 24).
+// lives at byte sequence {1,0,0,1+i}, i.e. 0x01000001 + (i << 24).
 const enet_uint32 FAKE_HOST = 0x01000001u;
 unsigned short    g_fakePort = 27800;
 
 inline enet_uint32 fakeHostForSlot(unsigned int slot) {
-    return FAKE_HOST | ((enet_uint32)slot << 24);
+    return FAKE_HOST + ((enet_uint32)slot << 24);
 }
 // Slot for a fabricated address, or -1 when it is not one of ours.
 inline int slotForFakeHost(enet_uint32 host) {
