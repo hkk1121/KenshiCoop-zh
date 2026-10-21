@@ -151,6 +151,8 @@ SaveMgrLoadNameFn g_loadHookOrig = 0;
 typedef void (__fastcall* SaveMgrLoadInfoFn)(SaveManager* self, const SaveInfo* info,
                                              bool resetPos);
 SaveMgrLoadInfoFn g_loadInfoHookOrig = 0;
+SaveMgrLoadNameFn g_newGameHookOrig = 0; // newGame(startId) 与 load(name) 签名相同
+static void __fastcall saveMgrNewGame_hook(SaveManager* self, const std::string* startId);
 
 // Adopt the name a load just took as SaveManager::currentGame. The engine does
 // NOT do this itself on either load entry, so currentGame keeps naming whatever
@@ -2130,8 +2132,13 @@ bool installLoadHook() {
     if (KenshiLib::AddHook(addrName, (void*)&saveMgrLoad_hook,
                            (void**)&g_loadHookOrig) != KenshiLib::SUCCESS)
         return false;
-    return KenshiLib::AddHook(addrInfo, (void*)&saveMgrLoadInfo_hook,
-                              (void**)&g_loadInfoHookOrig) == KenshiLib::SUCCESS;
+    if (KenshiLib::AddHook(addrInfo, (void*)&saveMgrLoadInfo_hook,
+                           (void**)&g_loadInfoHookOrig) != KenshiLib::SUCCESS)
+        return false;
+    // 新开局同样要校正 currentGame，见文件末尾 saveMgrNewGame_hook
+    intptr_t addrNew = KenshiLib::GetRealAddress(&SaveManager::newGame);
+    return addrNew && KenshiLib::AddHook(addrNew, (void*)&saveMgrNewGame_hook,
+                                         (void**)&g_newGameHookOrig) == KenshiLib::SUCCESS;
 }
 
 void setLoadSuppress(bool on) { g_loadSuppressAll = on; }
@@ -2818,6 +2825,15 @@ bool installSquadCreateHook() {
     intptr_t addr = KenshiLib::GetRealAddress(&PlayerInterface::createSquad);
     return addr && KenshiLib::AddHook(addr, (void*)&createSquad_hook,
                                     (void**)&g_createSquadOrig) == KenshiLib::SUCCESS;
+}
+
+// 新开局（signal 置为 NEWGAME）时引擎不改 currentGame，它仍指向上一次存档：
+// 2026-10-21 实测新开“流浪者”局读进了旧存档 autosave2 的归属表，连入推送也会覆盖该存档。
+// 新世界还没有存档，所以清空；之后引擎执行存档时会自己写回 currentGame。
+static void __fastcall saveMgrNewGame_hook(SaveManager* self, const std::string* startId) {
+    g_newGameHookOrig(self, startId);
+    if (self->signal == SaveManager::NEWGAME && setCurrentGameName(std::string()))
+        coop::logLine("[load] NEW-GAME: current save name cleared (world has no save yet)");
 }
 
 } // namespace engine
