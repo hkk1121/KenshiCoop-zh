@@ -260,15 +260,21 @@ std::string saveFolderFor(const std::string& name) {
     }
 #else
     // 引擎给出的根目录编码随进程代码页而定: 依次按 ANSI 代码页 / UTF-8 解码, 取实际存在的目录;
-    // 均不存在时用 SHGetFolderPathW 取 LocalAppData\kenshi\save (与游戏 save.log 中的路径一致).
+    // 均不存在时(从未存过档, 如 User save location=0 的游戏目录下还没有 save)按同样顺序新建最后一级,
+    // 父目录不存在即解码不对、建不成; 仍不成功才用 SHGetFolderPathW 取 LocalAppData\kenshi\save.
+    // 不能直接退回 LocalAppData: 引擎只从自己的目录读档, 收到的存档放错地方会读一个不存在的存档而崩溃.
     char curGame[96], savePath[512];
     if (engine::saveInfo(curGame, sizeof(curGame), savePath, sizeof(savePath)) &&
         savePath[0] != '\0') {
         const unsigned int codePages[2] = { CP_ACP, CP_UTF8 };
-        for (int i = 0; i < 2 && root.empty(); ++i) {
-            std::wstring w = widePath(savePath, codePages[i]);
-            DWORD attrs = w.empty() ? INVALID_FILE_ATTRIBUTES : GetFileAttributesW(w.c_str());
-            if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) root = toUtf8(w);
+        for (int pass = 0; pass < 2 && root.empty(); ++pass) {
+            for (int i = 0; i < 2 && root.empty(); ++i) {
+                std::wstring w = widePath(savePath, codePages[i]);
+                DWORD attrs = w.empty() ? INVALID_FILE_ATTRIBUTES : GetFileAttributesW(w.c_str());
+                if ((attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) ||
+                    (pass == 1 && !w.empty() && CreateDirectoryW(w.c_str(), 0)))
+                    root = toUtf8(w);
+            }
         }
     }
     if (root.empty()) {
