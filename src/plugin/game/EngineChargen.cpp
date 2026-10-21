@@ -69,10 +69,9 @@ GameDataCopyStandalone* appearanceOf(Character* c) {
     __try { return c ? c->getAppearanceData() : 0; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
-bool setDraftAppearance(Character* c, GameDataCopyStandalone* data, GameData* race, const std::string* name, bool* handed) {
+bool setDraftAppearance(Character* c, GameDataCopyStandalone* data, GameData* race, const std::string* name) {
     __try {
         c->setRace(race);
-        *handed = true;
         c->setAppearanceData(data);
         c->setName(*name);
         if (c->getAppearance()) c->getAppearance()->reload();
@@ -320,10 +319,16 @@ bool applyCharacterDraft(GameWorld* gw, Character* c, const CharacterDraft& draf
         if (validRace && manager) manager->cleanValidateAppearanceData(data);
     }
     if (!validRace) { delete data; coop::logErrLine("[chargen] draft race is not playable or violates game-start filter"); return false; }
-    // setAppearanceData接管指针；即使后续reload失败，也不能再次释放。
-    bool handed = false;
-    bool applied = setDraftAppearance(c, data, race, &draft.name, &handed);
-    if (!handed) delete data;
+    // 原地改写角色现有的外观数据再原样交回：换成新对象会释放旧的，而已挂上的头发等附件仍指着旧对象，
+    // 异步建模回调（setupHairMaterial）读它就崩。同一指针交回时引擎不释放，只按新值重算种族、发型等。
+    GameDataCopyStandalone* current = appearanceOf(c);
+    if (current) {
+        current->bdata = data->bdata; current->idata = data->idata; current->fdata = data->fdata;
+        current->sdata = data->sdata; current->filesdata = data->filesdata; current->vecdata = data->vecdata;
+        current->quatdata = data->quatdata; current->objectReferences = data->objectReferences;
+    }
+    delete data;
+    bool applied = current && setDraftAppearance(c, current, race, &draft.name);
     if (!applied) coop::logErrLine("[chargen] native appearance apply failed");
     return applied;
 }
