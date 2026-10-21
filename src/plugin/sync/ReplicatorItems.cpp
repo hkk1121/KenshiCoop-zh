@@ -816,14 +816,17 @@ void Replicator::detectAndPublishWeaponDrops(GameWorld* gw, NetLink& net, u32 ow
                     b[sizeof(b) - 1] = '\0'; coop::logLine(b); }
                 continue;
             }
-            if (dumpWd) { char b[180]; _snprintf(b, sizeof(b) - 1,
-                "[wd] census-skip hand=%u,%u,%u,%u,%u (zero-row read #%u; seeded=%d had %u kinds)",
-                it->t, it->c, it->cs, it->i, it->s, prevC.zeroReads,
-                prevC.seeded ? 1 : 0, (unsigned)prevC.items.size());
-                b[sizeof(b) - 1] = '\0'; coop::logLine(b); }
-            continue;
-        }
-        prevC.zeroReads = 0; // the read is trustworthy again
+            // 已有基线时零行读数同样重复够次数，说明身上确实空了（比如把唯一一件装备丢到地上），
+            // 按空清单往下比对；否则这次减少永远看不到，丢弃不会发给对方
+            if (!prevC.seeded || prevC.zeroReads < WD_EMPTY_SEED_TICKS) {
+                if (dumpWd) { char b[180]; _snprintf(b, sizeof(b) - 1,
+                    "[wd] census-skip hand=%u,%u,%u,%u,%u (zero-row read #%u; seeded=%d had %u kinds)",
+                    it->t, it->c, it->cs, it->i, it->s, prevC.zeroReads,
+                    prevC.seeded ? 1 : 0, (unsigned)prevC.items.size());
+                    b[sizeof(b) - 1] = '\0'; coop::logLine(b); }
+                continue;
+            }
+        } else prevC.zeroReads = 0; // the read is trustworthy again
         if (!prevC.seeded) {
             prevC.items = cur; prevC.ptrs = curPtrs; prevC.seeded = true; // baseline; never emit
             if (dumpWd) { char b[140]; _snprintf(b, sizeof(b) - 1,
