@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <string>
 #include <deque>
+#include <set>
 
 #include "CoopLog.h"
 #include "core/Config.h"
@@ -284,6 +285,8 @@ coop::u32 g_characterEditConnection = 0;
 GameWorld* g_characterChoiceWorld = 0;
 // 本机申请的开局（发请求时记下）；创建成功后要打开捏人界面的开局（读档后仍保留，打开后清空）
 std::string g_characterRequestedStart, g_characterEditStart, g_characterChoiceLabel;
+// 发请求时本机名下已有的编队：可以反复创建，捏人界面只放之后新出现的编队里的角色
+std::set<std::pair<coop::u32, coop::u32> > g_characterTabsBefore;
 // 主机：正在等出生地加载的开局请求
 coop::InboundCharacterRequest g_characterStartRequest;
 float g_characterStartPos[3] = { 0, 0, 0 };
@@ -3305,6 +3308,9 @@ void driveCharacterCreation(GameWorld* gw, bool worldLive) {
                 h.bytes = (coop::u32)request.data.size();
                 g_characterWait = h; g_characterPending = true; g_characterWaitTick = GetTickCount();
                 g_characterRequestedStart = start;
+                g_characterTabsBefore.clear();
+                for (std::map<std::pair<coop::u32, coop::u32>, coop::OwnerRow>::const_iterator it = g_repl.owners().begin(); it != g_repl.owners().end(); ++it)
+                    if (it->second.playerId == g_repl.playerIdentity()) g_characterTabsBefore.insert(it->first);
                 g_characterStatus = coop::tr("Waiting for host to create the game start");
                 if (g_cfg.isHost) g_characterRequests.push_back(request);
                 else {
@@ -3322,8 +3328,7 @@ void driveCharacterCreation(GameWorld* gw, bool worldLive) {
         else if (!g_cfg.saveSync || !g_cfg.loadSync || !g_cfg.squadSync) g_characterStatus = coop::tr("Enable save, load and squad sync before creating a character");
         else if (g_bootstrapArmed || coop::savexfer::watching() || coop::savexfer::sending() || coop::engine::saveMgrSignal(0) != 0)
             g_characterStatus = coop::tr("Wait for the current save or transfer to finish");
-        else if (!world) g_characterStatus = coop::tr("Load the host save and wait for ownership synchronization");
-        else g_characterStatus = coop::tr("Creating a character requires that you own no characters");
+        else g_characterStatus = coop::tr("Load the host save and wait for ownership synchronization");
     }
     if (action == 1 && g_characterAvailable && g_characterChoices.empty()) g_characterStatus = coop::tr("No game starts found");
     g_characterChoiceLabel.clear();
@@ -3356,7 +3361,7 @@ void driveCharacterCreation(GameWorld* gw, bool worldLive) {
         std::vector<std::pair<unsigned int, unsigned int> > mine;
         const std::map<std::pair<coop::u32, coop::u32>, coop::OwnerRow>& owners = g_repl.owners();
         for (std::map<std::pair<coop::u32, coop::u32>, coop::OwnerRow>::const_iterator it = owners.begin(); it != owners.end(); ++it)
-            if (it->second.playerId == g_repl.playerIdentity()) mine.push_back(it->first);
+            if (it->second.playerId == g_repl.playerIdentity() && !g_characterTabsBefore.count(it->first)) mine.push_back(it->first);
         if (coop::engine::beginStartEditing(gw, mine, g_characterEditStart)) {
             g_characterEditWorld = world; g_characterEditConnection = g_repl.characterConnection(g_net.localId());
             g_characterEditStart.clear();

@@ -2828,7 +2828,7 @@ public:
     bool squadBarVisible(const std::pair<u32, u32>& tab) const;
     // 存档目录里的个人账本 coop_players.txt（主机写）；没有可写的内容时视为成功
     bool writePlayers(const std::string& name) const;
-    // 主机：记下某人选的开局，并把他的余额设为开局资金（与原版一样覆盖）
+    // 主机：第一次创建时记下所选开局，并把开局资金加到他的余额上；之后再开局余额不变
     void setPlayerStart(GameWorld* gw, u32 author, const std::string& start, int money);
 private:
     // 主机记的各人余额与所选开局，按玩家标识；主机自己的钱以本机游戏为准

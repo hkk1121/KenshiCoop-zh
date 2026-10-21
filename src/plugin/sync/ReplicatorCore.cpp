@@ -1652,11 +1652,7 @@ void Replicator::placeRecruit(GameWorld* gw, Character* c) {
 
 bool Replicator::canCreateCharacter(GameWorld* gw, u32 author) const {
     if (!gw || !sessionLive_ || !ownersAttached_ || ownersInvalid_ || owners_.size() >= OWNERS_MAX) return false;
-    u64 identity = identityForOwner(author);
-    if (!identity) return false;
-    for (std::map<Tab, OwnerRow>::const_iterator it = owners_.begin(); it != owners_.end(); ++it)
-        if (it->second.playerId == identity && engine::playerTabSize(gw, it->first.first, it->first.second) != 0) return false;
-    return true;
+    return identityForOwner(author) != 0;
 }
 
 bool Replicator::registerCreatedCharacter(u32 author, unsigned int container, unsigned int serial) {
@@ -1793,17 +1789,20 @@ bool Replicator::writePlayers(const std::string& name) const {
     return ok;
 }
 
-// 主机自己的钱直接写进本机游戏；加入者的记到账上，下一次发布时发给本人
+// 主机自己的钱直接写进本机游戏；加入者的记到账上，下一次发布时发给本人。
+// 可以反复创建：只有第一次（账上还没记开局）把开局资金加到现有余额上，之后再开局余额不变，防止刷钱或覆盖已有的钱
 void Replicator::setPlayerStart(GameWorld* gw, u32 author, const std::string& start, int money) {
     u64 identity = identityForOwner(author);
     if (!isHostRole() || !identity) return;
     Wallet& w = wallets_[identity];
-    w.start = start;
-    if (money < 0) money = 0;
-    if (identity == playerIdentity_) engine::writePlayerWallet(gw, money);
-    else if (moneySync_) w.money = money;
+    bool first = w.start.empty();
+    if (first) w.start = start;
+    if (money < 0 || !first) money = 0;
+    int current = 0;
+    if (identity == playerIdentity_) { if (money && engine::readPlayerWallet(gw, &current) && current >= 0) engine::writePlayerWallet(gw, current + money); }
+    else if (moneySync_) w.money += money;
     char b[200];
-    _snprintf(b, sizeof(b) - 1, "[wallet] START player=%llu start='%s' money=%d", identity, start.c_str(), money);
+    _snprintf(b, sizeof(b) - 1, "[wallet] START player=%llu start='%s' money=%d first=%d", identity, start.c_str(), money, first ? 1 : 0);
     b[sizeof(b) - 1] = 0; coop::logLine(b);
 }
 

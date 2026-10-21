@@ -106,7 +106,6 @@ Session changed; character creation cancelled=会话已改变，已取消创建�
 A character creation request is already pending=已有创建请求正在等待处理
 Enable save, load and squad sync before creating a character=请先启用存档、读档和小队同步，再创建角色
 Load the host save and wait for ownership synchronization=请读取主机存档，并等待角色归属同步完成
-Creating a character requires that you own no characters=只有目前没有自己角色时才可创建
 No game starts found=没有可用的开局
 Wait for the current save or transfer to finish=请等待当前存档或传输完成
 
