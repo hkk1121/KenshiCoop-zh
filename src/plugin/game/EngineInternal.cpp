@@ -2836,5 +2836,117 @@ static void __fastcall saveMgrNewGame_hook(SaveManager* self, const std::string*
         coop::logLine("[load] NEW-GAME: current save name cleared (world has no save yet)");
 }
 
+// ---- 编队栏只显示本端编队 -------------------------------------------------------
+// 引擎按玩家阵营的 activePlatoons 重建编队栏标签（MainBarGUI::refreshPortraitTabs，对这份
+// 名单只读）。重建期间把名单临时换成可见的那几支，结束立即换回：引擎自己的标签 / 头像
+// 数据始终自洽，隐藏编队的标签走“编队已移除”的原路径销毁。
+// 当前编队不可见时 updatePotraitsPlatoon 找不到它的标签，会把它的成员头像填进第一个标签，
+// 所以跳过；重建后当前编队不可见就切到第一个可见编队（setCurrentPlatoon 只换当前编队并
+// 刷新头像，不改选中）。
+typedef void (__fastcall* MainBarFn)(MainBarGUI* self);
+static MainBarFn         g_refreshTabsOrig       = 0;
+static MainBarFn         g_platoonPortraitsOrig  = 0;
+static SquadBarVisibleFn g_squadBarVisible       = 0;
+static unsigned int      g_squadBarSig           = 0;
+static Platoon*          g_squadBarList[256];
+
+void setSquadBarFilter(SquadBarVisibleFn fn) {
+    g_squadBarVisible = fn;
+}
+
+// 该编队是否显示在编队栏；读不到按显示处理（交给引擎原逻辑）。
+static bool squadBarShowsSeh(Platoon* p) {
+    if (!p || !g_squadBarVisible) return true;
+    __try {
+        const hand& h = p->getHandle();
+        return g_squadBarVisible(h.container, h.containerSerial) != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return true; }
+}
+
+// 当前编队（引擎 getCurrentPlatoon，没有记录时它会从阵营名单里挑一支记下）；读不到返回 0。
+static Platoon* squadBarCurrentSeh() {
+    __try {
+        return ou && ou->player ? ou->player->getCurrentPlatoon() : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+// 把玩家阵营名单里可见的编队按原顺序筛进 g_squadBarList，返回可见集合签名（读不到返回 0）。
+static unsigned int squadBarScanSeh(GameWorld* gw, Faction** faction, unsigned int* total, unsigned int* shown) {
+    unsigned int sig = 2166136261u;
+    *faction = 0; *total = 0; *shown = 0;
+    __try {
+        if (!gw || !gw->player || !gw->player->participant) return 0;
+        Faction* f = gw->player->participant;
+        unsigned int n = f->activePlatoons.count;
+        if (n > 256 || (n && !f->activePlatoons.stuff)) return 0;
+        unsigned int k = 0;
+        for (unsigned int i = 0; i < n; ++i) {
+            Platoon* p = f->activePlatoons.stuff[i];
+            bool visible = p && squadBarShowsSeh(p);
+            if (visible) g_squadBarList[k++] = p;
+            sig = (sig ^ (unsigned int)(uintptr_t)p ^ (visible ? 1u : 0u)) * 16777619u;
+        }
+        *faction = f; *total = n; *shown = k;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { *faction = 0; return 0; }
+    return sig;
+}
+
+static void __fastcall updatePotraitsPlatoon_hook(MainBarGUI* self) {
+    if (!squadBarShowsSeh(squadBarCurrentSeh())) return;
+    g_platoonPortraitsOrig(self);
+}
+
+static void __fastcall refreshPortraitTabs_hook(MainBarGUI* self) {
+    Faction* f = 0;
+    unsigned int n = 0, k = 0;
+    g_squadBarSig = g_squadBarVisible ? squadBarScanSeh(ou, &f, &n, &k) : 0;
+    // 没有当前编队时引擎会对空指针取成员，名单为空时它也挑不出，所以不筛
+    if (!f || k == n || !squadBarCurrentSeh()) {
+        g_refreshTabsOrig(self);
+        return;
+    }
+    Platoon** saved = f->activePlatoons.stuff;
+    f->activePlatoons.stuff = g_squadBarList;
+    f->activePlatoons.count = k;
+    __try {
+        g_refreshTabsOrig(self);
+    } __finally {
+        f->activePlatoons.stuff = saved;
+        f->activePlatoons.count = n;
+    }
+    if (k == 0 || squadBarShowsSeh(squadBarCurrentSeh())) return;
+    __try {
+        ou->player->setCurrentPlatoon(g_squadBarList[0]);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+bool installSquadBarHook() {
+    intptr_t aUpdate  = KenshiLib::GetRealAddress(&MainBarGUI::updatePotraitsPlatoon);
+    intptr_t aRefresh = KenshiLib::GetRealAddress(&MainBarGUI::refreshPortraitTabs);
+    // 先挂头像刷新：筛名单要靠它挡住“隐藏编队的头像填进第一个标签”
+    if (!aUpdate || !aRefresh ||
+        KenshiLib::AddHook(aUpdate, (void*)&updatePotraitsPlatoon_hook,
+                           (void**)&g_platoonPortraitsOrig) != KenshiLib::SUCCESS) return false;
+    return KenshiLib::AddHook(aRefresh, (void*)&refreshPortraitTabs_hook,
+                              (void**)&g_refreshTabsOrig) == KenshiLib::SUCCESS;
+}
+
+void syncSquadBar(GameWorld* gw) {
+    if (!g_squadBarVisible || !g_refreshTabsOrig) return;
+    Faction* f = 0;
+    unsigned int n = 0, k = 0;
+    unsigned int sig = squadBarScanSeh(gw, &f, &n, &k);
+    if (!f || sig == g_squadBarSig) return;
+    MainBarGUI* bar = 0;
+    __try {
+        bar = ::gui ? ::gui->mainbar : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { bar = 0; }
+    if (!bar) return;
+    char b[96];
+    _snprintf(b, sizeof(b) - 1, "[squadbar] refresh shown=%u/%u", k, n);
+    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    refreshPortraitTabs_hook(bar);
+}
+
 } // namespace engine
 } // namespace coop

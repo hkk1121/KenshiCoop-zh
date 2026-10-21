@@ -68,6 +68,7 @@ Unlimited=不限
 
 # 小队控制授权（申请 / 同意 / 拒绝 / 收回）
 This is your friend's squad - ask them for control=这是好友的小队 - 需要对方授权
+While using a borrowed squad you can only command that squad=借用编队期间只能操控借来的编队
 Your friend asks for control of your squad=好友申请控制你的小队
 Waiting for your friend to answer...=等待好友回应…
 Your friend controls your squad=好友正在控制你的小队

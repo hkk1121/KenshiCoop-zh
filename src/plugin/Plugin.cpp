@@ -237,7 +237,9 @@ static int coopOrderOwnerClass(const unsigned int h[5]) {
 // 小队控制授权（第 1 批）：本地命令被拦下时的状态栏提示（engine OrderBlockedFn）。
 // 与 coopInvOwnerClass 同一模式：引擎层不认识面板与 Replicator，只回调。
 static void coopOrderBlocked() {
-    g_toastText  = coop::tr("This is your friend's squad - ask them for control");
+    g_toastText  = g_repl.squadAuthBorrowed() > 0
+        ? coop::tr("While using a borrowed squad you can only command that squad")
+        : coop::tr("This is your friend's squad - ask them for control");
     g_toastState = 0;
     g_toastArmMs = GetTickCount();
 }
@@ -252,6 +254,7 @@ void (*g_titleUpdate_orig)(TitleScreen*)   = 0;
 void startNetworking();
 void coopRecruitOwnSquad(Character* c);
 void coopCreatedSquad(unsigned int container, unsigned int serial);
+int coopSquadBarVisible(unsigned int container, unsigned int containerSerial);
 void coopUiConnect(bool isHost, bool useSteam, const unsigned long long* peerIds,
                    unsigned int peerCount, unsigned int ownRank);
 void coopUiDisconnect();
@@ -2306,6 +2309,8 @@ void mainLoop_hook(GameWorld* gw, float dt) {
     // 选中限制兜底：收回授权的瞬间 / 不走 objectSelected 的路径，也要保证“选中集合 >1 时
     // 不含对方角色”。worldLive 门控，避免世界切换时碰旧指针。
     if (worldLive) coop::engine::enforcePeerSelection(gw);
+    // 编队栏可见集合变了（借到 / 归还编队、归属表到达等）就重建编队栏
+    if (worldLive) coop::engine::syncSquadBar(gw);
 
     // 好友带自己的角色加入：只给带入角色的 owner 延迟重推一次存档。不同玩家的
     // 角色到达时间可以不同，不能因为其中一个的新标签把所有人一起拉回读档。
@@ -2981,6 +2986,15 @@ void installEngineDetours() {
     coop::engine::setSquadOwnershipCallbacks(&coopRecruitOwnSquad, &coopCreatedSquad);
     if (g_cfg.squadSync && !coop::engine::installSquadCreateHook())
         coopErr("[owners] squad creation hook installation failed");
+    // 编队栏只显示本端编队（借到别人的编队期间只显示借来的），判定见 Replicator::squadBarVisible
+    if (g_cfg.squadSync) {
+        if (coop::engine::installSquadBarHook()) {
+            coop::engine::setSquadBarFilter(&coopSquadBarVisible);
+            coopLog("[squadbar] tab filter installed; the squad bar shows only your own squads");
+        } else {
+            coopErr("[squadbar] tab filter installation failed; every squad stays in the squad bar");
+        }
+    }
     g_repl.setFactionSync(g_cfg.factionSync);
     g_repl.setTimeSync(g_cfg.timeSync);
     g_repl.setTimeBrake(g_cfg.timeBrake);
@@ -3589,5 +3603,9 @@ void coopPlayerBoxesDrive(GameWorld* gw) {
         }
     }
     coop::engine::coopPlayerBoxesTick(boxes, active, world);
+}
+
+int coopSquadBarVisible(unsigned int container, unsigned int containerSerial) {
+    return g_repl.squadBarVisible(std::make_pair((coop::u32)container, (coop::u32)containerSerial)) ? 1 : 0;
 }
 } // namespace

@@ -2831,6 +2831,8 @@ public:
         bool requestable;
     };
     void squadAuthView(const std::pair<u32, u32>& tab, SquadAuthView& out) const;
+    // 编队栏是否显示该标签：只显示本端的编队（借出去的仍显示）；借到别人的编队期间只显示借来的
+    bool squadBarVisible(const std::pair<u32, u32>& tab) const;
 
 };
 

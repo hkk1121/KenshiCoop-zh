@@ -1249,7 +1249,7 @@ int Replicator::orderClassForHand(const unsigned int h[5]) const {
     Tab tab(h[1], h[2]);
     Key local; local.t = h[0]; local.c = h[1]; local.cs = h[2]; local.i = h[3]; local.s = h[4];
     if (ownersAttached_ && (owners_.count(canonicalTab(tab)) || allSquad_.count(local)))
-        return ownsTabEffective(tab, 0xFFFFFFFFu) ? 1 : 2;
+        return ownsTabEffective(tab, 0xFFFFFFFFu) && squadBarVisible(tab) ? 1 : 2; // 借用期间自己的编队也锁
     int cls = ownerClassForHand(h);
     if (cls != 2) return cls;
     Key k; k.t = h[0]; k.c = h[1]; k.cs = h[2]; k.i = h[3]; k.s = h[4];
@@ -1726,6 +1726,19 @@ void Replicator::squadAuthView(const std::pair<u32, u32>& source, SquadAuthView&
     for (std::map<Tab, unsigned int>::const_iterator it = tabRank_.begin(); it != tabRank_.end(); ++it)
         if (canonicalTab(it->first) == tab) { rank = it->second; break; }
     out.requestable = !ownsTabEffective(tab, rank);
+}
+
+// 联机且归属表已接上后才筛选；未联机、归属未定或表无效时全部显示，保持原版编队栏。
+bool Replicator::squadBarVisible(const std::pair<u32, u32>& source) const {
+    if (!squadSync_ || !sessionLive_ || !ownersAttached_ || ownersInvalid_) return true;
+    Tab tab = canonicalTab(source);
+    bool borrowing = false;
+    for (std::map<Tab, AuthPeer>::const_iterator it = tabAuth_.begin(); it != tabAuth_.end(); ++it) {
+        if (it->second.mode != 2) continue;
+        if (it->first == tab) return true;
+        borrowing = true;
+    }
+    return !borrowing && ownsTab(source, 0xFFFFFFFFu);
 }
 
 } // namespace coop

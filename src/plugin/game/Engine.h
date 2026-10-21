@@ -2242,6 +2242,16 @@ bool installSquadCreateHook();
 unsigned int listPlayerTabs(GameWorld* gw, unsigned int (*out)[2], unsigned int maxOut);
 bool createPlayerSquad(GameWorld* gw, unsigned int out[2]);
 
+// ---- 编队栏只显示本端编队（判定见 Replicator::squadBarVisible） ----------------
+// 分类器按编队标签 (container, containerSerial) 返回是否显示在本端编队栏（非 0 = 显示）。
+typedef int (*SquadBarVisibleFn)(unsigned int container, unsigned int containerSerial);
+void setSquadBarFilter(SquadBarVisibleFn fn);
+// 挂 MainBarGUI::updatePotraitsPlatoon 与 refreshPortraitTabs，两个都成功才返回 true。
+bool installSquadBarHook();
+// 每帧：可见集合变了（归属表到达、借到 / 归还编队、联机开始 / 结束）就让引擎重建编队栏。
+// 调用方用 worldLive 门控。
+void syncSquadBar(GameWorld* gw);
+
 } // namespace engine
 } // namespace coop
 
