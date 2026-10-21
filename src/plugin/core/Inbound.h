@@ -158,16 +158,15 @@ struct InboundStats {
     StatsPacket pkt;
 };
 
-// One received shared-pool total (protocol 52): the host publishes the
-// authoritative pool; the join writes it onto its own engine wallet after
-// re-applying any delta the host has not acked yet.
+// 收到的个人余额（协议 1006）：主机只发给余额所属的加入者；加入方叠加上还没确认的
+// 增减量后写进本机游戏。
 struct InboundMoney {
     u32         ownerId;
     MoneyPacket pkt;
 };
 
-// One received pool delta (protocol 52): a change the join's local economy
-// already applied, which the host folds into the authoritative pool.
+// 收到的增减量（协议 1006）：加入方本地已经生效的变化，ownerId 是按连接认出的发送者，
+// 主机记到这个人的账上。
 struct InboundMoneyDelta {
     u32              ownerId;
     MoneyDeltaPacket pkt;

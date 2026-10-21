@@ -388,13 +388,10 @@ struct Config {
     // escape hatch.
     bool          proneSync;
 
-    // KENSHICOOP_MONEY_SYNC (default ON): the shared money pool (protocol 52).
-    // Kenshi keeps ONE player wallet per save, so both players spend from one
-    // purse with the HOST as authority: the join reports each local change as a
-    // signed delta, the host folds it in and publishes the total. Without it
-    // every purchase / sale / bounty moves cats on one client only, and the
-    // join's economy is erased by the next save (the host's wallet is the one
-    // that persists). "0" is the A/B escape hatch.
+    // KENSHICOOP_MONEY_SYNC (default ON): 每人独立资金（协议 52 / 1006）。
+    // 每台机器游戏里的钱是本机玩家自己的余额；加入方把本地变化作为增减量报给主机，
+    // 主机记到这个人的账上（随存档写入 coop_players.txt）并只回给本人。关掉后各人的
+    // 钱只在本机变化，下次存档读档就丢。"0" is the A/B escape hatch.
     bool          moneySync;
 
     // KENSHICOOP_SPAWN_SYNC (default ON): runtime-spawn proxy replication

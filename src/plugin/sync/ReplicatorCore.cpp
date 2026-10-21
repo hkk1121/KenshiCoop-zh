@@ -77,7 +77,7 @@ Replicator::Replicator()
       spawnSync_(false), spawnPosLogMs_(0),
       spawnMintRadius_(0.0f), adoptRadius_(0.0f), censusAdopts_(0),
       censusScanMs_(0),
-      poolSeen_(-1), poolSent_(-1), poolSentMs_(0), poolTotal_(-1),
+      poolSeen_(-1),
       poolSeq_(0), poolAcked_(0),
       moneySync_(true), recruitSync_(true),
       squadSync_(true), tabsSeeded_(0),
@@ -103,6 +103,7 @@ Replicator::Replicator()
       ownersRevision_(0), ownersAuthEpoch_(1), ownersLoaded_(false), ownersAttached_(false),
       ownersDirty_(false), ownersHaveSnapshot_(false), ownersInvalid_(false), ownersResetPending_(false) {
     characterWorldEpoch_ = ownersAuthEpoch_;
+    walletsLoaded_ = false;
 }
 
 // ---- Phase 3: unified entity lifecycle ---------------------------------------
@@ -288,9 +289,11 @@ void Replicator::resetSession() {
     // reload must re-seed it - otherwise the newly loaded save's cats read as
     // one giant local purchase. Pending deltas die with the session they were
     // measured in.
-    poolSeen_ = -1; poolSent_ = -1; poolSentMs_ = 0; poolTotal_ = -1;
+    poolSeen_ = -1;
     poolSeq_ = 0; poolAcked_ = 0;
     poolPending_.clear();
+    // 账本属于旧世界，读档后从新存档目录重新读
+    wallets_.clear(); walletsLoaded_ = false;
     stealthPub_.clear();
     pinOwned_.clear();
     pinPeer_.clear();
@@ -1509,6 +1512,10 @@ void Replicator::syncOwners(GameWorld* gw, NetLink& net, Inbound& in, bool host)
         char name[64] = { 0 }; engine::saveInfo(name, sizeof(name), 0, 0);
         bool found = name[0] && readOwners(name);
         ownersLoaded_ = true;
+        if (host) {
+            if (found) readPlayers(name);
+            walletsLoaded_ = true;
+        }
         if (host && !found) {
             FILETIME time; GetSystemTimeAsFileTime(&time);
             ownersWorld_ = ((u64)time.dwHighDateTime << 32 | time.dwLowDateTime) ^ playerIdentity_;
@@ -1739,6 +1746,51 @@ bool Replicator::squadBarVisible(const std::pair<u32, u32>& source) const {
         borrowing = true;
     }
     return !borrowing && ownsTab(source, 0xFFFFFFFFu);
+}
+
+// 个人账本：首行 KCOOP_PLAYERS 1 <世界编号>，之后每人一行 W <玩家标识> <余额> <开局SID，没有为 ->。
+// 世界编号与归属表不一致的文件属于别的世界，不读。
+bool Replicator::readPlayers(const std::string& name) {
+    FILE* f = _wfopen(savexfer::widePath(savexfer::saveFolderFor(name) + "/coop_players.txt").c_str(), L"rb");
+    if (!f) return false;
+    char line[512]; unsigned int version = 0; u64 world = 0;
+    bool valid = fgets(line, sizeof(line), f) && sscanf(line, "KCOOP_PLAYERS %u %I64u", &version, &world) == 2 &&
+                 version == 1 && world != 0 && world == ownersWorld_;
+    std::map<u64, Wallet> rows;
+    while (valid && fgets(line, sizeof(line), f)) {
+        u64 id = 0; int money = 0; char start[200] = { 0 };
+        if (sscanf(line, "W %I64u %d %199[^\r\n]", &id, &money, start) != 3 || !id) continue;
+        Wallet& w = rows[id];
+        w.money = money < 0 ? 0 : money;
+        if (strcmp(start, "-") != 0) w.start = start;
+    }
+    fclose(f);
+    if (valid) wallets_.swap(rows);
+    char b[160];
+    _snprintf(b, sizeof(b) - 1, "[wallet] ledger restored players=%u save='%s' ok=%d",
+              (unsigned)wallets_.size(), name.c_str(), valid ? 1 : 0);
+    b[sizeof(b) - 1] = 0; coop::logLine(b);
+    return valid;
+}
+
+bool Replicator::writePlayers(const std::string& name) const {
+    if (!isHostRole() || !moneySync_ || !walletsLoaded_ || !ownersWorld_ || ownersInvalid_) return true;
+    std::wstring target = savexfer::widePath(savexfer::saveFolderFor(name) + "/coop_players.txt");
+    std::wstring temp = target + L".tmp";
+    FILE* f = _wfopen(temp.c_str(), L"wb");
+    if (!f) { coop::logErrLine("[wallet] player ledger could not be opened for writing"); return false; }
+    fprintf(f, "KCOOP_PLAYERS 1 %I64u\n", ownersWorld_);
+    for (std::map<u64, Wallet>::const_iterator it = wallets_.begin(); it != wallets_.end(); ++it)
+        fprintf(f, "W %I64u %d %s\n", it->first, it->second.money,
+                it->second.start.empty() ? "-" : it->second.start.c_str());
+    bool ok = ferror(f) == 0;
+    if (fclose(f) != 0) ok = false;
+    if (ok) ok = MoveFileExW(temp.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    char b[160];
+    _snprintf(b, sizeof(b) - 1, "[wallet] ledger saved players=%u save='%s' ok=%d",
+              (unsigned)wallets_.size(), name.c_str(), ok ? 1 : 0);
+    b[sizeof(b) - 1] = 0; coop::logLine(b);
+    return ok;
 }
 
 } // namespace coop

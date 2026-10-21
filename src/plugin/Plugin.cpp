@@ -621,9 +621,9 @@ void driveSaveSync() {
                     completeCharacterSave(false);
                     g_bootstrapArmed = false; g_bootstrapTargets.clear(); g_savePending.clear(); return;
                 }
-                if (!g_repl.writeOwners(g_savePending) && g_net.isRunning()) {
+                if ((!g_repl.writeOwners(g_savePending) || !g_repl.writePlayers(g_savePending)) && g_net.isRunning()) {
                     completeCharacterSave(false);
-                    coopErr("[owners] save transfer cancelled: ownership file write failed");
+                    coopErr("[owners] save transfer cancelled: ownership or ledger file write failed");
                     g_bootstrapArmed = false; g_bootstrapTargets.clear(); g_savePending.clear();
                     return;
                 }
@@ -1740,12 +1740,9 @@ void tickReplicatePublish(GameWorld* gw, bool worldLive) {
             g_repl.publishStats(gw, g_net, g_net.localId());
             g_repl.applyStats(gw, g_inbound);
         }
-        // Shared money pool (protocol 52): Kenshi keeps ONE player wallet, so
-        // both players spend from one pool with the host as authority. Publish
-        // samples the wallet and reports any local movement (join: a signed
-        // delta, host: the authoritative total); apply folds deltas / adopts the
-        // total. Ordered after publishOwned so isHostRole() reflects this tick's
-        // ownership partition.
+        // 每人独立资金（协议 1006）：本机游戏里的钱是本机玩家自己的余额。加入方
+        // 报变化量，主机按连接记到各人账上并只回给本人。Ordered after publishOwned
+        // so isHostRole() reflects this tick's ownership partition.
         if (g_cfg.moneySync) {
             g_repl.publishMoneyPool(replCtx(gw));
             g_repl.applyMoneyPool(replCtx(gw));

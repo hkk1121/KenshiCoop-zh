@@ -526,13 +526,12 @@ void Replicator::applyStats(GameWorld* gw, Inbound& in) {
     }
 }
 
-// ---- Protocol 52: shared money pool -----------------------------------------
+// ---- Protocol 52 / 1006: per-player wallets ----------------------------------
 //
-// Kenshi keeps ONE player wallet per save, so both players spend from one pool
-// and the HOST's engine wallet is the authority. Two writers on one number rule
-// out absolute snapshots (they lose concurrent spends: from 1000, a 200 and a
-// 300 purchase exchanged as totals leave 800 or 700, so one purchase is free),
-// so the join ships the CHANGE and the host ships the authoritative TOTAL.
+// 协议 1006 起钱按人分开：每台机器游戏里的钱就是本机玩家自己的余额。
+// 主机自己的钱只属于主机，各加入者的余额记在主机的 wallets_ 账本里（随存档写入
+// coop_players.txt），并只发给本人。加入方仍然只报变化量、不报总数：本地交易立即
+// 生效，主机按连接认人记账后回一个带确认序号的余额，加入方把还没确认的变化量叠加上去。
 //
 // Detection is a single wallet read per tick against poolSeen_: whatever moved
 // the wallet - trade UI, sale, loot, bounty, hire, bar tab - shows up as a
@@ -548,56 +547,49 @@ void Replicator::publishMoneyPool(const SyncContext& ctx) {
     const bool hostRole = isHostRole();
     unsigned long now = nowMs();
 
-    // First sample of a session (or the first after a reload): adopt the wallet
-    // as the baseline instead of reporting it as a change. Without this the
-    // save's own starting cats would look like a purchase the size of the whole
-    // wallet on whichever side sampled first.
-    if (poolSeen_ < 0) {
-        poolSeen_ = cur;
-        if (hostRole) poolTotal_ = cur;
-        char b[112];
-        _snprintf(b, sizeof(b) - 1, "[wallet] POOL SEED t=%d role=%s",
-                  cur, hostRole ? "host" : "join");
-        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
-        return;
-    }
-
     if (hostRole) {
-        // Our engine wallet IS the pool. A local move is already authoritative;
-        // just keep the mirror and let the change gate publish it.
+        // 主机：本机的钱只属于主机自己，变化只记日志；各加入者的余额从账本单独发给本人
         if (cur != poolSeen_) {
             char b[128];
-            _snprintf(b, sizeof(b) - 1, "[wallet] POOL LOCAL t=%d was=%d delta=%d",
-                      cur, poolSeen_, cur - poolSeen_);
+            _snprintf(b, sizeof(b) - 1, "[wallet] LOCAL t=%d was=%d", cur, poolSeen_);
             b[sizeof(b) - 1] = '\0'; coop::logLine(b);
             poolSeen_ = cur;
         }
-        poolTotal_ = cur;
-        bool changed = (poolTotal_ != poolSent_);
-        if (!sync::gateShouldSend(changed, now, poolSentMs_, tuning_.moneyMinSendMs,
-                                  tuning_.moneyResendMs, /*resendUnsent*/ true))
-            return;
-        poolSent_ = poolTotal_; poolSentMs_ = now;
-        MoneyPacket pkt;
-        memset(&pkt, 0, sizeof(pkt));
-        pkt.type    = (u8)PKT_MONEY;
-        pkt.ownerId = ownerId;
-        pkt.ackSeq  = poolAcked_;
-        pkt.money   = poolTotal_;
-        net.queueMoney(pkt);
-        if (changed) { // resends stay silent; the change is the signal
-            char b[112];
-            _snprintf(b, sizeof(b) - 1, "[wallet] POOL SEND t=%d ack=%u",
-                      poolTotal_, poolAcked_);
-            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        if (!walletsLoaded_) return;
+        for (std::map<u64, PeerStatusPacket>::const_iterator p = players_.begin(); p != players_.end(); ++p) {
+            if (!p->second.present || p->first == playerIdentity_) continue;
+            Wallet& w = wallets_[p->first];
+            // 重新连上后对方的序号从头算，确认序号跟着清零并马上重发余额
+            if (w.connection != p->second.connectionId) {
+                w.connection = p->second.connectionId; w.acked = 0; w.sent = -1; w.sentMs = 0;
+            }
+            bool changed = (w.money != w.sent);
+            if (!sync::gateShouldSend(changed, now, w.sentMs, tuning_.moneyMinSendMs,
+                                      tuning_.moneyResendMs, /*resendUnsent*/ true))
+                continue;
+            w.sent = w.money; w.sentMs = now;
+            MoneyPacket pkt;
+            memset(&pkt, 0, sizeof(pkt));
+            pkt.type    = (u8)PKT_MONEY;
+            pkt.ownerId = p->second.ownerId;
+            pkt.ackSeq  = w.acked;
+            pkt.money   = w.money;
+            net.queueMoney(pkt);
+            if (changed) {
+                char b[144];
+                _snprintf(b, sizeof(b) - 1, "[wallet] SEND player=%llu owner=%u t=%d ack=%u",
+                          p->first, p->second.ownerId, w.money, w.acked);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
         }
         return;
     }
 
-    // Join: report the movement, never the total. The delta stays pending until
+    // 加入方：读档后游戏里的钱是存档里主机的数，等主机发来自己的余额写入后才开始跟踪。
+    // Report the movement, never the total. The delta stays pending until
     // the host acks it so applyMoneyPool can re-apply it on top of a total that
     // does not include it yet.
-    if (cur == poolSeen_) return;
+    if (poolSeen_ < 0 || cur == poolSeen_) return;
     int delta = cur - poolSeen_;
     poolSeen_ = cur;
     ++poolSeq_;
@@ -610,84 +602,69 @@ void Replicator::publishMoneyPool(const SyncContext& ctx) {
     pkt.delta   = delta;
     net.queueMoneyDelta(pkt);
     char b[128];
-    _snprintf(b, sizeof(b) - 1, "[wallet] POOL DELTA seq=%u delta=%d local=%d",
+    _snprintf(b, sizeof(b) - 1, "[wallet] DELTA seq=%u delta=%d local=%d",
               poolSeq_, delta, cur);
     b[sizeof(b) - 1] = '\0'; coop::logLine(b);
 }
 
 void Replicator::applyMoneyPool(const SyncContext& ctx) {
     GameWorld* gw = ctx.gw; Inbound& in = *ctx.in; NetLink& net = *ctx.net;
+    const bool hostRole = isHostRole();
+    // 账本读好之前主机不记账，变化量留在队列里
+    if (hostRole && moneySync_ && !walletsLoaded_) return;
     std::deque<InboundMoney> totals;
     std::deque<InboundMoneyDelta> deltas;
     in.drainMoney(totals);
     in.drainMoneyDeltas(deltas);
     if (totals.empty() && deltas.empty()) return;
     if (!moneySync_) return;
-    const bool hostRole = isHostRole();
 
     if (hostRole) {
-        // Fold the join's deltas into the pool. Clamped at 0: both players can
-        // commit purchases against the same cats before either delta lands, and
-        // the goods are already handed over locally, so the pool absorbs the
-        // shortfall rather than going negative.
-        bool moved = false;
+        // 按连接认出是谁，记到他自己的余额上。Clamped at 0: the goods are already
+        // handed over locally, so the wallet absorbs the shortfall rather than going negative.
         for (std::deque<InboundMoneyDelta>::iterator it = deltas.begin();
              it != deltas.end(); ++it) {
             const MoneyDeltaPacket& p = it->pkt;
-            if (p.seq <= poolAcked_) continue; // already folded (defensive)
-            if (poolTotal_ < 0) {              // no seed yet - adopt the wallet first
-                int cur = -1;
-                if (!engine::readPlayerWallet(gw, &cur) || cur < 0) return;
-                poolTotal_ = cur; poolSeen_ = cur;
-            }
-            int want = poolTotal_ + p.delta;
+            u64 identity = identityForOwner(it->ownerId);
+            if (!identity || identity == playerIdentity_) continue;
+            Wallet& w = wallets_[identity];
+            if (p.seq <= w.acked) continue; // already folded (defensive)
+            int want = w.money + p.delta;
             if (want < 0) {
-                char b[128];
+                char b[160];
                 _snprintf(b, sizeof(b) - 1,
-                          "[wallet] OVERDRAFT want=%d clamped=0 seq=%u delta=%d",
-                          want, p.seq, p.delta);
+                          "[wallet] OVERDRAFT player=%llu want=%d clamped=0 seq=%u delta=%d",
+                          identity, want, p.seq, p.delta);
                 b[sizeof(b) - 1] = '\0'; coop::logLine(b);
                 want = 0;
             }
-            poolTotal_ = want;
-            poolAcked_ = p.seq;
-            moved = true;
-            char b[144];
-            _snprintf(b, sizeof(b) - 1, "[wallet] POOL FOLD seq=%u delta=%d t=%d",
-                      p.seq, p.delta, poolTotal_);
+            w.money = want;
+            w.acked = p.seq;
+            char b[160];
+            _snprintf(b, sizeof(b) - 1, "[wallet] FOLD player=%llu seq=%u delta=%d t=%d",
+                      identity, p.seq, p.delta, w.money);
             b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            // 马上回复，不等发送间隔：对方正拿着一个待确认的变化量
+            w.sent = w.money; w.sentMs = nowMs();
+            MoneyPacket out;
+            memset(&out, 0, sizeof(out));
+            out.type    = (u8)PKT_MONEY;
+            out.ownerId = it->ownerId;
+            out.ackSeq  = w.acked;
+            out.money   = w.money;
+            net.queueMoney(out);
         }
-        if (!moved) return;
-        if (engine::writePlayerWallet(gw, poolTotal_)) {
-            poolSeen_ = poolTotal_;
-        } else {
-            // The fold is acked but the engine refused the write, so the join's
-            // cats are about to be dropped when the next sample re-reads the
-            // unchanged wallet. Never silent: this is money going missing.
-            char b[112];
-            _snprintf(b, sizeof(b) - 1, "[wallet] WARN pool write FAILED t=%d ack=%u",
-                      poolTotal_, poolAcked_);
-            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
-        }
-        // Publish immediately rather than waiting on the send floor: the join is
-        // holding a pending delta and we now know the answer.
-        poolSent_ = poolTotal_; poolSentMs_ = nowMs();
-        MoneyPacket out;
-        memset(&out, 0, sizeof(out));
-        out.type    = (u8)PKT_MONEY;
-        out.ownerId = ctx.localId;
-        out.ackSeq  = poolAcked_;
-        out.money   = poolTotal_;
-        net.queueMoney(out);
         return;
     }
 
-    // Join: adopt the newest authoritative total, then re-apply whatever the
+    // Join: adopt the newest balance addressed to us, then re-apply whatever the
     // host has not acked yet so a purchase made moments ago is not reverted for
     // a round trip and then re-applied.
-    if (totals.empty()) return;
-    const MoneyPacket& p = totals.back().pkt;
-    if (p.money < 0) return;
+    const MoneyPacket* mine = 0;
+    for (std::deque<InboundMoney>::const_iterator it = totals.begin(); it != totals.end(); ++it)
+        if (it->pkt.ownerId == ctx.localId) mine = &it->pkt;
+    if (!mine || mine->money < 0) return;
+    const MoneyPacket& p = *mine;
     while (!poolPending_.empty() && poolPending_.front().seq <= p.ackSeq)
         poolPending_.pop_front();
     poolAcked_ = p.ackSeq;
@@ -703,7 +680,7 @@ void Replicator::applyMoneyPool(const SyncContext& ctx) {
     if (ok) poolSeen_ = want;
     char b[176];
     _snprintf(b, sizeof(b) - 1,
-              "[wallet] POOL RECV t=%d ack=%u pending=%u want=%d was=%d ok=%d",
+              "[wallet] RECV t=%d ack=%u pending=%u want=%d was=%d ok=%d",
               p.money, p.ackSeq, (unsigned)poolPending_.size(), want, cur, ok ? 1 : 0);
     b[sizeof(b) - 1] = '\0'; coop::logLine(b);
 }
@@ -1870,9 +1847,9 @@ void Replicator::onPeerConnected(NetLink& net, u32 ownerId) {
     for (std::map<Key, StatsPub>::iterator it = statsPub_.begin();
          it != statsPub_.end(); ++it)
         if (it->second.lastSendMs != 0) { it->second.lastSendMs = 1; ++nStats; }
-    // The money pool is a single value, not a row cache: age its send stamp so
-    // publishMoneyPool re-broadcasts the authoritative total on its next sample.
-    if (poolSentMs_ != 0) { poolSentMs_ = 1; nMoney = 1; }
+    // 各加入者的余额按人重发
+    for (std::map<u64, Wallet>::iterator it = wallets_.begin(); it != wallets_.end(); ++it)
+        if (it->second.sentMs != 0) { it->second.sentMs = 1; ++nMoney; }
     for (std::map<Key, InvPub>::iterator it = invPub_.begin();
          it != invPub_.end(); ++it)
         if (it->second.lastSendMs != 0) { it->second.lastSendMs = 1; ++nInv; }

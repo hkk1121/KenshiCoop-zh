@@ -1942,26 +1942,19 @@ private:
     // RESEND_MS names to these fields, so behavior is unchanged - this is the one
     // place their cadence now lives. See SyncTuning.h.
     SyncTuning tuning_;
-    // Protocol 52 shared money pool.
-    // poolSeen_   = the wallet value we last observed/wrote, i.e. the baseline a
-    //               local engine move is detected against. -1 = not yet seeded
-    //               (fresh session or post-reload), which suppresses the first
-    //               sample so a seed is never mistaken for a purchase.
-    // poolSent_/poolSentMs_ = host change gate + safety resend for the total.
-    // poolSeq_    = join's monotonic delta sequence (last used).
-    // poolAcked_  = highest seq the host has confirmed folding in.
-    // poolPending_ = join's unacked deltas, re-applied on top of the host's
-    //               total so a just-made purchase does not visibly bounce.
-    // poolTotal_  = host's authoritative pool.
+    // 协议 1006 每人独立资金（本机游戏里的钱就是本机玩家自己的余额）。
+    // poolSeen_   = 上次看到/写入的本机钱数，本地变化以它为基准；-1 = 还没有基准
+    //               （新会话或读档后）。加入方要等主机发来自己的余额写入后才有基准。
+    // poolSeq_    = 加入方增减量的序号（最后用过的）。
+    // poolAcked_  = 主机已确认记账的最大序号。
+    // poolPending_ = 加入方还没确认的增减量，叠加在主机发来的余额上，免得刚买的东西回跳。
+    // 各加入者的余额由主机记在 wallets_（见类末尾）。
     struct PoolDelta {
         u32 seq; int delta;
         PoolDelta() : seq(0), delta(0) {}
         PoolDelta(u32 s, int d) : seq(s), delta(d) {}
     };
     int  poolSeen_;
-    int  poolSent_;
-    unsigned long poolSentMs_;
-    int  poolTotal_;
     u32  poolSeq_;
     u32  poolAcked_;
     std::deque<PoolDelta> poolPending_;
@@ -2833,6 +2826,17 @@ public:
     void squadAuthView(const std::pair<u32, u32>& tab, SquadAuthView& out) const;
     // 编队栏是否显示该标签：只显示本端的编队（借出去的仍显示）；借到别人的编队期间只显示借来的
     bool squadBarVisible(const std::pair<u32, u32>& tab) const;
+    // 存档目录里的个人账本 coop_players.txt（主机写）；没有可写的内容时视为成功
+    bool writePlayers(const std::string& name) const;
+private:
+    // 主机记的各人余额与所选开局，按玩家标识；主机自己的钱以本机游戏为准
+    struct Wallet {
+        int money; u32 acked; u32 connection; int sent; unsigned long sentMs; std::string start;
+        Wallet() : money(0), acked(0), connection(0), sent(-1), sentMs(0) {}
+    };
+    std::map<u64, Wallet> wallets_;
+    bool walletsLoaded_;
+    bool readPlayers(const std::string& name);
 
 };
 

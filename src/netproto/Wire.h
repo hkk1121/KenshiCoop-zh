@@ -29,8 +29,9 @@ typedef double         f64;
 // 本分支（zh-cn-improvements）自有协议号：基于上游 55，加入名字同步与动物年龄同步（上游 PR #28）后
 // 改为 1001 起编号，避开上游后续序列；1002 加入小队控制授权（EVT_SQUAD_AUTH）；
 // 1003 加入多人对端名单与授权目标；1004 加入稳定玩家身份与存档归属表；
+// 1006 资金按人分开（MONEY 只发给余额所属的加入者，增减量按连接认人）；
 // 双方须使用同一改进版，与官方 v0.51 不再互通
-const u16 PROTOCOL_VERSION = 1005;
+const u16 PROTOCOL_VERSION = 1006;
 
 // Session player cap (four-player first stage): the host + up to three joins.
 // Transport and replication are N-generic; the host enforces this policy limit
@@ -1043,6 +1044,8 @@ struct StatsPacket {
 };
 
 // ---- Protocol 52: shared money pool ------------------------------------------
+// 协议 1006 起改为每人独立余额：主机游戏里的钱只属于主机，各加入者的余额由主机记账，
+// MoneyPacket 只发给余额所属的人；下面关于“共用钱池”的说明是 1005 及以前的设计。
 // Kenshi keeps ONE player wallet per save (the single `player money` field in
 // the save's player-state record; the per-platoon Ownerships::money the v22
 // channel used to publish belongs to NPC/town squads and reads 0 for the
@@ -1062,16 +1065,15 @@ struct StatsPacket {
 // field is an int (the host clamps the pool at 0).
 struct MoneyPacket {
     u8  type;    // = PKT_MONEY
-    u32 ownerId; // network player id of the sender (the host)
+    u32 ownerId; // 协议 1006：余额所属加入者的网络编号，主机只发给他
     u32 ackSeq;  // highest MoneyDeltaPacket.seq folded into this total (0 = none)
-    int money;   // the authoritative shared pool
+    int money;   // 协议 1006：该加入者的个人余额
 };
 
 // Join -> host: one signed change the join's LOCAL economy already applied
 // (purchase, sale, loot, bounty, hire). Reliable + ordered, so the host folds
 // each delta exactly once; seq is monotonic per session and comes back as
-// MoneyPacket::ackSeq. A single ackSeq assumes ONE remote peer (the two-player
-// design target) - a third player would need a per-peer ack.
+// MoneyPacket::ackSeq（协议 1006 起主机按人分别确认）.
 struct MoneyDeltaPacket {
     u8  type;    // = PKT_MONEY_DELTA
     u32 ownerId; // network player id of the sender (the join)

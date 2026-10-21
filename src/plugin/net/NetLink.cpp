@@ -391,7 +391,6 @@ bool NetLink::isRelayedType(u8 type) {
         case PKT_MEDICAL:
         case PKT_TREATMENT:
         case PKT_STATS:
-        case PKT_MONEY:
         case PKT_NPC_CENSUS:
         case PKT_CAM_HINT:
         case PKT_CELL_CLAIM:
@@ -1127,7 +1126,7 @@ void NetLink::threadLoop() {
                         MoneyDeltaPacket md;
                         if (readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &md)
                             && inbound_) {
-                            inbound_->pushMoneyDelta(md.ownerId, md);
+                            if (isHost_) inbound_->pushMoneyDelta((u32)(size_t)ev.peer->data, md); // 协议 1006：按连接认人
                         }
                     } else if (type == PKT_FACTION) {
                         // Reliable player-faction relation row (protocol 24):
@@ -1815,13 +1814,7 @@ void NetLink::threadLoop() {
         for (size_t i = 0; i < moneyPkts.size(); ++i) {
             ENetPacket* out = enet_packet_create(&moneyPkts[i], sizeof(MoneyPacket),
                                                  ENET_PACKET_FLAG_RELIABLE);
-            if (isHost_) {
-                enet_host_broadcast(enetHost_, CH_RELIABLE, out);
-            } else if (serverPeer_ && serverPeer_->state == ENET_PEER_STATE_CONNECTED) {
-                enet_peer_send(serverPeer_, CH_RELIABLE, out);
-            } else {
-                enet_packet_destroy(out);
-            }
+            if (out) routeOut(moneyPkts[i].ownerId, CH_RELIABLE, out); // 协议 1006：只发给余额所属的人
         }
 
         // Drain + send any queued money-pool deltas on CH_RELIABLE (protocol
