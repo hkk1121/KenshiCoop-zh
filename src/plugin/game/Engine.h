@@ -384,6 +384,9 @@ void  setCharAge(Character* c, float age);
 // distance. resolveZoneQuery() is called from engine::resolve().
 bool isZoneLoadedAt(GameWorld* gw, float x, float y, float z);
 void resolveZoneQuery();
+// 主机给开局出生地请求加载（照原版 getMapSector → getZoneMap → activateZoneMap 范围 1），
+// 之后由调用方用 isZoneLoadedAt 等它加载好
+bool requestStartZone(GameWorld* gw, const float pos[3]);
 
 // One position mapped through EVERY sector function ZoneManager exposes, plus
 // the rect of the zone containing it. Measurement instrument, not an authority

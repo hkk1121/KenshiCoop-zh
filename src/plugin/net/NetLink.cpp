@@ -864,12 +864,16 @@ void NetLink::threadLoop() {
                             p.result >= CHARACTER_CREATED && p.result <= CHARACTER_SAVED)
                             inbound_->pushCharacterReply(p);
                     } else if (type == PKT_CHARACTER_APPEARANCE) {
+                        // 主机发来的是广播的外观；加入方发给主机的是自己开局角色捏好的外观，按连接认人
                         CharacterAppearanceHeader h;
-                        if (!isHost_ && inbound_ && ev.peer == serverPeer_ && ev.channelID == CH_RELIABLE &&
+                        u32 owner = isHost_ ? (u32)(size_t)ev.peer->data : 0u;
+                        std::map<u32, ENetPeer*>::const_iterator admitted = peersById_.find(owner);
+                        bool from = isHost_ ? (admitted != peersById_.end() && admitted->second == ev.peer) : ev.peer == serverPeer_;
+                        if (from && inbound_ && ev.channelID == CH_RELIABLE &&
                             readPacket(ev.packet->data, (unsigned)ev.packet->dataLength, &h) &&
                             h.worldId && h.bytes && h.bytes <= CHARACTER_DRAFT_MAX &&
                             ev.packet->dataLength == sizeof(h) + h.bytes)
-                            inbound_->pushCharacterAppearance(h, ev.packet->data + sizeof(h));
+                            inbound_->pushCharacterAppearance(owner, h, ev.packet->data + sizeof(h));
                     } else if (type == PKT_OWNERS) {
                         OwnersHeader h;
                         if (!isHost_ && inbound_ &&

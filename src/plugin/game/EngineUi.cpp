@@ -1065,10 +1065,10 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         std::string empty    = "";
 
         std::string characterTemplateKey = "chartmpl", characterCreateKey = "charcreate";
-        std::string characterTemplateCap = coop::tr("Character template (click to cycle): ");
+        std::string characterTemplateCap = coop::tr("Game start (click to cycle): ");
         if (st->characterTemplate) characterTemplateCap += st->characterTemplate;
         std::string characterCreateCap = st->editingCharacter ? coop::tr("Cancel character creation") :
-            st->canCreateCharacter ? coop::tr("Create character") : coop::tr("Create character (unavailable)");
+            st->canCreateCharacter ? coop::tr("Start the selected game start") : coop::tr("Start the selected game start (unavailable)");
         std::string characterStatusKey = coop::tr("Character creation");
         std::string characterStatus = st->characterStatus ? st->characterStatus : "";
         std::string roomKey = coop::tr("Room info");

@@ -7,30 +7,32 @@
 #include <kenshi/Platoon.h>
 #include <kenshi/GameDataManager.h>
 #include <kenshi/gui/CharacterEditWindow.h>
+#include <kenshi/RootObjectFactory.h>
+#include <kenshi/Town.h>
+#include <kenshi/util/hand.h>
 #include <algorithm>
 #pragma warning(pop)
 
 namespace coop { namespace engine {
 namespace {
-Character* preview = 0;
-GameWorld* previewWorld = 0;
+GameWorld* editWorld = 0;
 CharacterEditWindow* editor = 0;
-CharacterChoice previewChoice;
+// 正在捏的本机新角色（按句柄记，关闭时再解析，免得中途被销毁后读到野指针）
+const unsigned int EDIT_MAX = 64;
+unsigned int editHands[EDIT_MAX][5];
+unsigned int editCount = 0;
+std::string editStart;
 bool confirming = false;
 int editResult = 0;
 float previousSpeed = 1.0f;
 bool previousPause = false;
-float previousCamera[3] = { 0, 0, 0 };
-unsigned int previousFollow[5] = { 0, 0, 0, 0, 0 };
-std::string deferredSave;
-bool deferredAuto = true;
 typedef void (__fastcall* ConfirmFn)(CharacterEditWindow*, MyGUI::Widget*);
 typedef void (__fastcall* CloseFn)(ForgottenGUI*);
 ConfirmFn confirmOriginal = 0;
 CloseFn closeOriginal = 0;
 
 void __fastcall confirmHook(CharacterEditWindow* self, MyGUI::Widget* sender) {
-    bool ours = self == editor && preview != 0;
+    bool ours = self == editor && editCount != 0;
     if (ours) confirming = true;
     confirmOriginal(self, sender);
     if (ours) confirming = false;
@@ -78,21 +80,79 @@ bool setDraftAppearance(Character* c, GameDataCopyStandalone* data, GameData* ra
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
-void restoreEditorWorld() {
-    __try {
-        if (!previewWorld || !previewWorld->player) return;
-        previewWorld->player->stopTrackCharacter();
-        if (preview) previewWorld->player->objectSelected(preview, false);
-        if (previewWorld->player->camera) {
-            previewWorld->player->camera->teleport(Ogre::Vector3(previousCamera[0], previousCamera[1], previousCamera[2]));
-            Character* followed = resolveCharByHand(previousFollow[3], previousFollow[4], previousFollow[0], previousFollow[1], previousFollow[2]);
-            if (followed) previewWorld->player->startTrackCharacter(followed);
-        }
-        writeGameSpeed(previewWorld, previousSpeed, previousPause);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-}
 bool choiceLess(const CharacterChoice& a, const CharacterChoice& b) {
-    return a.startSid < b.startSid || (a.startSid == b.startSid && a.templateSid < b.templateSid);
+    return a.startSid < b.startSid;
+}
+// 与原生NEWGAME筛选相同：排除动物、不可玩或没有种族组的记录。
+bool playableRace(GameData* race) {
+    if (!race) return false;
+    RaceData* info = RaceData::getRaceData(race);
+    auto playable = race->bdata.find("playable");
+    auto animal = race->bdata.find("animal");
+    return info && info->raceGroup && playable != race->bdata.end() && playable->second &&
+        (animal == race->bdata.end() || !animal->second);
+}
+GameData* raceDataOf(Character* c) {
+    __try {
+        RaceData* race = c ? c->getRace() : 0;
+        return race ? race->data : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+// KenshiLib 导入库里没有的导出：按修饰名从 KenshiLib.dll 取桩，再换成真实地址
+void* klibExport(const char* name) {
+    HMODULE module = GetModuleHandleA("KenshiLib.dll");
+    void* stub = module ? (void*)GetProcAddress(module, name) : 0;
+    return stub ? (void*)KenshiLib::GetRealAddress(stub) : 0;
+}
+// TownList 实例没有导出。原版 newGameWithCharEdit 里先 mov rcx,[TownList 全局] 再调用
+// getAllTowsByGameData，从这条指令里取出全局地址。
+void* townList() {
+    static void** global = 0;
+    if (!global) {
+        unsigned char* f = (unsigned char*)klibExport("?newGameWithCharEdit@KingOfRenderThread@@QEAAXPEAVGameData@@@Z");
+        unsigned char* want = (unsigned char*)klibExport("?getAllTowsByGameData@TownList@@QEAAXAEAV?$lektor@PEAVTown@@@@PEAVGameData@@@Z");
+        __try {
+            for (unsigned int i = 0; f && want && !global && i < 0x2000; ++i) {
+                if (f[i] != 0x48 || f[i + 1] != 0x8B || f[i + 2] != 0x0D || f[i + 7] != 0xE8) continue;
+                unsigned char* call = f + i + 12 + *(int*)(f + i + 8);
+                if (call[0] == 0xE9) call += 5 + *(int*)(call + 1);
+                if (call == want) global = (void**)(f + i + 7 + *(int*)(f + i + 3));
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) { global = 0; }
+    }
+    __try { return global ? *global : 0; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+bool townPosition(Town* town, float out[3]) {
+    __try {
+        if (!town) return false;
+        Ogre::Vector3 p = town->getPosition();
+        out[0] = p.x; out[1] = p.y; out[2] = p.z;
+        return _finite(p.x) && _finite(p.z);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+bool spawnSquadTemplate(GameWorld* gw, GameData* squad, const float pos[3], const hand* none, unsigned int tab[2], unsigned int first[5]) {
+    __try {
+        Platoon* p = gw->theFactory->createRandomSquad(gw->player->getFaction(), Ogre::Vector3(pos[0], pos[1], pos[2]), 0, 0, 0,
+                                                       squad, 0, 0, 0, true, *none, 0, 1.0f, (SquadType)0, false);
+        if (!p) return false;
+        const hand& h = p->getHandle();
+        tab[0] = h.container; tab[1] = h.containerSerial;
+        if (!first[1] && p->activePlatoon && p->activePlatoon->squadleader)
+            readObjectHand(static_cast<RootObject*>(p->activePlatoon->squadleader), first);
+        return (tab[0] | tab[1]) != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+void completeStartResearch(GameWorld* gw, const Ogre::vector<GameDataReference>::type* list) {
+    typedef void (__fastcall* CompleteFn)(Research*, GameData*);
+    CompleteFn complete = (CompleteFn)klibExport("?completeResearch@Research@@QEAAXPEAVGameData@@@Z");
+    __try {
+        if (!complete || !list || !gw->player || !gw->player->technology) return;
+        for (size_t i = 0; i < list->size(); ++i) {
+            GameData* research = gw->gamedata.getData((*list)[i].sid);
+            if (research) complete(gw->player->technology, research);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 }
 
@@ -113,150 +173,173 @@ void characterChoices(GameWorld* gw, std::vector<CharacterChoice>& out) {
     if (!gw) return;
     lektor<GameData*> starts;
     gw->gamedata.getDataOfType(starts, NEW_GAME_STARTOFF);
-    std::set<std::pair<std::string, std::string> > seen;
     for (unsigned int i = 0; i < starts.size(); ++i) {
         GameData* start = starts[i];
-        if (!start) continue;
-        const Ogre::vector<GameDataReference>::type* squads = start->getReferenceListIfExists("squad");
-        if (!squads) continue;
-        for (size_t j = 0; j < squads->size(); ++j) {
-            GameData* target = gw->gamedata.getData((*squads)[j].sid);
-            if (!target) continue;
-            std::vector<GameData*> candidates;
-            if (target->type == CHARACTER) candidates.push_back(target);
-            else if (target->type == SQUAD_TEMPLATE) {
-                const char* lists[] = { "leader", "squad" };
-                for (int k = 0; k < 2; ++k) {
-                    const Ogre::vector<GameDataReference>::type* members = target->getReferenceListIfExists(lists[k]);
-                    if (!members) continue;
-                    for (size_t m = 0; m < members->size(); ++m) {
-                        GameData* member = gw->gamedata.getData((*members)[m].sid);
-                        if (member && member->type == CHARACTER) candidates.push_back(member);
-                    }
-                }
-            }
-            for (size_t k = 0; k < candidates.size(); ++k) {
-                // 没有显式种族的模板使用引擎默认值；排除只有动物或不可玩种族的伴随模板。
-                const Ogre::vector<GameDataReference>::type* races = candidates[k]->getReferenceListIfExists("race");
-                bool playableTemplate = !races || races->empty();
-                for (size_t r = 0; races && r < races->size() && !playableTemplate; ++r) {
-                    GameData* race = gw->gamedata.getData((*races)[r].sid, RACE);
-                    if (!race) continue;
-                    auto animal = race->bdata.find("animal");
-                    auto playable = race->bdata.find("playable");
-                    RaceData* info = RaceData::getRaceData(race);
-                    playableTemplate = info && info->raceGroup && playable != race->bdata.end() && playable->second &&
-                        (animal == race->bdata.end() || !animal->second);
-                }
-                if (!playableTemplate) continue;
-                if (!seen.insert(std::make_pair(start->stringID, candidates[k]->stringID)).second) continue;
-                CharacterChoice c; c.startSid = start->stringID; c.templateSid = candidates[k]->stringID;
-                c.label = start->name + " / " + candidates[k]->name; out.push_back(c);
-            }
-        }
+        // 没有开局队伍的记录生成不出角色，不列出
+        const Ogre::vector<GameDataReference>::type* squads = start ? start->getReferenceListIfExists("squad") : 0;
+        if (!squads || squads->empty()) continue;
+        CharacterChoice c; c.startSid = start->stringID; c.label = start->name;
+        out.push_back(c);
     }
     std::sort(out.begin(), out.end(), choiceLess);
 }
 
-bool beginCharacterCreation(GameWorld* gw, const CharacterChoice& choice) {
-    if (preview || !gw || saveMgrSignal(0) != 0 || !characterCreationHooks() || !::gui || ::gui->characterEditor) return false;
-    GameData* tmpl = findItemTemplateImpl(gw, choice.templateSid.c_str(), CHARACTER);
-    GameData* start = findItemTemplateImpl(gw, choice.startSid.c_str(), NEW_GAME_STARTOFF);
-    if (!tmpl || !start || !cameraCenter(gw, previousCamera)) return false;
-    memset(previousFollow, 0, sizeof(previousFollow));
-    if (gw->player && gw->player->camera) {
-        const hand& h = gw->player->camera->getFollowObject();
-        previousFollow[0] = h.type; previousFollow[1] = h.container; previousFollow[2] = h.containerSerial;
-        previousFollow[3] = h.index; previousFollow[4] = h.serial;
+bool startPosition(GameWorld* gw, const std::string& startSid, float out[3]) {
+    GameData* start = gw ? findItemTemplateImpl(gw, startSid.c_str(), NEW_GAME_STARTOFF) : 0;
+    if (!start) return false;
+    auto forced = start->bdata.find("force start pos");
+    auto x = start->idata.find("start pos X");
+    auto z = start->idata.find("start pos Z");
+    if (forced != start->bdata.end() && forced->second && x != start->idata.end() && z != start->idata.end()) {
+        out[0] = (float)x->second; out[1] = 0.0f; out[2] = (float)z->second;
+        return true;
     }
+    typedef void (__fastcall* TownsFn)(void* list, lektor<Town*>* found, GameData* town);
+    static TownsFn townsOf = (TownsFn)klibExport("?getAllTowsByGameData@TownList@@QEAAXAEAV?$lektor@PEAVTown@@@@PEAVGameData@@@Z");
+    void* list = townList();
+    const Ogre::vector<GameDataReference>::type* towns = start->getReferenceListIfExists("town");
+    lektor<Town*> found;
+    for (size_t i = 0; towns && list && townsOf && i < towns->size(); ++i) {
+        GameData* town = gw->gamedata.getData((*towns)[i].sid);
+        if (town) townsOf(list, &found, town);
+    }
+    return found.size() && townPosition(found[(unsigned int)rand() % found.size()], out);
+}
+
+bool createStartSquads(GameWorld* gw, const std::string& startSid, const float at[3],
+                       std::vector<std::pair<unsigned int, unsigned int> >& tabs, unsigned int first[5], int* money) {
+    tabs.clear(); memset(first, 0, sizeof(unsigned int) * 5); *money = 0;
+    GameData* start = gw ? findItemTemplateImpl(gw, startSid.c_str(), NEW_GAME_STARTOFF) : 0;
+    const Ogre::vector<GameDataReference>::type* squads = start ? start->getReferenceListIfExists("squad") : 0;
+    if (!squads || squads->empty() || !gw->player || !gw->theFactory) return false;
+    float pos[3] = { at[0], at[1], at[2] };
+    if (g_terrainHeightFn) pos[1] = g_terrainHeightFn(pos[0], pos[2]);
+    hand none;
+    unsigned int people[2] = { 0, 0 };
+    for (size_t i = 0; i < squads->size(); ++i) {
+        GameData* data = gw->gamedata.getData((*squads)[i].sid);
+        if (!data) continue;
+        unsigned int tab[2] = { 0, 0 };
+        if (data->type == SQUAD_TEMPLATE) {
+            if (spawnSquadTemplate(gw, data, pos, &none, tab, first)) tabs.push_back(std::make_pair(tab[0], tab[1]));
+            continue;
+        }
+        if (data->type != CHARACTER) continue;
+        // 角色条目按份数（0 当 1）放进同一支新队，各自在出生点周围 ±50 散开，与原版一致
+        if (!(people[0] | people[1])) {
+            if (!createPlayerSquad(gw, people)) continue;
+            tabs.push_back(std::make_pair(people[0], people[1]));
+        }
+        unsigned int target[5] = { 0, people[0], people[1], 0, 0 };
+        int copies = (*squads)[i].values.value[0] > 0 ? (*squads)[i].values.value[0] : 1;
+        for (int k = 0; k < copies && k < (int)EDIT_MAX; ++k) {
+            float p[3] = { pos[0] + (float)(rand() % 101 - 50), pos[1], pos[2] + (float)(rand() % 101 - 50) };
+            Character* c = createBody(gw, data, p);
+            if (!c) continue;
+            if (!joinPlayerSquadAt(gw, c, target)) { despawnProxyNpc(gw, c); continue; }
+            if (!first[1]) readObjectHand(static_cast<RootObject*>(c), first);
+        }
+    }
+    completeStartResearch(gw, start->getReferenceListIfExists("research"));
+    auto cash = start->idata.find("money");
+    if (cash != start->idata.end()) *money = cash->second;
+    char b[200];
+    _snprintf(b, sizeof(b) - 1, "[chargen] game start '%s' spawned squads=%u at %.0f,%.0f money=%d",
+              startSid.c_str(), (unsigned)tabs.size(), pos[0], pos[2], *money);
+    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    return !tabs.empty() && first[1] != 0;
+}
+
+bool beginStartEditing(GameWorld* gw, const std::vector<std::pair<unsigned int, unsigned int> >& tabs, const std::string& startSid) {
+    if (editCount || !gw || !gw->player || tabs.empty() || !characterCreationHooks() || !::gui || ::gui->characterEditor) return false;
+    GameData* start = findItemTemplateImpl(gw, startSid.c_str(), NEW_GAME_STARTOFF);
+    if (!start) return false;
+    std::vector<Character*> chars;
+    const lektor<Character*>& all = gw->player->playerCharacters;
+    for (unsigned int i = 0; i < all.size() && chars.size() < EDIT_MAX; ++i) {
+        unsigned int h[5];
+        if (!all[i] || !readObjectHand(static_cast<RootObject*>(all[i]), h)) continue;
+        if (std::find(tabs.begin(), tabs.end(), std::make_pair(h[1], h[2])) == tabs.end()) continue;
+        if (!playableRace(raceDataOf(all[i]))) continue;
+        memcpy(editHands[chars.size()], h, sizeof(h));
+        chars.push_back(all[i]);
+    }
+    if (chars.empty()) return false;
     previousSpeed = g_speedIntentSeeded ? g_speedIntentMult : 1.0f;
     previousPause = g_speedIntentSeeded ? g_speedIntentPaused : false;
-    previewWorld = gw; previewChoice = choice; editResult = 0;
-    preview = createBody(gw, tmpl, previousCamera);
-    if (!preview) { previewWorld = 0; return false; }
-    detachFromTownAI(preview); clearGoals(preview);
     // showCharacterEditor 按值接收 lektor，返回前会释放 stuff（MSVCR100 free），所以必须放在 CRT 堆上交给它
-    lektor<Character*> chars; chars.stuff = (Character**)malloc(sizeof(Character*));
-    if (!chars.stuff) { cancelCharacterCreation(true); return false; }
-    chars.stuff[0] = preview; chars.count = chars.maxSize = 1;
+    lektor<Character*> list; list.stuff = (Character**)malloc(sizeof(Character*) * chars.size());
+    if (!list.stuff) return false;
+    for (size_t i = 0; i < chars.size(); ++i) list.stuff[i] = chars[i];
+    list.count = list.maxSize = (uint32_t)chars.size();
+    editCount = (unsigned int)chars.size(); editWorld = gw; editStart = startSid; editResult = 0; confirming = false;
+    cameraFocusOn(gw, chars[0]);
     const Ogre::vector<GameDataReference>::type* races = start->getReferenceListIfExists("force race");
-    if (!showEditor(gw, &chars, races && !races->empty() ? races : 0)) { cancelCharacterCreation(true); return false; }
-    coop::logLine("[chargen] native NEWGAME editor opened; preview excluded from replication");
+    if (!showEditor(gw, &list, races && !races->empty() ? races : 0)) { cancelCharacterCreation(true); return false; }
+    char b[160];
+    _snprintf(b, sizeof(b) - 1, "[chargen] native NEWGAME editor opened for %u starting characters", editCount);
+    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
     return true;
 }
 
-int pollCharacterCreation(GameWorld* gw, CharacterDraft& out) {
-    if (preview && gw != previewWorld) { cancelCharacterCreation(false); return -1; }
-    if (preview && editor && (!::gui || ::gui->characterEditor != editor)) { editor = 0; editResult = -1; }
-    if (preview && editor) writeGameSpeed(previewWorld, previousSpeed, true);
-    if (!preview || editor || !editResult) return 0;
+int pollCharacterCreation(GameWorld* gw, std::vector<StartAppearance>& out) {
+    out.clear();
+    if (editCount && gw != editWorld) { cancelCharacterCreation(false); return -1; }
+    if (editCount && editor && (!::gui || ::gui->characterEditor != editor)) { editor = 0; editResult = -1; }
+    if (editCount && editor) writeGameSpeed(editWorld, previousSpeed, true);
+    if (!editCount || editor || !editResult) return 0;
     int result = editResult;
-    if (result > 0) {
-        GameDataCopyStandalone* data = appearanceOf(preview);
-        if (!data) result = -2;
-        else {
-            CharacterDraft draft;
-            draft.startSid = previewChoice.startSid; draft.templateSid = previewChoice.templateSid;
-            draft.name = preview->getName();
-            // 保留原生外观的八类值；不复制模板属性、装备或资金。
-            #define CAPTURE_APPEARANCE(MAP, KIND, BODY) \
-            for (size_t unused = 0; unused < 1; ++unused) { \
-                for (auto it = data->MAP.begin(); it != data->MAP.end(); ++it) { \
-                    AppearanceValue value; value.kind = KIND; value.key = it->first; BODY; draft.values.push_back(value); \
-                } \
-            }
-            CAPTURE_APPEARANCE(bdata, AV_BOOL, u8 b = it->second ? 1 : 0; draftAppend(value.bytes, &b, 1));
-            CAPTURE_APPEARANCE(idata, AV_INT, draftAppend(value.bytes, &it->second, 4));
-            CAPTURE_APPEARANCE(fdata, AV_FLOAT, draftAppend(value.bytes, &it->second, 4));
-            CAPTURE_APPEARANCE(sdata, AV_STRING, draftAppend(value.bytes, it->second.data(), (unsigned int)it->second.size()));
-            CAPTURE_APPEARANCE(filesdata, AV_FILE, draftAppend(value.bytes, it->second.data(), (unsigned int)it->second.size()));
-            CAPTURE_APPEARANCE(vecdata, AV_VECTOR, draftAppend(value.bytes, &it->second.x, 12));
-            CAPTURE_APPEARANCE(quatdata, AV_QUATERNION, draftAppend(value.bytes, &it->second.w, 16));
-            #undef CAPTURE_APPEARANCE
-            for (auto it = data->objectReferences.begin(); it != data->objectReferences.end(); ++it) {
-                AppearanceValue v; v.kind = AV_REFS; v.key = it->first;
-                u16 count = (u16)it->second.size(); draftAppend(v.bytes, &count, 2);
-                for (size_t i = 0; i < it->second.size(); ++i) {
-                    draftString(v.bytes, it->second[i].sid); draftAppend(v.bytes, it->second[i].values.value, 12);
-                }
-                draft.values.push_back(v);
-            }
-            std::vector<u8> encoded;
-            if (encodeCharacterDraft(draft, encoded)) out = draft;
-            else result = -2;
+    for (unsigned int i = 0; result > 0 && i < editCount; ++i) {
+        Character* c = resolveCharByHand(editHands[i][3], editHands[i][4], editHands[i][0], editHands[i][1], editHands[i][2]);
+        GameDataCopyStandalone* data = appearanceOf(c);
+        if (!data) continue;
+        StartAppearance a;
+        memcpy(a.hand, editHands[i], sizeof(a.hand));
+        CharacterDraft& draft = a.draft;
+        draft.startSid = editStart;
+        draft.templateSid = c->data ? c->data->stringID : editStart;
+        draft.name = c->getName();
+        // 保留原生外观的八类值；不复制模板属性、装备或资金。
+        #define CAPTURE_APPEARANCE(MAP, KIND, BODY) \
+        for (size_t unused = 0; unused < 1; ++unused) { \
+            for (auto it = data->MAP.begin(); it != data->MAP.end(); ++it) { \
+                AppearanceValue value; value.kind = KIND; value.key = it->first; BODY; draft.values.push_back(value); \
+            } \
         }
+        CAPTURE_APPEARANCE(bdata, AV_BOOL, u8 b = it->second ? 1 : 0; draftAppend(value.bytes, &b, 1));
+        CAPTURE_APPEARANCE(idata, AV_INT, draftAppend(value.bytes, &it->second, 4));
+        CAPTURE_APPEARANCE(fdata, AV_FLOAT, draftAppend(value.bytes, &it->second, 4));
+        CAPTURE_APPEARANCE(sdata, AV_STRING, draftAppend(value.bytes, it->second.data(), (unsigned int)it->second.size()));
+        CAPTURE_APPEARANCE(filesdata, AV_FILE, draftAppend(value.bytes, it->second.data(), (unsigned int)it->second.size()));
+        CAPTURE_APPEARANCE(vecdata, AV_VECTOR, draftAppend(value.bytes, &it->second.x, 12));
+        CAPTURE_APPEARANCE(quatdata, AV_QUATERNION, draftAppend(value.bytes, &it->second.w, 16));
+        #undef CAPTURE_APPEARANCE
+        for (auto it = data->objectReferences.begin(); it != data->objectReferences.end(); ++it) {
+            AppearanceValue v; v.kind = AV_REFS; v.key = it->first;
+            u16 count = (u16)it->second.size(); draftAppend(v.bytes, &count, 2);
+            for (size_t j = 0; j < it->second.size(); ++j) {
+                draftString(v.bytes, it->second[j].sid); draftAppend(v.bytes, it->second[j].values.value, 12);
+            }
+            draft.values.push_back(v);
+        }
+        std::vector<u8> encoded;
+        if (encodeCharacterDraft(draft, encoded)) out.push_back(a);
     }
-    if (!cancelCharacterCreation(true)) return -3;
+    if (result > 0 && out.empty()) result = -2;
+    cancelCharacterCreation(true);
     return result;
 }
 
-bool cancelCharacterCreation(bool worldAlive, bool resumeSave) {
-    if (worldAlive && previewWorld) {
+bool cancelCharacterCreation(bool worldAlive) {
+    if (worldAlive && editWorld) {
         if (editor && ::gui && ::gui->characterEditor == editor) ::gui->closeCharacterEditor();
-        restoreEditorWorld();
-        if (preview && !despawnProxyNpc(previewWorld, preview)) {
-            editResult = -2;
-            coop::logErrLine("[chargen] preview destruction failed; keeping save and replication exclusion until retry");
-            return false;
-        }
+        writeGameSpeed(editWorld, previousSpeed, previousPause);
     }
-    preview = 0; editor = 0; previewWorld = 0; editResult = 0; confirming = false;
-    if (worldAlive && resumeSave && !deferredSave.empty()) {
-        std::string name = deferredSave; deferredSave.clear();
-        coop::logLine("[chargen] resuming deferred save after preview cleanup");
-        saveGameAs(name);
-    } else deferredSave.clear();
+    editor = 0; editWorld = 0; editResult = 0; confirming = false; editCount = 0; editStart.clear();
     return true;
 }
 
-bool characterPreview(const Character* c) { return preview && (!c || c == preview); }
-
-bool deferCharacterSave(const std::string* name, bool autosave) {
-    if (!preview || !name || name->empty()) return false;
-    if (deferredSave.empty() || deferredAuto || !autosave) { deferredSave = *name; deferredAuto = autosave; }
-    coop::logLine("[chargen] save deferred while temporary editor character exists");
-    return true;
-}
+bool characterEditing() { return editCount != 0; }
 
 unsigned int playerTabSize(GameWorld* gw, unsigned int container, unsigned int serial) {
     __try {
@@ -274,11 +357,8 @@ unsigned int playerTabSize(GameWorld* gw, unsigned int container, unsigned int s
 
 bool applyCharacterDraft(GameWorld* gw, Character* c, const CharacterDraft& draft) {
     if (!gw || !c || !validCharacterDraft(draft) || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, draft.name.data(), (int)draft.name.size(), 0, 0)) return false;
-    std::vector<CharacterChoice> choices; characterChoices(gw, choices);
-    bool allowed = false;
-    for (size_t i = 0; i < choices.size(); ++i)
-        if (choices[i].startSid == draft.startSid && choices[i].templateSid == draft.templateSid) { allowed = true; break; }
-    if (!allowed) { coop::logErrLine("[chargen] draft template is not referenced by a game start"); return false; }
+    GameData* start = findItemTemplateImpl(gw, draft.startSid.c_str(), NEW_GAME_STARTOFF);
+    if (!start) { coop::logErrLine("[chargen] draft start is not a loaded game start"); return false; }
     GameDataCopyStandalone* data = new GameDataCopyStandalone();
     data->initialise(CHARACTER_APPEARANCE, false);
     for (size_t i = 0; i < draft.values.size(); ++i) {
@@ -301,20 +381,14 @@ bool applyCharacterDraft(GameWorld* gw, Character* c, const CharacterDraft& draf
         }
     }
     GameData* race = gw->gamedata.getData(data->getFromList("race", 0), RACE);
-    GameData* start = gw->gamedata.getData(draft.startSid, NEW_GAME_STARTOFF);
-    const Ogre::vector<GameDataReference>::type* limits = start ? start->getReferenceListIfExists("force race") : 0;
+    const Ogre::vector<GameDataReference>::type* limits = start->getReferenceListIfExists("force race");
     bool validRace = race != 0;
     if (limits && !limits->empty()) {
         validRace = false;
         for (size_t i = 0; race && i < limits->size(); ++i) if ((*limits)[i].sid == race->stringID) validRace = true;
     }
     if (validRace) {
-        // 与原生NEWGAME筛选相同：排除动物、不可玩或没有种族组的记录。
-        RaceData* raceInfo = RaceData::getRaceData(race);
-        auto playable = race->bdata.find("playable");
-        auto animal = race->bdata.find("animal");
-        validRace = raceInfo && raceInfo->raceGroup && playable != race->bdata.end() && playable->second &&
-            (animal == race->bdata.end() || !animal->second);
+        validRace = playableRace(race);
         AppearanceManager* manager = AppearanceManager::getInstance();
         if (validRace && manager) manager->cleanValidateAppearanceData(data);
     }
@@ -331,29 +405,5 @@ bool applyCharacterDraft(GameWorld* gw, Character* c, const CharacterDraft& draf
     bool applied = current && setDraftAppearance(c, current, race, &draft.name);
     if (!applied) coop::logErrLine("[chargen] native appearance apply failed");
     return applied;
-}
-
-bool createDraftCharacter(GameWorld* gw, const CharacterDraft& draft, const float* position, unsigned int out[5]) {
-    if (!gw || !out || !validCharacterDraft(draft)) return false;
-    GameData* tmpl = findItemTemplateImpl(gw, draft.templateSid.c_str(), CHARACTER);
-    float at[3] = { 0, 0, 0 };
-    Character* ld = leader(gw);
-    if ((!ld || !readPos(ld, &at[0], &at[1], &at[2])) && !cameraCenter(gw, at)) return false;
-    if (!_finite(at[0]) || !_finite(at[1]) || !_finite(at[2]) || !isZoneLoadedAt(gw, at[0], at[1], at[2])) return false;
-    if (position && _finite(position[0]) && _finite(position[2])) {
-        float dx = position[0] - at[0], dz = position[2] - at[2];
-        if (dx * dx + dz * dz < 40000.0f && isZoneLoadedAt(gw, position[0], at[1], position[2])) { at[0] = position[0]; at[2] = position[2]; }
-    }
-    Character* c = createBody(gw, tmpl, at);
-    if (!c) return false;
-    if (!applyCharacterDraft(gw, c, draft)) { despawnProxyNpc(gw, c); return false; }
-    unsigned int tab[2] = { 0, 0 };
-    if (!createPlayerSquad(gw, tab)) { despawnProxyNpc(gw, c); return false; }
-    unsigned int target[5] = { 0, tab[0], tab[1], 0, 0 };
-    if (!joinPlayerSquadAt(gw, c, target) || !readObjectHand(static_cast<RootObject*>(c), out) || out[1] != tab[0] || out[2] != tab[1]) {
-        despawnProxyNpc(gw, c); return false;
-    }
-    coop::logLine("[chargen] authoritative character created in new player squad");
-    return true;
 }
 } }

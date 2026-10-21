@@ -24,7 +24,7 @@ namespace coop {
 // capture time - the interp buffer indexes on it (mapped into the local clock)
 // instead of the arrival time, so path jitter stays out of the snapshot spacing.
 struct InboundCharacterRequest { CharacterRequestHeader header; std::vector<u8> data; };
-struct InboundCharacterAppearance { CharacterAppearanceHeader header; std::vector<u8> data; CharacterDraft draft; };
+struct InboundCharacterAppearance { CharacterAppearanceHeader header; std::vector<u8> data; CharacterDraft draft; u32 ownerId; };
 
 struct InboundEntity {
     u32         ownerId;
@@ -980,8 +980,8 @@ public:
     void drainCharacterRequests(std::deque<InboundCharacterRequest>& out) {
         EnterCriticalSection(&cs_); out.swap(characterRequests_); LeaveCriticalSection(&cs_);
     }
-    void pushCharacterAppearance(const CharacterAppearanceHeader& h, const u8* bytes) {
-        InboundCharacterAppearance p; p.header = h; p.data.assign(bytes, bytes + h.bytes);
+    void pushCharacterAppearance(u32 ownerId, const CharacterAppearanceHeader& h, const u8* bytes) {
+        InboundCharacterAppearance p; p.header = h; p.ownerId = ownerId; p.data.assign(bytes, bytes + h.bytes);
         EnterCriticalSection(&cs_); characterAppearances_.push_back(p); LeaveCriticalSection(&cs_);
     }
     void drainCharacterAppearances(std::deque<InboundCharacterAppearance>& out) {

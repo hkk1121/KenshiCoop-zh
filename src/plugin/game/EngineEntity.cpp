@@ -171,7 +171,6 @@ namespace {
 // SEH-guarded capture of a single Character into an EntityState. Kept in its own
 // __try frame (no C++ unwinding objects) so a bad pointer degrades to a skip.
 bool captureOne(Character* c, EntityState* e) {
-    if (characterPreview(c)) return false;
     __try {
         const hand& h = c->handle;
         e->hType            = (u32)h.type;

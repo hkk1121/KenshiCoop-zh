@@ -272,7 +272,6 @@ coop::u64 g_characterWorld = 0;
 coop::u32 g_characterRequestId = 0;
 coop::CharacterRequestHeader g_characterWait = { 0 };
 DWORD g_characterWaitTick = 0, g_characterAppearanceTick = 0;
-float g_characterPosition[3] = { 0, 0, 0 };
 std::deque<coop::InboundCharacterRequest> g_characterRequests;
 std::map<coop::u64, coop::CharacterReplyPacket> g_characterResults;
 std::vector<coop::InboundCharacterAppearance> g_characterAppearances;
@@ -283,6 +282,20 @@ coop::CharacterReplyPacket g_characterPush = { 0 };
 coop::u64 g_characterEditWorld = 0;
 coop::u32 g_characterEditConnection = 0;
 GameWorld* g_characterChoiceWorld = 0;
+// 本机申请的开局（发请求时记下）；创建成功后要打开捏人界面的开局（读档后仍保留，打开后清空）
+std::string g_characterRequestedStart, g_characterEditStart, g_characterChoiceLabel;
+// 主机：正在等出生地加载的开局请求
+coop::InboundCharacterRequest g_characterStartRequest;
+float g_characterStartPos[3] = { 0, 0, 0 };
+DWORD g_characterStartTick = 0;
+bool g_characterStartWaiting = false;
+// 主机：各人本次开局新建的编队，只接受申请人对这些编队里角色提交的外观
+struct StartEditable {
+    std::string start;
+    coop::u32 owner, connection;
+    std::vector<std::pair<unsigned int, unsigned int> > tabs;
+};
+std::map<coop::u64, StartEditable> g_characterEditable;
 
 // Log to BOTH our dedicated per-line-flushed file (what the test runner reads)
 // and the engine's kenshi.log (handy when attached live).
@@ -319,6 +332,7 @@ void sessionResetForUi() {
     g_characterPending = false; g_characterChoiceWorld = 0; g_characterAction = -1;
     g_characterRequests.clear(); g_characterAppearances.clear(); g_characterResults.clear(); g_characterWorld = 0;
     g_characterSaveInFlight = false; g_characterPush.result = 0;
+    g_characterEditable.clear(); g_characterStartWaiting = false; g_characterEditStart.clear(); g_characterRequestedStart.clear();
     std::deque<coop::CharacterReplyPacket> characterReplies; g_inbound.drainCharacterReplies(characterReplies);
     g_peersPresent.clear();
     g_peerBodyRepushDue.clear();
@@ -346,6 +360,7 @@ void sessionResetForWorldReload() {
     g_characterPending = false; g_characterChoiceWorld = 0; g_characterAction = -1;
     g_characterRequests.clear(); g_characterAppearances.clear(); g_characterResults.clear(); g_characterWorld = 0;
     g_characterSaveInFlight = false; g_characterPush.result = 0;
+    g_characterEditable.clear(); g_characterStartWaiting = false;
     g_peerBodyRepushDue.clear();
     g_repl.resetSession();
     g_repl.resetOwnersForWorld();
@@ -1267,8 +1282,8 @@ void coopPanelDrive(GameWorld* gw) {
     ps.authGrantedMine = g_repl.squadAuthGrantedMine();
     ps.authBorrowed    = g_repl.squadAuthBorrowed();
     ps.canCreateCharacter = gw && g_characterAvailable;
-    ps.editingCharacter = coop::engine::characterPreview();
-    ps.characterTemplate = g_characterChoices.empty() ? "" : g_characterChoices[g_characterChoice].label.c_str();
+    ps.editingCharacter = coop::engine::characterEditing();
+    ps.characterTemplate = g_characterChoiceLabel.c_str();
     ps.characterStatus = g_characterStatus.c_str();
     // 授权事件的一次性提示（收到申请 / 同意 / 拒绝 / 收回 / 超时）→ 状态栏 4 秒。
     // 分支里直接写 tr("字面量")，让 check_lang.py 能扫到（与连接/断开提示同一写法）。
@@ -3246,77 +3261,76 @@ void publishCharacterAppearance(const coop::InboundCharacterAppearance& appearan
 void driveCharacterCreation(GameWorld* gw, bool worldLive) {
     bool online = g_net.isRunning() && (g_cfg.isHost || !g_peersPresent.empty());
     if (!worldLive || !online) {
-        if (coop::engine::characterPreview()) {
+        if (coop::engine::characterEditing()) {
             coop::engine::cancelCharacterCreation(worldLive);
             g_characterStatus = coop::tr("Character creation cancelled");
         }
         g_characterAvailable = false; g_characterChoiceWorld = 0; g_characterChoices.clear();
-        g_characterPending = false; g_characterAction = -1; g_characterRequests.clear();
+        g_characterPending = false; g_characterAction = -1; g_characterRequests.clear(); g_characterStartWaiting = false;
         return;
     }
     coop::u64 world = g_repl.ownershipWorld();
     if (world && world != g_characterWorld) {
         g_characterWorld = world; g_characterResults.clear(); g_characterAppearances.clear();
-        g_characterPending = false; g_characterRequests.clear();
+        g_characterPending = false; g_characterRequests.clear(); g_characterEditable.clear(); g_characterStartWaiting = false;
     }
     if (g_characterChoiceWorld != gw) {
         coop::engine::characterChoices(gw, g_characterChoices); g_characterChoice = 0; g_characterChoiceWorld = gw;
     }
-    g_characterAvailable = g_cfg.saveSync && g_cfg.loadSync && g_cfg.squadSync && !g_characterPending && !coop::engine::characterPreview() &&
-        !g_bootstrapArmed && !coop::savexfer::watching() && !coop::savexfer::sending() && coop::engine::saveMgrSignal(0) == 0 &&
-        g_repl.characterConnection(g_net.localId()) && g_repl.canCreateCharacter(gw, g_net.localId());
-    if (coop::engine::characterPreview() && (world != g_characterEditWorld ||
+    g_characterAvailable = g_cfg.saveSync && g_cfg.loadSync && g_cfg.squadSync && !g_characterPending && !coop::engine::characterEditing() &&
+        g_characterEditStart.empty() && !g_bootstrapArmed && !coop::savexfer::watching() && !coop::savexfer::sending() &&
+        coop::engine::saveMgrSignal(0) == 0 && g_repl.characterConnection(g_net.localId()) && g_repl.canCreateCharacter(gw, g_net.localId());
+    if (coop::engine::characterEditing() && (world != g_characterEditWorld ||
         g_repl.characterConnection(g_net.localId()) != g_characterEditConnection)) {
         coop::engine::cancelCharacterCreation(true);
         g_characterStatus = coop::tr("Session changed; character creation cancelled");
     }
     int action = g_characterAction; g_characterAction = -1;
-    if (coop::engine::characterPreview() && action == 1) {
-        g_characterStatus = coop::engine::cancelCharacterCreation(true) ? coop::tr("Character creation cancelled") :
-            coop::tr("Preview cleanup failed; saving is deferred until cleanup succeeds");
+    if (coop::engine::characterEditing() && action == 1) {
+        coop::engine::cancelCharacterCreation(true);
+        g_characterStatus = coop::tr("Character editing cancelled; starting characters keep their template looks");
         action = -1;
     } else if (g_characterAvailable && !g_characterChoices.empty()) {
         if (action == 0) g_characterChoice = (g_characterChoice + 1) % (unsigned int)g_characterChoices.size();
         else if (action == 1) {
-            g_characterEditWorld = world; g_characterEditConnection = g_repl.characterConnection(g_net.localId());
-            coop::engine::cameraCenter(gw, g_characterPosition);
-            if (coop::engine::beginCharacterCreation(gw, g_characterChoices[g_characterChoice]))
-                g_characterStatus = coop::tr("Edit your character, confirm in the editor; F2 to cancel");
-            else g_characterStatus = coop::tr("Cannot open character editor");
+            // 请求里只带开局 SID；生成、出生点、资金都由主机按开局决定
+            const std::string& start = g_characterChoices[g_characterChoice].startSid;
+            coop::InboundCharacterRequest request; memset(&request.header, 0, sizeof(request.header));
+            coop::CharacterRequestHeader& h = request.header;
+            h.type = (coop::u8)coop::PKT_CHARACTER_REQUEST; h.ownerId = g_net.localId();
+            h.playerId = g_repl.playerIdentity(); h.worldId = world; h.authEpoch = g_repl.ownershipEpoch();
+            h.connectionId = g_repl.characterConnection(h.ownerId); h.requestId = ++g_characterRequestId;
+            request.data.assign(start.begin(), start.end());
+            if (!request.data.empty() && g_repl.characterRequestCurrent(h)) {
+                h.bytes = (coop::u32)request.data.size();
+                g_characterWait = h; g_characterPending = true; g_characterWaitTick = GetTickCount();
+                g_characterRequestedStart = start;
+                g_characterStatus = coop::tr("Waiting for host to create the game start");
+                if (g_cfg.isHost) g_characterRequests.push_back(request);
+                else {
+                    std::vector<coop::u8> bytes; coop::draftAppend(bytes, &h, sizeof(h));
+                    coop::draftAppend(bytes, &request.data[0], h.bytes);
+                    g_net.queueCharacterPacket(0, bytes);
+                }
+                char b[200]; _snprintf(b, sizeof(b) - 1, "[chargen] game start request '%s' submitted to authoritative creation queue", start.c_str());
+                b[sizeof(b) - 1] = '\0'; coopLog(b);
+            }
         }
     }
-    if (action == 1 && !g_characterAvailable && !coop::engine::characterPreview()) {
-        if (g_characterPending) g_characterStatus = coop::tr("A character creation request is already pending");
+    if (action == 1 && !g_characterAvailable && !coop::engine::characterEditing()) {
+        if (g_characterPending || !g_characterEditStart.empty()) g_characterStatus = coop::tr("A character creation request is already pending");
         else if (!g_cfg.saveSync || !g_cfg.loadSync || !g_cfg.squadSync) g_characterStatus = coop::tr("Enable save, load and squad sync before creating a character");
         else if (g_bootstrapArmed || coop::savexfer::watching() || coop::savexfer::sending() || coop::engine::saveMgrSignal(0) != 0)
             g_characterStatus = coop::tr("Wait for the current save or transfer to finish");
         else if (!world) g_characterStatus = coop::tr("Load the host save and wait for ownership synchronization");
         else g_characterStatus = coop::tr("Creating a character requires that you own no characters");
     }
-    if (action == 1 && g_characterAvailable && g_characterChoices.empty()) g_characterStatus = coop::tr("No character templates found in loaded game starts");
-    coop::CharacterDraft draft;
-    int result = coop::engine::pollCharacterCreation(gw, draft);
-    if (result < 0) g_characterStatus = result == -3 ? coop::tr("Preview cleanup failed; saving is deferred until cleanup succeeds") :
-        result == -1 ? coop::tr("Character creation cancelled") : coop::tr("Invalid character appearance");
-    if (result == 1) {
-        coop::InboundCharacterRequest request; memset(&request.header, 0, sizeof(request.header));
-        coop::CharacterRequestHeader& h = request.header;
-        h.type = (coop::u8)coop::PKT_CHARACTER_REQUEST; h.ownerId = g_net.localId();
-        h.playerId = g_repl.playerIdentity(); h.worldId = world; h.authEpoch = g_repl.ownershipEpoch();
-        h.connectionId = g_repl.characterConnection(h.ownerId); h.requestId = ++g_characterRequestId;
-        memcpy(h.position, g_characterPosition, sizeof(h.position));
-        if (coop::encodeCharacterDraft(draft, request.data) && g_repl.characterRequestCurrent(h)) {
-            h.bytes = (coop::u32)request.data.size();
-            g_characterWait = h; g_characterPending = true; g_characterWaitTick = GetTickCount();
-            g_characterStatus = coop::tr("Waiting for host to create and save character");
-            if (g_cfg.isHost) g_characterRequests.push_back(request);
-            else {
-                std::vector<coop::u8> bytes; coop::draftAppend(bytes, &h, sizeof(h));
-                coop::draftAppend(bytes, &request.data[0], h.bytes);
-                g_net.queueCharacterPacket(0, bytes);
-            }
-            coopLog("[chargen] confirmed draft submitted to authoritative creation queue");
-        } else g_characterStatus = coop::tr("Invalid character appearance");
+    if (action == 1 && g_characterAvailable && g_characterChoices.empty()) g_characterStatus = coop::tr("No game starts found");
+    g_characterChoiceLabel.clear();
+    if (!g_characterChoices.empty()) {
+        char n[32]; _snprintf(n, sizeof(n) - 1, " (%u/%u)", g_characterChoice + 1, (unsigned int)g_characterChoices.size());
+        n[sizeof(n) - 1] = '\0';
+        g_characterChoiceLabel = g_characterChoices[g_characterChoice].label + n;
     }
     std::deque<coop::CharacterReplyPacket> replies; g_inbound.drainCharacterReplies(replies);
     for (size_t i = 0; i < replies.size(); ++i) {
@@ -3324,6 +3338,8 @@ void driveCharacterCreation(GameWorld* gw, bool worldLive) {
         if (p.requestId != g_characterWait.requestId || p.playerId != g_repl.playerIdentity() ||
             p.connectionId != g_repl.characterConnection(g_net.localId()) || p.worldId != g_characterWait.worldId) continue;
         g_characterPending = false;
+        // 开局已生成：读到带新编队的存档后自动打开捏人界面
+        if (p.result == coop::CHARACTER_CREATED || p.result == coop::CHARACTER_SAVED) g_characterEditStart = g_characterRequestedStart;
         if (p.result == coop::CHARACTER_SAVED) g_characterStatus = coop::tr("Character saved with permanent ownership");
         else if (p.result == coop::CHARACTER_CREATED) g_characterStatus = coop::tr("Character created and save requested");
         else if (p.result == coop::CHARACTER_SAVE_FAILED) g_characterStatus = coop::tr("Character exists, but saving failed; save on host, then reconnect");
@@ -3334,6 +3350,18 @@ void driveCharacterCreation(GameWorld* gw, bool worldLive) {
     }
     if (g_characterPending && GetTickCount() - g_characterWaitTick > 120000) {
         g_characterStatus = coop::tr("Host response timed out; wait or reconnect to check character ownership");
+    }
+    // 申请人：自己名下的新编队出现在本机世界后打开捏人界面（加入方要等读完主机推送的存档）
+    if (!g_characterEditStart.empty() && world && !coop::engine::characterEditing()) {
+        std::vector<std::pair<unsigned int, unsigned int> > mine;
+        const std::map<std::pair<coop::u32, coop::u32>, coop::OwnerRow>& owners = g_repl.owners();
+        for (std::map<std::pair<coop::u32, coop::u32>, coop::OwnerRow>::const_iterator it = owners.begin(); it != owners.end(); ++it)
+            if (it->second.playerId == g_repl.playerIdentity()) mine.push_back(it->first);
+        if (coop::engine::beginStartEditing(gw, mine, g_characterEditStart)) {
+            g_characterEditWorld = world; g_characterEditConnection = g_repl.characterConnection(g_net.localId());
+            g_characterEditStart.clear();
+            g_characterStatus = coop::tr("Customize your starting characters, then confirm in the editor; F2 to cancel");
+        }
     }
     std::deque<coop::InboundCharacterRequest> requests; g_inbound.drainCharacterRequests(requests);
     if (g_cfg.isHost) for (size_t i = 0; i < requests.size(); ++i) {
@@ -3353,51 +3381,133 @@ void driveCharacterCreation(GameWorld* gw, bool worldLive) {
         g_characterPush.result = 0;
         coopLog("[chargen] targeted load completed or requester disconnected; creation queue resumed");
     }
-    if (g_cfg.isHost && !g_characterPush.result && !g_characterRequests.empty() && !g_bootstrapArmed && !coop::savexfer::watching() &&
-        !coop::savexfer::sending() && g_loadXferPending.empty() && g_loadXferSent.empty() &&
-        coop::engine::saveMgrSignal(0) == 0 && !coop::engine::characterPreview()) {
-        coop::InboundCharacterRequest request = g_characterRequests.front(); g_characterRequests.pop_front();
-        const coop::CharacterRequestHeader& h = request.header;
+    bool hostIdle = !g_bootstrapArmed && !coop::savexfer::watching() && !coop::savexfer::sending() && g_loadXferPending.empty() &&
+        g_loadXferSent.empty() && coop::engine::saveMgrSignal(0) == 0 && !coop::engine::characterEditing();
+    // 主机：取出一个开局请求，按开局选出生点；出生地没加载就先请求加载，等加载好再生成
+    if (g_cfg.isHost && !g_characterPush.result && !g_characterStartWaiting && !g_characterRequests.empty() && hostIdle) {
+        g_characterStartRequest = g_characterRequests.front(); g_characterRequests.pop_front();
+        const coop::CharacterRequestHeader& h = g_characterStartRequest.header;
+        std::string start(g_characterStartRequest.data.begin(), g_characterStartRequest.data.end());
+        bool known = false;
+        for (size_t i = 0; i < g_characterChoices.size(); ++i) if (g_characterChoices[i].startSid == start) known = true;
         coop::CharacterReplyPacket reply; memset(&reply, 0, sizeof(reply));
         reply.type = (coop::u8)coop::PKT_CHARACTER_REPLY; reply.targetOwnerId = h.ownerId;
         reply.playerId = h.playerId; reply.worldId = h.worldId; reply.connectionId = h.connectionId; reply.requestId = h.requestId;
-        reply.result = coop::CHARACTER_DENIED;
-        if (g_cfg.saveSync && g_cfg.loadSync && g_cfg.squadSync && g_characterAppearances.size() < 32 && g_repl.characterRequestCurrent(h) && g_repl.canCreateCharacter(gw, h.ownerId)) {
-            coop::CharacterDraft decoded;
-            reply.result = coop::CHARACTER_INVALID;
-            if (!request.data.empty() && coop::decodeCharacterDraft(&request.data[0], (unsigned int)request.data.size(), decoded)) {
+        reply.result = 0;
+        float* pos = g_characterStartPos;
+        if (!g_cfg.saveSync || !g_cfg.loadSync || !g_cfg.squadSync || !g_repl.characterRequestCurrent(h) || !g_repl.canCreateCharacter(gw, h.ownerId))
+            reply.result = coop::CHARACTER_DENIED;
+        else if (!known) reply.result = coop::CHARACTER_INVALID;
+        else if (!coop::engine::startPosition(gw, start, pos)) {
+            Character* first = coop::engine::leader(gw);
+            if ((!first || !coop::engine::readPos(first, &pos[0], &pos[1], &pos[2])) && !coop::engine::cameraCenter(gw, pos))
                 reply.result = coop::CHARACTER_FAILED;
-                if (coop::engine::createDraftCharacter(gw, decoded, h.position, reply.hand)) {
-                    if (!g_repl.registerCreatedCharacter(h.ownerId, reply.hand)) {
-                        coop::engine::despawnProxyNpc(gw, coop::engine::resolveCharByHand(reply.hand[3], reply.hand[4], reply.hand[0], reply.hand[1], reply.hand[2]));
-                    } else {
-                        coop::InboundCharacterAppearance appearance; memset(&appearance.header, 0, sizeof(appearance.header));
-                        appearance.header.type = (coop::u8)coop::PKT_CHARACTER_APPEARANCE; appearance.header.worldId = world;
-                        memcpy(appearance.header.hand, reply.hand, sizeof(reply.hand));
-                        appearance.draft = decoded;
-                        appearance.data = request.data; appearance.header.bytes = (coop::u32)appearance.data.size();
-                        if (g_characterAppearances.size() < 32) g_characterAppearances.push_back(appearance);
-                        publishCharacterAppearance(appearance);
-                        bool saved;
-                        if (h.ownerId != g_net.localId()) saved = armConnectPush(h.ownerId);
-                        else {
-                            char cur[64] = { 0 }; coop::engine::saveInfo(cur, sizeof(cur), 0, 0);
-                            saved = coop::engine::saveGameAs(cur[0] ? cur : "coopresume");
-                        }
-                        reply.result = saved ? coop::CHARACTER_CREATED : coop::CHARACTER_SAVE_FAILED;
-                        if (saved) {
-                            g_characterSaveInFlight = true; g_characterSaveReply = reply;
-                            if (h.ownerId != g_net.localId()) g_characterPush = reply;
-                        }
-                        coopLog("[chargen] character registered to permanent owner; fresh coordinated save requested");
-                    }
-                }
-            }
+            else coopLog("[chargen] game start has no usable spawn town; using the first player character's position");
         }
-        g_characterResults[h.playerId] = reply;
-        replyCharacterCreation(reply);
+        if (reply.result) {
+            g_characterResults[h.playerId] = reply;
+            replyCharacterCreation(reply);
+        } else {
+            if (!coop::engine::isZoneLoadedAt(gw, pos[0], pos[1], pos[2]) && !coop::engine::requestStartZone(gw, pos))
+                coopErr("[chargen] game start zone activation request failed; waiting anyway");
+            g_characterStartWaiting = true; g_characterStartTick = GetTickCount();
+            char b[224]; _snprintf(b, sizeof(b) - 1, "[chargen] game start '%s' for player=%llu at %.0f,%.0f; waiting for the zone",
+                                   start.c_str(), h.playerId, pos[0], pos[2]);
+            b[sizeof(b) - 1] = '\0'; coopLog(b);
+        }
     }
+    if (g_cfg.isHost && g_characterStartWaiting) {
+        const coop::CharacterRequestHeader& h = g_characterStartRequest.header;
+        const float* pos = g_characterStartPos;
+        bool loaded = coop::engine::isZoneLoadedAt(gw, pos[0], pos[1], pos[2]);
+        if ((loaded && hostIdle) || GetTickCount() - g_characterStartTick > 60000) {
+            g_characterStartWaiting = false;
+            std::string start(g_characterStartRequest.data.begin(), g_characterStartRequest.data.end());
+            coop::CharacterReplyPacket reply; memset(&reply, 0, sizeof(reply));
+            reply.type = (coop::u8)coop::PKT_CHARACTER_REPLY; reply.targetOwnerId = h.ownerId;
+            reply.playerId = h.playerId; reply.worldId = h.worldId; reply.connectionId = h.connectionId; reply.requestId = h.requestId;
+            reply.result = coop::CHARACTER_FAILED;
+            std::vector<std::pair<unsigned int, unsigned int> > tabs; int money = 0;
+            if (!loaded || !hostIdle) coopErr("[chargen] game start zone did not load in time");
+            else if (!g_repl.characterRequestCurrent(h) || !g_repl.canCreateCharacter(gw, h.ownerId)) reply.result = coop::CHARACTER_DENIED;
+            else if (coop::engine::createStartSquads(gw, start, pos, tabs, reply.hand, &money)) {
+                bool registered = true;
+                for (size_t i = 0; i < tabs.size(); ++i)
+                    if (!g_repl.registerCreatedCharacter(h.ownerId, tabs[i].first, tabs[i].second)) registered = false;
+                if (!registered) coopErr("[chargen] some game start squads could not be registered to the requester");
+                g_repl.setPlayerStart(gw, h.ownerId, start, money);
+                StartEditable editable; editable.start = start; editable.owner = h.ownerId; editable.connection = h.connectionId; editable.tabs = tabs;
+                g_characterEditable[h.playerId] = editable;
+                bool saved;
+                if (h.ownerId != g_net.localId()) saved = armConnectPush(h.ownerId);
+                else {
+                    char cur[64] = { 0 }; coop::engine::saveInfo(cur, sizeof(cur), 0, 0);
+                    saved = coop::engine::saveGameAs(cur[0] ? cur : "coopresume");
+                }
+                reply.result = saved ? coop::CHARACTER_CREATED : coop::CHARACTER_SAVE_FAILED;
+                if (saved) {
+                    g_characterSaveInFlight = true; g_characterSaveReply = reply;
+                    if (h.ownerId != g_net.localId()) g_characterPush = reply;
+                }
+                coopLog("[chargen] game start registered to permanent owner; fresh coordinated save requested");
+            }
+            g_characterResults[h.playerId] = reply;
+            replyCharacterCreation(reply);
+        }
+    }
+    // 捏人确认：每个角色一份外观交给主机；主机自己的直接并入下面的处理
+    std::vector<coop::engine::StartAppearance> edited;
+    int result = coop::engine::pollCharacterCreation(gw, edited);
+    if (result == -1) g_characterStatus = coop::tr("Character editing cancelled; starting characters keep their template looks");
+    else if (result < -1) g_characterStatus = coop::tr("Invalid character appearance");
     std::deque<coop::InboundCharacterAppearance> appearances; g_inbound.drainCharacterAppearances(appearances);
+    for (size_t i = 0; i < edited.size(); ++i) {
+        coop::InboundCharacterAppearance a; memset(&a.header, 0, sizeof(a.header));
+        a.header.type = (coop::u8)coop::PKT_CHARACTER_APPEARANCE; a.header.worldId = world; a.ownerId = g_net.localId();
+        memcpy(a.header.hand, edited[i].hand, sizeof(a.header.hand));
+        if (!coop::encodeCharacterDraft(edited[i].draft, a.data)) continue;
+        a.header.bytes = (coop::u32)a.data.size();
+        if (g_cfg.isHost) appearances.push_back(a);
+        else {
+            std::vector<coop::u8> bytes; coop::draftAppend(bytes, &a.header, sizeof(a.header));
+            coop::draftAppend(bytes, &a.data[0], a.header.bytes);
+            g_net.queueCharacterPacket(0, bytes);
+        }
+    }
+    if (!edited.empty()) {
+        g_characterStatus = coop::tr("Starting characters' appearance sent to host");
+        char b[128]; _snprintf(b, sizeof(b) - 1, "[chargen] edited appearance submitted for %u characters", (unsigned)edited.size());
+        b[sizeof(b) - 1] = '\0'; coopLog(b);
+    }
+    if (g_cfg.isHost) {
+        // 只接受申请人对本次开局新编队里角色的外观，套用后广播给其他人并存档
+        bool applied = false;
+        for (size_t i = 0; i < appearances.size(); ++i) {
+            const coop::InboundCharacterAppearance& a = appearances[i];
+            std::map<coop::u64, StartEditable>::const_iterator e = g_characterEditable.begin();
+            while (e != g_characterEditable.end() && (e->second.owner != a.ownerId || g_repl.characterConnection(a.ownerId) != e->second.connection)) ++e;
+            coop::CharacterDraft decoded;
+            bool ok = e != g_characterEditable.end() && a.header.worldId == world && !a.data.empty() &&
+                std::find(e->second.tabs.begin(), e->second.tabs.end(), std::make_pair(a.header.hand[1], a.header.hand[2])) != e->second.tabs.end() &&
+                coop::decodeCharacterDraft(&a.data[0], (unsigned int)a.data.size(), decoded) && decoded.startSid == e->second.start;
+            Character* c = ok ? coop::engine::resolveCharByHand(a.header.hand[3], a.header.hand[4], a.header.hand[0], a.header.hand[1], a.header.hand[2]) : 0;
+            if (!c || !coop::engine::applyCharacterDraft(gw, c, decoded)) { coopErr("[chargen] rejected edited appearance (owner, squad or draft)"); continue; }
+            coop::InboundCharacterAppearance cached = a; cached.draft = decoded;
+            size_t j = 0;
+            while (j < g_characterAppearances.size() && memcmp(g_characterAppearances[j].header.hand, a.header.hand, sizeof(a.header.hand)) != 0) ++j;
+            if (j < g_characterAppearances.size()) g_characterAppearances[j] = cached;
+            else if (g_characterAppearances.size() < 64) g_characterAppearances.push_back(cached);
+            publishCharacterAppearance(cached);
+            applied = true;
+        }
+        if (applied) {
+            if (!coop::savexfer::watching() && !coop::savexfer::sending() && coop::engine::saveMgrSignal(0) == 0) {
+                char cur[64] = { 0 }; coop::engine::saveInfo(cur, sizeof(cur), 0, 0);
+                coop::engine::saveGameAs(cur[0] ? cur : "coopresume");
+            }
+            coopLog("[chargen] edited starting appearance applied and broadcast; save requested");
+        }
+    }
     for (size_t i = 0; !g_cfg.isHost && i < appearances.size(); ++i) {
         const coop::InboundCharacterAppearance& a = appearances[i];
         if (a.header.worldId != world) continue;
@@ -3405,7 +3515,7 @@ void driveCharacterCreation(GameWorld* gw, bool worldLive) {
         for (size_t j = 0; j < g_characterAppearances.size(); ++j)
             if (memcmp(g_characterAppearances[j].header.hand, a.header.hand, sizeof(a.header.hand)) == 0) known = true;
         coop::CharacterDraft decoded;
-        if (!known && g_characterAppearances.size() < 32 && !a.data.empty() &&
+        if (!known && g_characterAppearances.size() < 64 && !a.data.empty() &&
             coop::decodeCharacterDraft(&a.data[0], (unsigned int)a.data.size(), decoded)) {
             coop::InboundCharacterAppearance cached = a; cached.draft = decoded; g_characterAppearances.push_back(cached);
         }

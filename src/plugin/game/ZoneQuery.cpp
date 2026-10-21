@@ -1,4 +1,4 @@
-// ZoneQuery.cpp - the zone-loaded query (Phase 1 spawn parity) and the sector
+﻿// ZoneQuery.cpp - the zone-loaded query (Phase 1 spawn parity) and the sector
 // mappings behind it (engine::cellProbe), quarantined in its own TU because
 // kenshi/ZoneManager.h redefines ParticlePool (also defined by
 // kenshi/CombatClass.h, which EngineInternal.cpp needs) - the two vendored
@@ -167,6 +167,19 @@ bool cellProbe(GameWorld* gw, float x, float y, float z, CellProbe* out) {
             out->haveRes = 1;
         (void)y;   // the sector grid is 2D; y is accepted only to match callers
         return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool requestStartZone(GameWorld* gw, const float pos[3]) {
+    __try {
+        ZoneManager* zm = gw ? gw->zoneMgr : 0;
+        int x = 0, y = 0;
+        if (!zm || !sectorCall(g_mapSectorFn, zm, pos[0], pos[2], &x, &y)) return false;
+        ZoneMap* map = zm->getZoneMap(x, y);
+        // 用玩家角色激活类型并给 60 秒停用延时，生成前这片区域不会因为镜头不在而被卸掉
+        return map && zm->activateZoneMap(map, map->coordinates, 1, ACTIVATION_PLAYER_CHARACTER, 60.0f);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }

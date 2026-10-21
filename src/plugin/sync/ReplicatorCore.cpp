@@ -1659,9 +1659,9 @@ bool Replicator::canCreateCharacter(GameWorld* gw, u32 author) const {
     return true;
 }
 
-bool Replicator::registerCreatedCharacter(u32 author, const unsigned int h[5]) {
+bool Replicator::registerCreatedCharacter(u32 author, unsigned int container, unsigned int serial) {
     u64 identity = identityForOwner(author);
-    Tab tab(h[1], h[2]);
+    Tab tab(container, serial);
     if (!isHostRole() || !identity || !ownersAttached_ || ownersInvalid_ || owners_.size() >= OWNERS_MAX ||
         !(tab.first | tab.second) || owners_.count(tab)) return false;
     OwnerRow row = { 0 };
@@ -1791,6 +1791,20 @@ bool Replicator::writePlayers(const std::string& name) const {
               (unsigned)wallets_.size(), name.c_str(), ok ? 1 : 0);
     b[sizeof(b) - 1] = 0; coop::logLine(b);
     return ok;
+}
+
+// 主机自己的钱直接写进本机游戏；加入者的记到账上，下一次发布时发给本人
+void Replicator::setPlayerStart(GameWorld* gw, u32 author, const std::string& start, int money) {
+    u64 identity = identityForOwner(author);
+    if (!isHostRole() || !identity) return;
+    Wallet& w = wallets_[identity];
+    w.start = start;
+    if (money < 0) money = 0;
+    if (identity == playerIdentity_) engine::writePlayerWallet(gw, money);
+    else if (moneySync_) w.money = money;
+    char b[200];
+    _snprintf(b, sizeof(b) - 1, "[wallet] START player=%llu start='%s' money=%d", identity, start.c_str(), money);
+    b[sizeof(b) - 1] = 0; coop::logLine(b);
 }
 
 } // namespace coop

@@ -29,7 +29,8 @@ typedef double         f64;
 // 本分支（zh-cn-improvements）自有协议号：基于上游 55，加入名字同步与动物年龄同步（上游 PR #28）后
 // 改为 1001 起编号，避开上游后续序列；1002 加入小队控制授权（EVT_SQUAD_AUTH）；
 // 1003 加入多人对端名单与授权目标；1004 加入稳定玩家身份与存档归属表；
-// 1006 资金按人分开（MONEY 只发给余额所属的加入者，增减量按连接认人）；
+// 1006 资金按人分开（MONEY 只发给余额所属的加入者，增减量按连接认人）；F2 创建角色改为按开局生成
+// （请求只带开局 SID，加入方把捏好的外观发给主机）；
 // 双方须使用同一改进版，与官方 v0.51 不再互通
 const u16 PROTOCOL_VERSION = 1006;
 
@@ -1656,7 +1657,7 @@ struct TimePongPacket {
     u32 responderWallMs; // host's wallClockMs() at echo
 };
 
-// 创建请求只发给主机；可靠通道由ENet分片，不传引擎指针或容器布局。
+// 创建请求只发给主机；可靠通道由ENet分片，不传引擎指针或容器布局。协议 1006 起 bytes 后面是开局 SID，position 不再使用。
 struct CharacterRequestHeader {
     u8 type;
     u32 ownerId;
@@ -1674,6 +1675,7 @@ struct CharacterReplyPacket {
     u8 result;
     u32 hand[5];
 };
+// 协议 1006 起双向：主机广播套用后的外观；加入方把自己开局角色捏好的外观发给主机
 struct CharacterAppearanceHeader {
     u8 type;
     u64 worldId;
