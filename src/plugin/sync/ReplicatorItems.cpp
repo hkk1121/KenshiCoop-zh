@@ -1642,19 +1642,22 @@ void Replicator::detectAndPublishTransfers(GameWorld* gw, NetLink& net, u32 owne
     // PAIR pass: a settled LOSS of an item key in one container + the matching settled
     // GAIN in another is a completed drag between the two. Collect first (rebase
     // invalidates the pend iterators), then act.
+    // 按（容器，物品）配对：同一个容器一次扫描里被拖走好几样东西（快速搜刮尸体）时每样各发一个意图，
+    // 原先每个容器只配一次、其余的被整箱重建基线吞掉，主人收不到，下一份快照又把东西放回去（复制）
     struct Fire { Key src; Key dst; XKey key; int qty; };
     std::vector<Fire> fires;
-    std::set<Key> consumed;
+    std::set<std::pair<Key, XKey> > consumed;
     for (std::map<Key, std::map<XKey, XferPend> >::iterator li = xferPend_.begin();
          li != xferPend_.end(); ++li) {
-        if (consumed.count(li->first) || cur.find(li->first) == cur.end()) continue;
+        if (cur.find(li->first) == cur.end()) continue;
         for (std::map<XKey, XferPend>::iterator le = li->second.begin();
              le != li->second.end(); ++le) {
             if (le->second.delta >= 0) continue;
             if (now - le->second.sinceMs < XFER_SETTLE_MS) continue;
             for (std::map<Key, std::map<XKey, XferPend> >::iterator gi = xferPend_.begin();
                  gi != xferPend_.end(); ++gi) {
-                if (gi == li || consumed.count(gi->first) || cur.find(gi->first) == cur.end())
+                if (gi == li || consumed.count(std::make_pair(gi->first, le->first)) ||
+                    cur.find(gi->first) == cur.end())
                     continue;
                 std::map<XKey, XferPend>::iterator ge = gi->second.find(le->first);
                 if (ge == gi->second.end() || ge->second.delta <= 0) continue;
@@ -1663,10 +1666,10 @@ void Replicator::detectAndPublishTransfers(GameWorld* gw, NetLink& net, u32 owne
                 f.qty = -le->second.delta;
                 if (ge->second.delta < f.qty) f.qty = ge->second.delta;
                 fires.push_back(f);
-                consumed.insert(f.src); consumed.insert(f.dst);
+                consumed.insert(std::make_pair(f.src, f.key));
+                consumed.insert(std::make_pair(f.dst, f.key));
                 break;
             }
-            if (consumed.count(li->first)) break;
         }
     }
 
@@ -1735,8 +1738,12 @@ void Replicator::detectAndPublishTransfers(GameWorld* gw, NetLink& net, u32 owne
         }
         // Own<->own moves need no intent (our own snapshots carry both ends); either
         // way the baselines absorb the move so the detector never re-fires on it.
-        xferRebase(gw, f.src);
-        xferRebase(gw, f.dst);
+        // 只把这一样东西记进两端的基线；同一次扫描里配上的其他物品各发各的意图
+        std::map<XKey, int>& sb = xferBase_[f.src];
+        if ((sb[f.key] -= f.qty) <= 0) sb.erase(f.key);
+        xferBase_[f.dst][f.key] += f.qty;
+        xferPend_[f.src].erase(f.key);
+        xferPend_[f.dst].erase(f.key);
     }
 }
 
