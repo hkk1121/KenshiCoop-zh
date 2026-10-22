@@ -644,7 +644,8 @@ void driveSaveSync() {
                     completeCharacterSave(false);
                     g_bootstrapArmed = false; g_bootstrapTargets.clear(); g_savePending.clear(); return;
                 }
-                if ((!g_repl.writeOwners(g_savePending) || !g_repl.writePlayers(g_savePending)) && g_net.isRunning()) {
+                if ((g_session.walletReloadPending || !g_repl.writeOwners(g_savePending) ||
+                     !g_repl.writePlayers(g_savePending)) && g_net.isRunning()) {
                     completeCharacterSave(false);
                     coopErr("[owners] save transfer cancelled: ownership or ledger file write failed");
                     g_bootstrapArmed = false; g_bootstrapTargets.clear(); g_savePending.clear();

@@ -101,7 +101,8 @@ Replicator::Replicator()
       lifeSweepMs_(0),
       tabNotice_(0), playerIdentity_(0), ownersWorld_(0), ownersFileWorld_(0),
       ownersRevision_(0), ownersAuthEpoch_(1), ownersLoaded_(false), ownersAttached_(false),
-      ownersDirty_(false), ownersHaveSnapshot_(false), ownersInvalid_(false), ownersResetPending_(false) {
+      ownersDirty_(false), ownersHaveSnapshot_(false), ownersInvalid_(false), ownersResetPending_(false),
+      ownersKeepOnIdentity_(false) {
     characterWorldEpoch_ = ownersAuthEpoch_;
     walletsLoaded_ = false;
 }
@@ -294,11 +295,15 @@ void Replicator::resetSession(bool keepWalletSequence, bool keepWallets) {
     poolAcked_ = 0;
     poolPending_.clear();
     // 同一主机只重启网络时保留余额和首次开局记录，连接相关状态仍清零；读档则重新加载账本。
+    ownersKeepOnIdentity_ = keepWallets && isHostRole();
     if (keepWallets) {
         for (std::map<u64, Wallet>::iterator it = wallets_.begin(); it != wallets_.end(); ++it) {
             it->second.acked = 0; it->second.connection = 0;
             it->second.sent = -1; it->second.sentMs = 0;
         }
+        char b[96]; _snprintf(b, sizeof(b) - 1,
+            "[wallet] ledger kept players=%u", (unsigned)wallets_.size());
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
     } else {
         wallets_.clear(); walletsLoaded_ = false;
     }
@@ -1285,13 +1290,19 @@ bool Replicator::takePeerBodyTabOwner(u32* ownerId) {
 }
 
 void Replicator::setPlayerIdentity(u64 id) {
+    bool keepOwners = ownersKeepOnIdentity_ && isHostRole() && playerIdentity_ == id;
+    ownersKeepOnIdentity_ = false;
     if (playerIdentity_ != id) {
         players_.clear();
         wallets_.clear(); walletsLoaded_ = false;
     }
-    ownersDirty_ = true; ownersLoaded_ = false; ownersAttached_ = false;
-    ownersHaveSnapshot_ = false; ownersFileWorld_ = 0;
-    owners_.clear(); tabAliases_.clear(); pendingOwnerTabs_.clear();
+    ownersDirty_ = true;
+    if (!keepOwners) {
+        ownersLoaded_ = false; ownersAttached_ = false; ownersInvalid_ = false;
+        ownersHaveSnapshot_ = false; ownersFileWorld_ = 0;
+        owners_.clear();
+    }
+    tabAliases_.clear(); pendingOwnerTabs_.clear();
     playerIdentity_ = id;
     for (std::map<u64, PeerStatusPacket>::iterator it = players_.begin(); it != players_.end(); ++it)
         it->second.present = 0;
@@ -1473,11 +1484,23 @@ bool Replicator::writeOwners(const std::string& name) const {
 }
 
 void Replicator::resetOwnersForWorld() {
-    ownersLoaded_ = false; ownersAttached_ = false; ownersInvalid_ = false;
-    ownersFileWorld_ = 0; tabAliases_.clear(); pendingOwnerTabs_.clear();
+    tabAliases_.clear(); pendingOwnerTabs_.clear();
     ownersResetPending_ = true;
+    if (!ownersKeepOnIdentity_) {
+        ownersLoaded_ = false; ownersAttached_ = false; ownersInvalid_ = false;
+        ownersFileWorld_ = 0;
+    }
     if (isHostRole()) {
-        owners_.clear(); ownersWorld_ = 0; ownersHaveSnapshot_ = false;
+        if (ownersKeepOnIdentity_) {
+            for (std::map<Tab, OwnerRow>::iterator row = owners_.begin(); row != owners_.end(); ++row)
+                row->second.sourceActive = 0;
+            char b[128]; _snprintf(b, sizeof(b) - 1,
+                "[owners] kept across reconnect rows=%u world=%llu",
+                (unsigned)owners_.size(), ownersWorld_);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        } else {
+            owners_.clear(); ownersWorld_ = 0; ownersHaveSnapshot_ = false;
+        }
         ++ownersAuthEpoch_; characterWorldEpoch_ = ownersAuthEpoch_; ownersDirty_ = true;
     }
 }

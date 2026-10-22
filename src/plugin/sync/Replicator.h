@@ -2799,6 +2799,7 @@ private:
     bool ownersHaveSnapshot_;
     bool ownersInvalid_;
     bool ownersResetPending_;
+    bool ownersKeepOnIdentity_;
     std::map<Tab, bool> tabControl_;
     std::map<Key, u32> pendingPeerMembers_;
     u64 identityForOwner(u32 owner) const;
