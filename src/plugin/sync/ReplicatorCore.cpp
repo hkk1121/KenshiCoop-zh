@@ -187,7 +187,7 @@ void Replicator::lifeSweep(GameWorld* gw, unsigned long now) {
     }
 }
 
-void Replicator::resetSession() {
+void Replicator::resetSession(bool keepWalletSequence) {
     // Pointer caches (dangling after the swap) + everything keyed off them.
     targets_.clear();          // interp buffers + per-body drive state
     drivenChars_.clear();
@@ -285,12 +285,11 @@ void Replicator::resetSession() {
     medRecv_.clear();
     medNpc_.clear();
     statsPub_.clear();
-    // Protocol 52: the pool baseline describes the OLD world's wallet, so a
-    // reload must re-seed it - otherwise the newly loaded save's cats read as
-    // one giant local purchase. Pending deltas die with the session they were
-    // measured in.
+    // 读档后重建余额基线并丢弃旧世界的待确认变化量；同一连接的发送序号保持递增，
+    // 避免主机把新交易当成重复消息，或旧确认清掉新交易。真正断线时才清零序号。
     poolSeen_ = -1;
-    poolSeq_ = 0; poolAcked_ = 0;
+    if (!keepWalletSequence) poolSeq_ = 0;
+    poolAcked_ = 0;
     poolPending_.clear();
     // 账本属于旧世界，读档后从新存档目录重新读
     wallets_.clear(); walletsLoaded_ = false;

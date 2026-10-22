@@ -365,7 +365,7 @@ void sessionResetForWorldReload() {
     g_characterSaveInFlight = false; g_characterPush.result = 0;
     g_characterEditable.clear(); g_characterStartWaiting = false;
     g_peerBodyRepushDue.clear();
-    g_repl.resetSession();
+    g_repl.resetSession(true);
     g_repl.resetOwnersForWorld();
     g_inbound.flushWorldState();
     g_net.bumpSessionEpoch(); // v44: post-reload batches supersede the old session

@@ -658,7 +658,7 @@ public:
     // - a peer that
     // did NOT reload keeps its per-sender stale-row guards, so restarting a
     // counter would make every new row look stale to it.
-    void resetSession();
+    void resetSession(bool keepWalletSequence = false);
 
     // Peer-leave cleanup (Phase 2 crash hardening): called from the transport
     // leave edge when the LAST remote player disconnects mid-session (distinct
