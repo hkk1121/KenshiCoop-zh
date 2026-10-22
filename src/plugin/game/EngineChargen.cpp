@@ -26,6 +26,9 @@ bool confirming = false;
 int editResult = 0;
 float previousSpeed = 1.0f;
 bool previousPause = false;
+// 打开后还要轮流显示几次角色（见 stepEditorCycle）
+unsigned int cycleLeft = 0;
+unsigned long cycleTick = 0;
 typedef void (__fastcall* ConfirmFn)(CharacterEditWindow*, MyGUI::Widget*);
 typedef void (__fastcall* CloseFn)(ForgottenGUI*);
 ConfirmFn confirmOriginal = 0;
@@ -61,10 +64,6 @@ bool showEditor(GameWorld* gw, const lektor<Character*>* chars, const Ogre::vect
         typedef void (__fastcall* ShowFn)(ForgottenGUI*, const lektor<Character*>*, CharacterEditMode, const Ogre::vector<GameDataReference>::type*);
         ShowFn show = (ShowFn)KenshiLib::GetRealAddress(&ForgottenGUI::showCharacterEditor);
         if (!show) return false;
-        // 原版 NEWGAME 构造时逐个 reload 角色外观（建模），"from file" 标记连它一起跳过了；不补的话没切到过的角色
-        // 没有建好模型，确认时 confirmButton（真实 0x5E94B0）查 AnimationClass::getIsActivated 为假，报“Invalid character race”
-        for (unsigned int i = 0; i < chars->size(); ++i)
-            if (chars->stuff[i] && chars->stuff[i]->getAppearance()) chars->stuff[i]->getAppearance()->reload();
         show(::gui, chars, EDIT_NEWGAME, races);
         editor = ::gui->characterEditor;
         gw->userPause(true);
@@ -157,6 +156,28 @@ void completeStartResearch(GameWorld* gw, const Ogre::vector<GameDataReference>:
             if (research) complete(gw->player->technology, research);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+// 角色模型建好了没有：原版 CharacterEditWindow::confirmButton（真实 0x5E94B0）逐个查编辑器里角色的
+// AnimationClass::getIsActivated（AnimationClass+0x88，建模收尾时置 1），有一个为假就报“Invalid character race”
+bool modelBuilt(Character* c) {
+    typedef bool (__fastcall* ActivatedFn)(AnimationClass*);
+    static ActivatedFn activated = 0;
+    if (!activated) activated = (ActivatedFn)klibExport("?getIsActivated@AnimationClass@@QEBA_NXZ");
+    if (!activated) return true;
+    __try { return c && c->animation && activated(c->animation); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+// 捏人界面只给当前显示的角色建模，其余停在世界原点（showCharacter，真实 0x5E8340）；刚读完存档时它们多半
+// 还没有模型，确认就报错。打开后自动把每个角色轮流显示一遍（与手动“更改角色”相同），每个等模型建好再切下一个，
+// 最后回到第一个；单个角色最多等 10 秒。initCharacters 之前（character 为空）不动
+void stepEditorCycle() {
+    __try {
+        if (!editor->character) return;
+        if (!modelBuilt(editor->character) && GetTickCount() - cycleTick < 10000) return;
+        editor->nextCharacter(0);
+        cycleTick = GetTickCount();
+        if (--cycleLeft == 0) coop::logLine("[chargen] editor showed every starting character once");
+    } __except (EXCEPTION_EXECUTE_HANDLER) { cycleLeft = 0; }
 }
 }
 
@@ -290,6 +311,7 @@ bool beginStartEditing(GameWorld* gw, const std::vector<std::pair<unsigned int, 
     cameraFocusOn(gw, chars[0]);
     const Ogre::vector<GameDataReference>::type* races = start->getReferenceListIfExists("force race");
     if (!showEditor(gw, &list, races && !races->empty() ? races : 0)) { cancelCharacterCreation(true); return false; }
+    cycleLeft = editCount > 1 ? editCount : 0; cycleTick = GetTickCount();
     char b[160];
     _snprintf(b, sizeof(b) - 1, "[chargen] native NEWGAME editor opened for %u starting characters", editCount);
     b[sizeof(b) - 1] = '\0'; coop::logLine(b);
@@ -301,6 +323,7 @@ int pollCharacterCreation(GameWorld* gw, std::vector<StartAppearance>& out) {
     if (editCount && gw != editWorld) { cancelCharacterCreation(false); return -1; }
     if (editCount && editor && (!::gui || ::gui->characterEditor != editor)) { editor = 0; editResult = -1; }
     if (editCount && editor) writeGameSpeed(editWorld, previousSpeed, true);
+    if (editCount && editor && cycleLeft) stepEditorCycle();
     if (!editCount || editor || !editResult) return 0;
     int result = editResult;
     for (unsigned int i = 0; result > 0 && i < editCount; ++i) {
@@ -353,7 +376,7 @@ bool cancelCharacterCreation(bool worldAlive) {
             if (data) data->bdata.erase("from file");
         }
     }
-    editor = 0; editWorld = 0; editResult = 0; confirming = false; editCount = 0; editStart.clear();
+    editor = 0; editWorld = 0; editResult = 0; confirming = false; editCount = 0; editStart.clear(); cycleLeft = 0;
     return true;
 }
 
