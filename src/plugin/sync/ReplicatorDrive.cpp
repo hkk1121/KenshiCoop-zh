@@ -320,9 +320,9 @@ void Replicator::applyTargets(GameWorld* gw) {
         // may only take hold on the peer via the owner's reliable EVT_DEATH.
         if (dmgGuard_ && !(out.bodyState & BODY_DEAD) && !d.deathLatched &&
             (engine::readBodyState(c) & BODY_DEAD)) {
-            // 玩家角色被本机判死后已进阵亡编队：declareDead 撤不回来（isDead 读的 +0x5BC 不会清），
-            // 否决只会让医疗更新再判一次死、把它反复移出移进阵亡编队，阵亡编队只剩它时自身被判为
-            // 死编队、尸体随之被清掉。本机抢先判死（同步饥饿、失血时常见）就等主人的死亡事件
+            // 玩家角色被本机判死后已进阵亡编队：declareDead 撤不回来。否决清掉 medical.dead 后，
+            // 医疗更新下一帧又判死并再调 declareDead，把它反复移出移进阵亡编队，阵亡编队只剩它时
+            // 自身被判为死编队、尸体随之被清掉。本机抢先判死（同步饥饿、失血时常见）就等主人的死亡事件
             unsigned int lh[5] = { 0, 0, 0, 0, 0 }, dt[2] = { 0, 0 };
             bool inDeadSquad = engine::readDeadSquadTab(gw, dt) &&
                 engine::readObjectHand(reinterpret_cast<RootObject*>(c), lh) &&

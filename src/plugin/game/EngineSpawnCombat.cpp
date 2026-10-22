@@ -2497,10 +2497,10 @@ void setCharAge(Character* c, float age) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-// 原版医疗更新（真实 0x6519B8 一带）判死时先置 medical.dead（+0x164），再调
-// Character::declareDead（0x7A5660）：置 Character::isDead 读的 +0x5BC，玩家阵营角色从原编队
+// 原版医疗更新（真实 0x6519B8 一带）判死时先置 medical.dead（+0x164，即 Character::isDead
+// 读的 Character+0x5BC），再调 Character::declareDead（0x7A5660）：玩家阵营角色从原编队
 // 移出、加进 getDeadSquad，原编队空了就随之判为死编队。declareDead 不能重复调：尸体已是阵亡
-// 编队唯一成员时，再调一次会把阵亡编队本身判为死编队，尸体随之被清掉，所以按 isDead 判断。
+// 编队唯一成员时，再调一次会把阵亡编队本身判为死编队，尸体随之被清掉，所以已死的不再调。
 bool applyOwnerDeath(Character* c) {
     if (!c || !g_isDeadCharFn || g_isDeadCharFn(c)) return false;
     __try {
