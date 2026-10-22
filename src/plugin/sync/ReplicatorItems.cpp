@@ -1823,9 +1823,16 @@ void Replicator::applyTransfers(GameWorld* gw, Inbound& in, NetLink& net, u32 lo
         // 源头是自己的、目的地是别人的：对方背包快照先到（已含这些东西）、我们这份目的地放不下时，
         // 移动会被退回源头。也要从源头去掉差额，目的地以它主人的快照为准，否则源头和对方身上各一份
         int removed = 0;
-        if (moved < quantity && srcOwn && !dstOwn)
-            removed = engine::removeItemsFromContainer(gw, sHand, p.stringID, p.itemType,
-                                                       quantity - moved);
+        int deferred = 0;
+        if (moved < quantity && srcOwn && !dstOwn) {
+            if (engine::inventoryUiOpen()) {
+                deferred = quantity - moved;
+                xferDebt_[sk][key] += deferred;
+            } else {
+                removed = engine::removeItemsFromContainer(gw, sHand, p.stringID, p.itemType,
+                                                           quantity - moved);
+            }
+        }
         int fab = 0;
         if (!srcOwn && moved < quantity) {
             // Our src copy is short (desync) - fabricate the shortfall into dst so the
@@ -1852,7 +1859,7 @@ void Replicator::applyTransfers(GameWorld* gw, Inbound& in, NetLink& net, u32 lo
         }
         // Latch OUR peer end(s) too: an in-flight stale snapshot (captured by its
         // owner before this transfer) must not reconcile the relocation away.
-        int applied = moved + removed + fab;
+        int applied = moved + removed + fab + deferred;
         if (applied > 0) {
             if (!srcOwn) {
                 XferLatch& L = xferLatch_[sk][key];
@@ -1886,9 +1893,9 @@ void Replicator::applyTransfers(GameWorld* gw, Inbound& in, NetLink& net, u32 lo
                              : XFER_ACK_PARTIAL);
         if (ack.role) net.queueInvXferAck(ack);
         char b[272]; _snprintf(b, sizeof(b) - 1,
-            "[xfer] APPLY id=%u from=%u sid='%s' type=%u qty=%u moved=%d fab=%d ack=%u removed=%d avail=%d role=%u",
+            "[xfer] APPLY id=%u from=%u sid='%s' type=%u qty=%u moved=%d fab=%d ack=%u removed=%d avail=%d role=%u debt=%d",
             p.xferId, p.ownerId, p.stringID, p.itemType, (unsigned)p.quantity,
-            moved, fab, (unsigned)ack.verdict, removed, avail, (unsigned)ack.role);
+            moved, fab, (unsigned)ack.verdict, removed, avail, (unsigned)ack.role, deferred);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
     }
 }
