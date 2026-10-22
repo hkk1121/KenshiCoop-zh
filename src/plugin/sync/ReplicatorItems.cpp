@@ -1771,8 +1771,24 @@ void Replicator::applyTransfers(GameWorld* gw, Inbound& in, NetLink& net, u32 lo
         // conservation move (never fabricates or destroys), so gear survives.
         int moved = engine::moveItemBetweenContainers(gw, sHand, dHand, p.stringID,
                                                       p.itemType, (int)p.quantity);
+        bool srcOwn = ownedContainers_.count(sk) != 0 || ownHands_.count(sk) != 0;
+        bool dstOwn = ownedContainers_.count(dk) != 0 || ownHands_.count(dk) != 0;
+        // 别人发来的可能是身体换编队（如进阵亡编队）之前的旧手把：编号、编队变了，类型和序列号不变
+        for (int pass = 0; pass < 2; ++pass) {
+            const std::set<Key>& own = pass ? ownedContainers_ : ownHands_;
+            for (std::set<Key>::const_iterator o = own.begin(); o != own.end(); ++o) {
+                if (o->t == sk.t && o->s == sk.s) srcOwn = true;
+                if (o->t == dk.t && o->s == dk.s) dstOwn = true;
+            }
+        }
+        // 源头是自己的、目的地是别人的：对方背包快照先到（已含这些东西）、我们这份目的地放不下时，
+        // 移动会被退回源头。也要从源头去掉差额，目的地以它主人的快照为准，否则源头和对方身上各一份
+        int removed = 0;
+        if (moved < (int)p.quantity && srcOwn && !dstOwn)
+            removed = engine::removeItemsFromContainer(gw, sHand, p.stringID, p.itemType,
+                                                       (int)p.quantity - moved);
         int fab = 0;
-        if (moved < (int)p.quantity) {
+        if (moved + removed < (int)p.quantity) {
             // Our src copy is short (desync) - fabricate the shortfall into dst so the
             // trade still lands. Non-gear always did this; gear joined once spike 451
             // made weapon fabrication work (armour always could). Dupe safety: the
@@ -1787,15 +1803,13 @@ void Replicator::applyTransfers(GameWorld* gw, Inbound& in, NetLink& net, u32 lo
             if (gearFab < 0) { const char* e = getenv("KENSHICOOP_WEAPON_FAB"); gearFab = (e && e[0] == '0') ? 0 : 1; }
             if ((!isGearType(p.itemType) || gearFab) && !engine::isContainerItemType(p.itemType))
                 fab = engine::addItemsToContainerBySid(gw, dHand, p.stringID, p.itemType,
-                                                       (int)p.quantity - moved, (int)p.quality,
+                                                       (int)p.quantity - moved - removed, (int)p.quality,
                                                        p.manufacturer, p.material, p.level);
         }
         XKey key(std::string(p.stringID), p.itemType);
         // Latch OUR peer end(s) too: an in-flight stale snapshot (captured by its
         // owner before this transfer) must not reconcile the relocation away.
-        bool srcOwn = ownedContainers_.count(sk) != 0 || ownHands_.count(sk) != 0;
-        bool dstOwn = ownedContainers_.count(dk) != 0 || ownHands_.count(dk) != 0;
-        int applied = moved + fab;
+        int applied = moved + removed + fab;
         if (applied > 0) {
             if (!srcOwn) {
                 XferLatch& L = xferLatch_[sk][key];
@@ -1830,9 +1844,9 @@ void Replicator::applyTransfers(GameWorld* gw, Inbound& in, NetLink& net, u32 lo
                              : XFER_ACK_PARTIAL);
         net.queueInvXferAck(ack);
         char b[240]; _snprintf(b, sizeof(b) - 1,
-            "[xfer] APPLY id=%u from=%u sid='%s' type=%u qty=%u moved=%d fab=%d ack=%u",
+            "[xfer] APPLY id=%u from=%u sid='%s' type=%u qty=%u moved=%d fab=%d ack=%u removed=%d",
             p.xferId, p.ownerId, p.stringID, p.itemType, (unsigned)p.quantity,
-            moved, fab, (unsigned)ack.verdict);
+            moved, fab, (unsigned)ack.verdict, removed);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
     }
 }

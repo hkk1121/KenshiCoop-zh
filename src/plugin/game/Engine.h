@@ -2264,6 +2264,11 @@ bool readDeadSquadTab(GameWorld* gw, unsigned int out[2]);
 // 已经死了返回 false。
 bool applyOwnerDeath(Character* c);
 
+// SEH-guarded：按 (sid, typeCat) 从 cHand 这个容器里移除（销毁）最多 qty 个，先散放、后穿戴；
+// 返回实际移除的数量。跨主人转移时源头是自己的、目的地放不下，用它去掉源头的差额。
+int removeItemsFromContainer(GameWorld* gw, const unsigned int cHand[5], const char* sid,
+                             unsigned int typeCat, int qty);
+
 } // namespace engine
 } // namespace coop
 

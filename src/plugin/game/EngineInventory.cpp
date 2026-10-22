@@ -1,4 +1,4 @@
-// EngineInventory.cpp - inventory + world items (monolith split from
+﻿// EngineInventory.cpp - inventory + world items (monolith split from
 // EngineInternal.cpp, 2026-07-12): Phase 4a container-contents capture/reconcile,
 // item template finders + createItemAndAdd, equip/unequip levers, Phase W0/W1
 // world-item (ground drop) diagnostics + replication proxies, and the spike-401
@@ -2759,6 +2759,25 @@ Character* spawnCharInFaction(GameWorld* gw, float fwd, float side, Faction* fac
     }
 }
 
+
+// 按物品从容器里移除（销毁）最多 qty 个，先拿散放的、再拿穿戴的，返回实际移除的数量。
+// 跨主人转移用：源头是自己的、目的地是别人的，我们这份目的地放不下时也要从源头去掉差额。
+int removeItemsFromContainer(GameWorld* gw, const unsigned int cHand[5], const char* sid,
+                             unsigned int typeCat, int qty) {
+    if (!gw || !sid || !sid[0] || qty <= 0) return 0;
+    RootObject* ro = resolveObjectByHand(cHand);
+    if (!ro) return 0;
+    Inventory* inv = invOf(ro);
+    if (!inv) return 0;
+    int removed = 0;
+    for (int pass = 0; pass < 2 && removed < qty; ++pass) {
+        InvItemEntry cur[64];
+        Item* curItems[64];
+        unsigned int ncur = readInvItems(inv, cur, curItems, 64);
+        removed += removeByKey(inv, curItems, cur, ncur, sid, typeCat, qty - removed, pass);
+    }
+    return removed;
+}
 
 } // namespace engine
 } // namespace coop
