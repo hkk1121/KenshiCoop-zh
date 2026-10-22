@@ -1897,6 +1897,7 @@ void tickScenarioStart(GameWorld* gw) {
             pctx.peerReady = peerReady;
             pctx.pickMintedProxy = &coopScenarioPickMintedProxy;
             pctx.ownRank = scenarioOwnRank();
+            pctx.ownTab = &coopSquadBarVisible;
             g_scenario->onGameplay(pctx);
         }
         if (peerReady || fallback) {
@@ -1908,6 +1909,7 @@ void tickScenarioStart(GameWorld* gw) {
             ctx.peerReady = peerReady;
             ctx.pickMintedProxy = &coopScenarioPickMintedProxy;
             ctx.ownRank = scenarioOwnRank();
+            ctx.ownTab = &coopSquadBarVisible;
             char m[200];
             _snprintf(m, sizeof(m) - 1, "SCENARIO arm trigger=%s waitedMs=%lu",
                       peerReady ? "peer-ready" : "timeout", (unsigned long)waitedMs);
@@ -2096,6 +2098,7 @@ void tickScenarioTick(GameWorld* gw) {
         ctx.peerReady = g_inbound.sawRemoteEntity();
         ctx.pickMintedProxy = &coopScenarioPickMintedProxy;
         ctx.ownRank = scenarioOwnRank();
+        ctx.ownTab = &coopSquadBarVisible;
         if (g_scenario->onTick(ctx)) {
             // Stage 2: the receiver emits its interpolation smoothness summary
             // alongside the verdict so the runner can assert per-frame gliding.

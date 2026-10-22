@@ -1,4 +1,4 @@
-// ScenarioMedical.cpp - medical + stats scenarios (monolith split from
+﻿// ScenarioMedical.cpp - medical + stats scenarios (monolith split from
 // Scenario.cpp, 2026-07-12): medic_order, limb_loss, crawl_move, stats_sync.
 // Classes are TU-private (anonymous namespace); only makeMedicalScenario
 // (ScenarioSupport.h) is exported.
@@ -593,6 +593,162 @@ private:
 
 const float CrawlMoveScenario::LEG = 20.0f;
 
+// ===========================================================================
+// owner_death（死亡处理 784650d / ed771f1 的战斗路径）：三方各自打死一个自己的角色。
+// 主人把角色头部伤到致命，由原版医疗更新判死、调 declareDead，与战斗中被砍死是同一
+// 条路。部位伤只同步不低于 0 的值，其他人的副本自己判不出死，只能等主人的 EVT_DEATH
+// 走 [death] owner death applied —— 饿死测不到的就是这条。
+//   * 主机、好友1、好友2 依次在第 0、3、6 个 4 秒整点下手（系统时钟，本机多开共用）；
+//   * 好友2 优先挑编队里只剩他一个活人的（编队空了会被引擎判死），其他人挑多人编队里的；
+//   * 最后一人下手约 24 秒后各方核对：自己的受害者死了且在阵亡编队；开始时活着、现在
+//     死了的身体都在本机阵亡编队；开始时的身体一个不少；没有多出编队；新死的至少 3 个。
+// 各方 DEATHKILL 行的编号、位置与另外两方的 DEATHSEEN 行对照，确认三人的死亡都同步到。
+// ===========================================================================
+class OwnerDeathScenario : public TimedScenario {
+public:
+    OwnerDeathScenario()
+        : TimedScenario("owner_death", /*evidenceMs=*/0),
+          firstSlot_(0), killed_(false), victim_(0), nStart_(0), nTabs_(0) {}
+
+    virtual void onStart(const ScenarioContext& ctx) {
+        firstSlot_ = (GetTickCount() + LEAD_MS) / SLOT_MS + 1;
+        // 记下开始时活着的玩家角色（本机指针，只比较不解引用）和现有编队
+        EntityState sq[MAX_BODIES];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, MAX_BODIES);
+        for (unsigned int i = 0; i < n; ++i) {
+            if (sq[i].bodyState & BODY_DEAD) continue;
+            Character* c = engine::resolve(sq[i]);
+            if (c) startAlive_[nStart_++] = c;
+        }
+        nTabs_ = engine::listPlayerTabs(ctx.gw, startTabs_, MAX_TABS);
+        char b[160];
+        _snprintf(b, sizeof(b) - 1,
+                  "SCENARIO DEATHRUN start who=%s rank=%u bodies=%u alive=%u tabs=%u firstSlot=%lu",
+                  ctx.isHost ? "host" : "join", ctx.ownRank, n, nStart_, nTabs_, firstSlot_);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+
+    virtual bool onTick(const ScenarioContext& ctx) {
+        unsigned long slot = GetTickCount() / SLOT_MS;
+        if (!killed_ && slot >= firstSlot_ + KILL_GAP_SLOTS * ctx.ownRank) {
+            killed_ = true;
+            EntityState sq[MAX_BODIES];
+            unsigned int n = engine::captureSquad(ctx.gw, false, sq, MAX_BODIES);
+            // 挑受害者：好友2 要编队里只剩他一个活人的，其他人要多人编队里的；都没有就挑第一个自己的活人
+            int pick = -1, fallback = -1;
+            unsigned int mates = 0;
+            for (unsigned int i = 0; i < n && pick < 0; ++i) {
+                if ((sq[i].bodyState & BODY_DEAD) || !ctx.ownTab ||
+                    !ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial)) continue;
+                mates = 0;
+                for (unsigned int j = 0; j < n; ++j)
+                    if (!(sq[j].bodyState & BODY_DEAD) && sq[j].hContainer == sq[i].hContainer &&
+                        sq[j].hContainerSerial == sq[i].hContainerSerial) ++mates;
+                if (fallback < 0) fallback = (int)i;
+                if ((ctx.ownRank == 2) == (mates == 1)) pick = (int)i;
+            }
+            // pref：挑到的是否合乎上面的偏好（没有合适的才退回第一个自己的活人）
+            bool pref = pick >= 0;
+            if (!pref) pick = fallback;
+            int heads = -1;
+            if (pick >= 0) victim_ = engine::resolve(sq[pick]);
+            if (victim_) {
+                // 头部伤到远低于负的上限，下一帧原版医疗更新判死
+                heads = 0;
+                __try {
+                    MedicalSystem* med = &victim_->medical;
+                    for (unsigned int k = 0; k < (unsigned int)med->anatomy.count; ++k) {
+                        MedicalSystem::HealthPartStatus* p = med->anatomy.stuff[k];
+                        if (!p || p->whatAmI != MedicalSystem::HealthPartStatus::PART_HEAD) continue;
+                        p->flesh     = -(p->_maxHealth * 3.0f + 100.0f);
+                        p->fleshStun = p->flesh;
+                        ++heads;
+                    }
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    heads = -2;
+                }
+            }
+            char b[240];
+            if (pick >= 0)
+                _snprintf(b, sizeof(b) - 1,
+                          "SCENARIO DEATHKILL who=%s rank=%u idx=%u ser=%u tab=%u,%u pos=%.1f,%.1f heads=%d pref=%d tick=%lu",
+                          ctx.isHost ? "host" : "join", ctx.ownRank, sq[pick].hIndex, sq[pick].hSerial,
+                          sq[pick].hContainer, sq[pick].hContainerSerial, sq[pick].x, sq[pick].z,
+                          heads, pref ? 1 : 0, (unsigned long)GetTickCount());
+            else
+                _snprintf(b, sizeof(b) - 1, "SCENARIO DEATHKILL who=%s rank=%u none (no own living character)",
+                          ctx.isHost ? "host" : "join", ctx.ownRank);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            return false;
+        }
+        if (slot < firstSlot_ + END_SLOTS + (ctx.isHost ? HOST_EXTRA_SLOTS : 0)) return false;
+
+        unsigned int dead[2] = { 0, 0 };
+        bool haveDead = engine::readDeadSquadTab(ctx.gw, dead);
+        EntityState sq[MAX_BODIES];
+        Character* now[MAX_BODIES];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, MAX_BODIES);
+        for (unsigned int i = 0; i < n; ++i) now[i] = engine::resolve(sq[i]);
+        unsigned int vanished = 0, newlyDead = 0, misplaced = 0;
+        bool victimOk = false;
+        char b[240];
+        for (unsigned int s = 0; s < nStart_; ++s) {
+            int at = -1;
+            for (unsigned int i = 0; i < n && at < 0; ++i)
+                if (now[i] == startAlive_[s]) at = (int)i;
+            if (at < 0) { ++vanished; continue; }
+            const EntityState& e = sq[at];
+            if (!(e.bodyState & BODY_DEAD)) continue;
+            bool inDead = haveDead && e.hContainer == dead[0] && e.hContainerSerial == dead[1];
+            ++newlyDead;
+            if (!inDead) ++misplaced;
+            if (startAlive_[s] == victim_ && inDead) victimOk = true;
+            _snprintf(b, sizeof(b) - 1,
+                      "SCENARIO DEATHSEEN who=%s idx=%u ser=%u tab=%u,%u deadSquad=%d mine=%d pos=%.1f,%.1f",
+                      ctx.isHost ? "host" : "join", e.hIndex, e.hSerial, e.hContainer,
+                      e.hContainerSerial, inDead ? 1 : 0, startAlive_[s] == victim_ ? 1 : 0, e.x, e.z);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        unsigned int tabs[MAX_TABS][2];
+        unsigned int nt = engine::listPlayerTabs(ctx.gw, tabs, MAX_TABS), newTabs = 0;
+        for (unsigned int t = 0; t < nt; ++t) {
+            bool known = false;
+            for (unsigned int k = 0; k < nTabs_ && !known; ++k)
+                known = startTabs_[k][0] == tabs[t][0] && startTabs_[k][1] == tabs[t][1];
+            if (known) continue;
+            ++newTabs;
+            _snprintf(b, sizeof(b) - 1, "SCENARIO DEATHTAB who=%s new tab=%u,%u",
+                      ctx.isHost ? "host" : "join", tabs[t][0], tabs[t][1]);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        passed_ = victimOk && vanished == 0 && misplaced == 0 && newTabs == 0 && newlyDead >= 3;
+        _snprintf(b, sizeof(b) - 1,
+                  "SCENARIO DEATHRUN final who=%s rank=%u victim=%d newlyDead=%u misplaced=%u vanished=%u tabs=%u->%u newTabs=%u deadTab=%u,%u",
+                  ctx.isHost ? "host" : "join", ctx.ownRank, victimOk ? 1 : 0, newlyDead, misplaced,
+                  vanished, nTabs_, nt, newTabs, dead[0], dead[1]);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        return true;
+    }
+
+private:
+    static const unsigned int  MAX_BODIES       = 64;
+    static const unsigned int  MAX_TABS         = 64;
+    static const unsigned long SLOT_MS          = 4000;
+    static const unsigned long LEAD_MS          = 8000;
+    static const unsigned long KILL_GAP_SLOTS   = 3;
+    static const unsigned long END_SLOTS        = 12;
+    // 主机多等两个整点再核对，免得先退出把加入方断开
+    static const unsigned long HOST_EXTRA_SLOTS = 2;
+
+    unsigned long firstSlot_;
+    bool          killed_;
+    Character*    victim_;
+    Character*    startAlive_[MAX_BODIES];
+    unsigned int  nStart_;
+    unsigned int  startTabs_[MAX_TABS][2];
+    unsigned int  nTabs_;
+};
+
 } // namespace
 
 Scenario* makeMedicalScenario(const std::string& name) {
@@ -600,6 +756,7 @@ Scenario* makeMedicalScenario(const std::string& name) {
     if (name == "limb_loss")    return new LimbLossScenario();
     if (name == "crawl_move")   return new CrawlMoveScenario();
     if (name == "stats_sync")   return new StatsSyncScenario();
+    if (name == "owner_death")  return new OwnerDeathScenario();
     return 0;
 }
 

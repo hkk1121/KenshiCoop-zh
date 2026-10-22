@@ -1,4 +1,4 @@
-// Scenario - deterministic, log-emitting test scripts driven from the tick hook.
+﻿// Scenario - deterministic, log-emitting test scripts driven from the tick hook.
 //
 // A scenario runs on BOTH clients (it branches on ctx.isHost). The authoritative
 // side emits "SCENARIO MEMBER hand=.. pos=.." lines; the observing side emits
@@ -43,6 +43,10 @@ struct ScenarioContext {
     // would try to drive join-1's member. 2-player behavior is unchanged (host
     // resolves to 0, the classic join to 1).
     unsigned int  ownRank;
+    // 编队标签 (container, containerSerial) 是否是本机玩家的编队（非 0 = 是；借到别人的
+    // 编队期间只认借来的）。Plugin.cpp 用编队栏的判定填入；会话没开始或归属表没到时
+    // 一律返回非 0。
+    int         (*ownTab)(unsigned int container, unsigned int containerSerial);
 };
 
 class Scenario {
