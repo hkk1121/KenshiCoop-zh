@@ -1770,8 +1770,11 @@ void Replicator::applyTransfers(GameWorld* gw, Inbound& in, NetLink& net, u32 lo
                 b[sizeof(b) - 1] = '\0'; coop::logLine(b);
                 if (resolved && isGearType(item->first.second))
                     wdSuppress_[std::make_pair(k, item->first.first)] = now + XFER_GRACE_MS;
+                if (removed > 0) {
+                    std::map<XKey, int>& base = xferBase_[k];
+                    if ((base[item->first] -= removed) <= 0) base.erase(item->first);
+                }
             }
-            if (resolved) xferRebase(gw, k);
             xferDebt_.erase(debt++);
         }
     }
@@ -1877,8 +1880,13 @@ void Replicator::applyTransfers(GameWorld* gw, Inbound& in, NetLink& net, u32 lo
             wdSuppress_[std::make_pair(dk, key.first)] = now + XFER_GRACE_MS;
         }
         // Keep the transfer detector blind to the relocation we just made.
-        xferRebase(gw, sk);
-        xferRebase(gw, dk);
+        // 只按本次实际增减调整这一种物品的基线：整箱重建会抹掉本机玩家在同一容器里还没配对的拖动，
+        // 那次拖动的意图就再也发不出去，源主人不知道东西被拿走（两人同时搜同一具尸体时复制）
+        if (moved + removed > 0) {
+            std::map<XKey, int>& sb = xferBase_[sk];
+            if ((sb[key] -= moved + removed) <= 0) sb.erase(key);
+        }
+        if (moved + fab > 0) xferBase_[dk][key] += moved + fab;
         // 只有权威回执：源端批准可转移数量，目标端只报告实际放入量，旁观者不裁决。
         InvXferAckPacket ack; memset(&ack, 0, sizeof(ack));
         ack.type        = (u8)PKT_INV_XFER_ACK;
