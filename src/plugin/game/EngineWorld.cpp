@@ -1787,11 +1787,15 @@ unsigned int listPlayerTabs(GameWorld* gw, unsigned int (*out)[2], unsigned int 
         if (!gw || !gw->player || !out) return 0;
         Faction* faction = gw->player->getFaction();
         if (!faction) return 0;
+        unsigned int dead[2] = { 0, 0 };
+        readDeadSquadTab(gw, dead);
         for (unsigned int i = 0; i < faction->activePlatoons.size() && n < maxOut; ++i) {
             Platoon* p = faction->activePlatoons[i];
             if (!p || !p->activePlatoon) continue;
             const hand& h = p->getHandle();
             if (!(h.container | h.containerSerial)) continue;
+            // 阵亡编队不列出：不登记归属、不当招募落点
+            if (h.container == dead[0] && h.containerSerial == dead[1]) continue;
             out[n][0] = h.container; out[n][1] = h.containerSerial; ++n;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -1804,6 +1808,17 @@ bool createPlayerSquad(GameWorld* gw, unsigned int out[2]) {
         ActivePlatoon* p = g_createSquadOrig ? g_createSquadOrig(gw->player) : gw->player->createSquad();
         if (!p || !p->me) return false;
         const hand& h = p->me->getHandle();
+        out[0] = h.container; out[1] = h.containerSerial;
+        return (out[0] | out[1]) != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// getDeadSquad（真实 0x7F3DC0）建阵亡编队时把编队手把拷进 deadPlayerSquad，
+// loadFromSerialise 读档时按名字 __DEAD_SQUAD__ 找回，所以它与编队标签一致
+bool readDeadSquadTab(GameWorld* gw, unsigned int out[2]) {
+    __try {
+        if (!gw || !gw->player || !out) return false;
+        const hand& h = gw->player->deadPlayerSquad;
         out[0] = h.container; out[1] = h.containerSerial;
         return (out[0] | out[1]) != 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }

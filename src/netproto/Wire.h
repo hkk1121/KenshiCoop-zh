@@ -139,6 +139,7 @@ enum EventType {
     // index/serial do not survive). An all-zero actor = the body LEFT the
     // roster (dismissal). The receiver shares the EVT_RECRUIT re-key path
     // and pins the new hand as peer-owned (rank reshuffle cannot flip it).
+    // arg = 1：角色死亡，被原版移进发送方的阵亡编队（接收方按尸体处理，不新建编队）。
     EVT_SQUAD_MOVE = 11,
     // 小队控制授权（协议 1002，第 2 批）。subject = 小队标签键（sContainer /
     // sContainerSerial 放标签的 container / containerSerial，其余字段 0）；arg =

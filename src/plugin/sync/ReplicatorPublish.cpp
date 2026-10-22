@@ -1,4 +1,4 @@
-// ReplicatorPublish.cpp - the host/owner SEND half (monolith split from
+﻿// ReplicatorPublish.cpp - the host/owner SEND half (monolith split from
 // Replicator.cpp, 2026-07-12): publishOwned (owned-squad + near-band NPC
 // entity states, the 2 Hz mid-band slice, combat-intent capture incl. the
 // canonical-hand translation) and publishNpcCensus (protocol 36 existence
@@ -52,6 +52,8 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
     // captured member, before the ownership partition below decides which we own.
     allSquad_.clear();
     for (unsigned int i = 0; i < nSquad; ++i) allSquad_.insert(keyOf(raw[i]));
+    unsigned int deadTab[2] = { 0, 0 };
+    bool haveDead = engine::readDeadSquadTab(gw, deadTab);
     unsigned int n = 0;
     for (unsigned int i = 0; i < nSquad && n < MAX_PUBLISH; ++i) {
         std::pair<u32, u32> key(raw[i].hContainer, raw[i].hContainerSerial);
@@ -72,6 +74,10 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
             if (pinOwned_.count(hk))     owned = true;
             else if (pinPeer_.count(hk)) owned = false;
         }
+        // 阵亡编队不登记归属，里面的尸体按人归属：本端判死的（publishSquadMoves 钉为
+        // pinOwned_）由本端发布；其余没有记录的（读档后、主人已离开）由主机发布
+        if (haveDead && key.first == deadTab[0] && key.second == deadTab[1])
+            owned = pinOwned_.count(hk) != 0 || (isHostRole() && !pinPeer_.count(hk));
         // Drive-exclusion (Phase 1b recruit membership): a body we are DRIVING
         // from the peer's stream is peer-owned regardless of the local tab
         // rank/hand it sits in. insertPeerMember re-containers a recruit into

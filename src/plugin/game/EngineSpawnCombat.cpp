@@ -2497,6 +2497,21 @@ void setCharAge(Character* c, float age) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
+// 原版医疗更新（真实 0x6519B8 一带）判死时先置 medical.dead（+0x164），再调
+// Character::declareDead（0x7A5660）：玩家阵营角色从原编队移出、加进 getDeadSquad，
+// 原编队空了就随之判为死编队。medical.dead 已置位时医疗更新不会再走这条路。
+bool applyOwnerDeath(Character* c) {
+    if (!c) return false;
+    __try {
+        if (c->medical.dead) return false;
+        c->medical.dead = true;
+        c->declareDead();
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 
 } // namespace engine
 } // namespace coop

@@ -922,6 +922,9 @@ void Replicator::applyEvents(GameWorld* gw, Inbound& in) {
                     xb[sizeof(xb) - 1] = '\0'; coop::logLine(xb);
                     break;
                 }
+                // 对方的角色死了、被原版移进对方的阵亡编队（arg = 1）：先锁存死亡，重键走尸体
+                // 分支（不并入、不新建编队），随后到达的 EVT_DEATH 不再改变什么
+                if (ev.arg != 0.0f) { d.deathLatched = true; d.koLatched = true; }
                 rekeyPeerBody(gw, ev.ownerId, k, nk, "squad");
                 break;
             }

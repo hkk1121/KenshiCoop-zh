@@ -2035,6 +2035,8 @@ void Replicator::publishSquadMoves(GameWorld* gw, NetLink& net, u32 ownerId) {
     engine::SquadMoveEdge edges[8];
     unsigned int n = engine::drainSquadMoveEdges(edges, 8);
     unsigned long nowSq = nowMs();
+    unsigned int deadTab[2] = { 0, 0 };
+    bool haveDead = n > 0 && engine::readDeadSquadTab(gw, deadTab);
     // Retire hands we already announced as gone (bounded; see exitedOwn_).
     for (std::map<Key, unsigned long>::iterator xt = exitedOwn_.begin();
          xt != exitedOwn_.end(); ) {
@@ -2069,6 +2071,34 @@ void Replicator::publishSquadMoves(GameWorld* gw, NetLink& net, u32 ownerId) {
         // recruit / a re-moved member must not leave a stale claim behind).
         pinOwned_.erase(ok);
         pinPeer_.erase(ok);
+        // 进阵亡编队是原版 Character::declareDead 的结果，不是玩家拖拽。阵亡编队不登记归属，
+        // 尸体按人归属（publishOwned）。别人的角色在本机被判死：不回退（原编队空了会被引擎
+        // 判为死编队并连同成员清掉，拖回去尸体随之消失）、不广播，对方的流键继续绑在这具身体上。
+        // 自己的角色：照常广播（arg = 1 让对方按尸体处理，不新建编队），继续由自己发布
+        bool toDead = !exited && haveDead && nk.c == deadTab[0] && nk.cs == deadTab[1];
+        if (toDead) {
+            std::pair<u32, u32> oldTab((u32)ok.c, (u32)ok.cs);
+            std::map<std::pair<u32, u32>, unsigned int>::const_iterator oit = tabRank_.find(oldTab);
+            bool oldOwned = ownsTabEffective(oldTab, oit == tabRank_.end() ? 0xFFFFFFFFu : oit->second);
+            if (!oldOwned) {
+                Character* mc = engine::resolveCharByHand(nk.i, nk.s, nk.t, nk.c, nk.cs);
+                if (mc) {
+                    std::map<Character*, Key>::const_iterator ck = canonicalOf_.find(mc);
+                    Key sk = ck != canonicalOf_.end() ? ck->second : ok;
+                    if (proxyByKey_.find(sk) == proxyByKey_.end()) proxyByKey_[sk] = mc;
+                }
+                pinPeer_[nk] = driverOwnerForTab(oldTab);
+            } else {
+                pinOwned_.insert(nk);
+            }
+            char db[200];
+            _snprintf(db, sizeof(db) - 1,
+                "[squad] DEAD-SQUAD %s corpse old=%u,%u,%u,%u,%u new=%u,%u,%u,%u,%u",
+                oldOwned ? "own" : "peer", ok.t, ok.c, ok.cs, ok.i, ok.s,
+                nk.t, nk.c, nk.cs, nk.i, nk.s);
+            db[sizeof(db) - 1] = '\0'; coop::logLine(db);
+            if (!oldOwned) continue;
+        }
         // 本地把无控制权的队员拖进任何标签时，都不接受
         // 这次移动——就地回退到原标签，并且不广播 EVT_SQUAD_MOVE（对端收到后一律按“目标
         // 标签归谁”重定归属，本协议无法表达“这次移动无效”）。回退后把对端仍在使用的流键
@@ -2121,14 +2151,14 @@ void Replicator::publishSquadMoves(GameWorld* gw, NetLink& net, u32 ownerId) {
         // polled from OUR roster is OUR user's action, so the new hand
         // publishes from this side no matter which rank its container latched
         // to (an appended tab inherits our ownership through this pin).
-        if (!exited) {
+        if (!exited && !toDead) {
             Tab tab(nk.c, nk.cs); claimLocalTab(tab);
             if (ownsTabEffective(tab, 0xFFFFFFFFu)) pinOwned_.insert(nk);
             else pinPeer_[nk] = ownerForIdentity(tabOwnerIdentity(tab));
         }
         // ...and if it LEFT, retire the hand so the peer's in-flight tail cannot
         // turn our departed body into a driven one (see exitedOwn_).
-        else exitedOwn_[ok] = nowSq;
+        else if (exited) exitedOwn_[ok] = nowSq;
         EventPacket ev;
         memset(&ev, 0, sizeof(ev));
         ev.type    = (u8)PKT_EVENT;
@@ -2141,6 +2171,7 @@ void Replicator::publishSquadMoves(GameWorld* gw, NetLink& net, u32 ownerId) {
         ev.aType = edges[i].after[0]; ev.aContainer = edges[i].after[1];
         ev.aContainerSerial = edges[i].after[2];
         ev.aIndex = edges[i].after[3]; ev.aSerial = edges[i].after[4];
+        ev.arg = toDead ? 1.0f : 0.0f;
         net.queueEvent(ev);
         char b[176];
         _snprintf(b, sizeof(b) - 1,

@@ -2255,6 +2255,15 @@ bool installSquadBarHook();
 // 调用方用 worldLive 门控。
 void syncSquadBar(GameWorld* gw);
 
+// ---- 阵亡编队（PlayerInterface::deadPlayerSquad，存档里名为 __DEAD_SQUAD__） ------
+// 原版 Character::declareDead 把死去的玩家角色移进这个编队；它不是真正的编队，不登记归属。
+// 读出它的标签 (container, containerSerial)；还没建过阵亡编队时返回 false。
+bool readDeadSquadTab(GameWorld* gw, unsigned int out[2]);
+// 主人已确认死亡（可靠 EVT_DEATH）的副本按原版流程判死：先置 medical.dead 再调
+// Character::declareDead（与原版医疗更新判死的顺序一致，副本随之进本机阵亡编队）。
+// 已经死了返回 false。
+bool applyOwnerDeath(Character* c);
+
 } // namespace engine
 } // namespace coop
 

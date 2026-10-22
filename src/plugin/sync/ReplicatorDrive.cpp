@@ -1,4 +1,4 @@
-// ReplicatorDrive.cpp - the join-side DRIVE path (monolith split from
+﻿// ReplicatorDrive.cpp - the join-side DRIVE path (monolith split from
 // Replicator.cpp, 2026-07-12): applyTargets (the per-frame walk/park/combat/
 // carry/furniture/stealth drive of every peer-authoritative body, incl. the
 // interp buffer consumption and hard-snap gates), applyRest (rest placement +
@@ -823,6 +823,13 @@ void Replicator::applyTargets(GameWorld* gw) {
         if (!crawling &&
             (coop::bodyIsDown(out.bodyState) || d.deathLatched || d.koLatched ||
              d.carriedDown)) {
+            // 主人已确认死亡的玩家角色：本机副本按原版流程判死，进本机阵亡编队，
+            // 主机存档里留下的是尸体（只靠本机医疗模拟的话，被击杀的副本可能一直只是昏迷）
+            if (d.deathLatched && engine::isLocalPlayerChar(gw, c) && engine::applyOwnerDeath(c)) {
+                char db[128]; _snprintf(db, sizeof(db) - 1,
+                    "[death] owner death applied hand=%u,%u", out.hIndex, out.hSerial);
+                db[sizeof(db) - 1] = '\0'; coop::logLine(db);
+            }
             unsigned short localBs = engine::readBodyState(c);
             if (!coop::bodyIsDown(localBs)) engine::knockDown(c, true);
             else                          { engine::holdDown(c); d.carriedDown = false; }

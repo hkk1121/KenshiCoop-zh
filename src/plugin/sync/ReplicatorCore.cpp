@@ -1523,8 +1523,12 @@ void Replicator::syncOwners(GameWorld* gw, NetLink& net, Inbound& in, bool host)
             owners_.clear(); ownersRevision_ = 1; ownersAttached_ = true; ownersDirty_ = true;
             static EntityState legacy[160];
             unsigned int n = engine::captureSquad(gw, false, legacy, 160);
+            unsigned int dead[2] = { 0, 0 };
+            engine::readDeadSquadTab(gw, dead);
             std::vector<Tab> sorted;
-            for (unsigned int i = 0; i < n; ++i) sorted.push_back(Tab(legacy[i].hContainer, legacy[i].hContainerSerial));
+            for (unsigned int i = 0; i < n; ++i)
+                if (legacy[i].hContainer != dead[0] || legacy[i].hContainerSerial != dead[1])
+                    sorted.push_back(Tab(legacy[i].hContainer, legacy[i].hContainerSerial));
             std::sort(sorted.begin(), sorted.end());
             sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
             for (unsigned int i = 0; i < sorted.size(); ++i) {
@@ -1582,6 +1586,14 @@ void Replicator::syncOwners(GameWorld* gw, NetLink& net, Inbound& in, bool host)
             insertPeerMember(gw, author, p->second, p->first, "recruit", false);
     }
     if (host) {
+        // 旧版本把阵亡编队当成未知编队登记给了主机，这里去掉（listPlayerTabs 已不再列出它）
+        unsigned int dead[2] = { 0, 0 };
+        if (engine::readDeadSquadTab(gw, dead) && owners_.erase(Tab(dead[0], dead[1]))) {
+            ++ownersRevision_; ownersDirty_ = true;
+            char b[144];
+            _snprintf(b, sizeof(b) - 1, "[owners] dead squad tab=%u,%u removed", dead[0], dead[1]);
+            b[sizeof(b) - 1] = 0; coop::logLine(b);
+        }
         unsigned int tabs[OWNERS_MAX][2]; unsigned int n = engine::listPlayerTabs(gw, tabs, OWNERS_MAX);
         for (unsigned int i = 0; i < n; ++i) {
             Tab tab(tabs[i][0], tabs[i][1]);
