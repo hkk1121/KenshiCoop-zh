@@ -1728,6 +1728,7 @@ void Replicator::detectAndPublishTransfers(GameWorld* gw, NetLink& net, u32 owne
             XferOut o;
             o.src = f.src; o.dst = f.dst; o.key = f.key; o.qty = f.qty;
             o.srcPeer = !srcOwn; o.dstPeer = !dstOwn; o.sentMs = now;
+            o.srcAcked = false; o.dstAcked = false;
             xferOut_[pkt.xferId] = o;
             char b[240]; _snprintf(b, sizeof(b) - 1,
                 "[xfer] SEND id=%u sid='%s' type=%u qty=%d src=%u,%u,%u,%u,%u(%s) dst=%u,%u,%u,%u,%u(%s)",
@@ -1750,9 +1751,31 @@ void Replicator::detectAndPublishTransfers(GameWorld* gw, NetLink& net, u32 owne
 void Replicator::applyTransfers(GameWorld* gw, Inbound& in, NetLink& net, u32 localId) {
     std::deque<InboundInvXfer> got;
     in.drainInvXfers(got);
-    if (got.empty()) return;
     const unsigned long XFER_GRACE_MS = 10000;
     unsigned long now = nowMs();
+    if (!xferDebt_.empty() && !engine::inventoryUiOpen()) {
+        for (std::map<Key, std::map<XKey, int> >::iterator debt = xferDebt_.begin();
+             debt != xferDebt_.end(); ) {
+            const Key& k = debt->first;
+            unsigned int cHand[5]; handForContainerKey(k, cHand);
+            bool resolved = engine::resolveObjectByHand(cHand) != 0;
+            for (std::map<XKey, int>::const_iterator item = debt->second.begin();
+                 item != debt->second.end(); ++item) {
+                int removed = resolved ? engine::removeItemsFromContainer(gw, cHand,
+                    item->first.first.c_str(), item->first.second, item->second) : 0;
+                char b[240]; _snprintf(b, sizeof(b) - 1,
+                    "[xfer] DEBT hand=%u,%u,%u,%u,%u sid='%s' want=%d removed=%d resolved=%d",
+                    k.t, k.c, k.cs, k.i, k.s, item->first.first.c_str(), item->second,
+                    removed, resolved ? 1 : 0);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                if (resolved && isGearType(item->first.second))
+                    wdSuppress_[std::make_pair(k, item->first.first)] = now + XFER_GRACE_MS;
+            }
+            if (resolved) xferRebase(gw, k);
+            xferDebt_.erase(debt++);
+        }
+    }
+    if (got.empty()) return;
     for (std::deque<InboundInvXfer>::iterator it = got.begin(); it != got.end(); ++it) {
         const InvXferPacket& p = it->pkt;
         if (p.ownerId == localId) continue; // never act on our own (relay safety)
@@ -1767,10 +1790,6 @@ void Replicator::applyTransfers(GameWorld* gw, Inbound& in, NetLink& net, u32 lo
         // Either end may be a mine the peer emptied, whose hand is its own.
         unsigned int sHand[5]; handForContainerKey(sk, sHand);
         unsigned int dHand[5]; handForContainerKey(dk, dHand);
-        // Relocate OUR copy of the real item between the same two containers - the
-        // conservation move (never fabricates or destroys), so gear survives.
-        int moved = engine::moveItemBetweenContainers(gw, sHand, dHand, p.stringID,
-                                                      p.itemType, (int)p.quantity);
         bool srcOwn = ownedContainers_.count(sk) != 0 || ownHands_.count(sk) != 0;
         bool dstOwn = ownedContainers_.count(dk) != 0 || ownHands_.count(dk) != 0;
         // 别人发来的可能是身体换编队（如进阵亡编队）之前的旧手把：编号、编队变了，类型和序列号不变
@@ -1781,14 +1800,34 @@ void Replicator::applyTransfers(GameWorld* gw, Inbound& in, NetLink& net, u32 lo
                 if (o->t == dk.t && o->s == dk.s) dstOwn = true;
             }
         }
+        XKey key(std::string(p.stringID), p.itemType);
+        int avail = -1;
+        int quantity = (int)p.quantity;
+        if (srcOwn) {
+            InvItemEntry items[64];
+            unsigned int n = engine::captureContainerContents(gw, sHand, items, 64, 0);
+            avail = 0;
+            for (unsigned int i = 0; i < n; ++i)
+                if (items[i].itemType == p.itemType && strcmp(items[i].stringID, p.stringID) == 0)
+                    avail += items[i].quantity < 1 ? 1 : (int)items[i].quantity;
+            std::map<Key, std::map<XKey, int> >::const_iterator debt = xferDebt_.find(sk);
+            if (debt != xferDebt_.end()) {
+                std::map<XKey, int>::const_iterator item = debt->second.find(key);
+                if (item != debt->second.end()) avail -= item->second;
+            }
+            if (avail < 0) avail = 0;
+            if (quantity > avail) quantity = avail;
+        }
+        int moved = engine::moveItemBetweenContainers(gw, sHand, dHand, p.stringID,
+                                                      p.itemType, quantity);
         // 源头是自己的、目的地是别人的：对方背包快照先到（已含这些东西）、我们这份目的地放不下时，
         // 移动会被退回源头。也要从源头去掉差额，目的地以它主人的快照为准，否则源头和对方身上各一份
         int removed = 0;
-        if (moved < (int)p.quantity && srcOwn && !dstOwn)
+        if (moved < quantity && srcOwn && !dstOwn)
             removed = engine::removeItemsFromContainer(gw, sHand, p.stringID, p.itemType,
-                                                       (int)p.quantity - moved);
+                                                       quantity - moved);
         int fab = 0;
-        if (moved + removed < (int)p.quantity) {
+        if (!srcOwn && moved < quantity) {
             // Our src copy is short (desync) - fabricate the shortfall into dst so the
             // trade still lands. Non-gear always did this; gear joined once spike 451
             // made weapon fabrication work (armour always could). Dupe safety: the
@@ -1806,7 +1845,11 @@ void Replicator::applyTransfers(GameWorld* gw, Inbound& in, NetLink& net, u32 lo
                                                        (int)p.quantity - moved - removed, (int)p.quality,
                                                        p.manufacturer, p.material, p.level);
         }
-        XKey key(std::string(p.stringID), p.itemType);
+        if (dstOwn && !srcOwn) {
+            DstApplied d; d.dst = dk; d.key = key;
+            d.qty = moved + fab; d.receivedMs = now;
+            dstApplied_[id] = d;
+        }
         // Latch OUR peer end(s) too: an in-flight stale snapshot (captured by its
         // owner before this transfer) must not reconcile the relocation away.
         int applied = moved + removed + fab;
@@ -1829,9 +1872,7 @@ void Replicator::applyTransfers(GameWorld* gw, Inbound& in, NetLink& net, u32 lo
         // Keep the transfer detector blind to the relocation we just made.
         xferRebase(gw, sk);
         xferRebase(gw, dk);
-        // Protocol 50: answer. The author cannot know any of this - only the
-        // receiver knows whether its own copy of the source actually held the
-        // item - so state it rather than let a deadline stand in for it.
+        // 只有权威回执：源端批准可转移数量，目标端只报告实际放入量，旁观者不裁决。
         InvXferAckPacket ack; memset(&ack, 0, sizeof(ack));
         ack.type        = (u8)PKT_INV_XFER_ACK;
         ack.ownerId     = localId;
@@ -1839,14 +1880,15 @@ void Replicator::applyTransfers(GameWorld* gw, Inbound& in, NetLink& net, u32 lo
         ack.xferId      = p.xferId;
         ack.applied     = (u16)((applied < 0) ? 0 : (applied > 65535 ? 65535 : applied));
         ack.requested   = p.quantity;
+        ack.role        = (u8)((srcOwn ? 1 : 0) | (dstOwn ? 2 : 0));
         ack.verdict     = (u8)((applied <= 0) ? XFER_ACK_REJECT
                              : (applied >= (int)p.quantity) ? XFER_ACK_ACCEPT
                              : XFER_ACK_PARTIAL);
-        net.queueInvXferAck(ack);
-        char b[240]; _snprintf(b, sizeof(b) - 1,
-            "[xfer] APPLY id=%u from=%u sid='%s' type=%u qty=%u moved=%d fab=%d ack=%u removed=%d",
+        if (ack.role) net.queueInvXferAck(ack);
+        char b[272]; _snprintf(b, sizeof(b) - 1,
+            "[xfer] APPLY id=%u from=%u sid='%s' type=%u qty=%u moved=%d fab=%d ack=%u removed=%d avail=%d role=%u",
             p.xferId, p.ownerId, p.stringID, p.itemType, (unsigned)p.quantity,
-            moved, fab, (unsigned)ack.verdict, removed);
+            moved, fab, (unsigned)ack.verdict, removed, avail, (unsigned)ack.role);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
     }
 }
@@ -1857,34 +1899,78 @@ void Replicator::applyXferAcks(GameWorld* gw, Inbound& in, u32 localId) {
     unsigned long now = nowMs();
     for (std::deque<InboundInvXferAck>::iterator it = got.begin(); it != got.end(); ++it) {
         const InvXferAckPacket& a = it->pkt;
-        if (a.xferOwnerId != localId) continue;      // not answering us (relay safety)
-        std::map<u32, XferOut>::iterator o = xferOut_.find(a.xferId);
-        if (o == xferOut_.end()) continue;           // already settled or swept
-        const XferOut& x = o->second;
-        // Back out this intent's latch contribution, and do it for EVERY
-        // verdict - the latch exists only to bridge the window where the
-        // receiver had not answered yet, and the answer has arrived:
-        //   accepted - the receiver's snapshots now carry the move, so holding
-        //              the latch for the rest of the grace only delays
-        //              convergence
-        //   partial  - the units the receiver refused are units its snapshots
-        //              still show where they were, and we want to converge on
-        //              that, not defend our optimistic copy of them
-        //   rejected - the same thing at full size. Dropping the latch is what
-        //              lets applyInventories put our local copy back the way
-        //              the owner sees it; that is the rollback, through the
-        //              reconcile path rather than a second mutation that could
-        //              itself dupe.
-        if (x.srcPeer) releaseXferLatch(x.src, x.key, +x.qty);
-        if (x.dstPeer) releaseXferLatch(x.dst, x.key, -x.qty);
+        if (a.role == 0 || a.role > 3) continue;
         const char* vn = (a.verdict == XFER_ACK_ACCEPT)  ? "accept"
                        : (a.verdict == XFER_ACK_PARTIAL) ? "partial" : "reject";
-        char b[224]; _snprintf(b, sizeof(b) - 1,
-            "[xfer] ACK id=%u from=%u verdict=%s applied=%u/%u waitedMs=%lu sid='%s'",
+        if (a.xferOwnerId != localId) {
+            if (!(a.role & 1)) continue;
+            std::map<std::pair<u32, u32>, DstApplied>::iterator d =
+                dstApplied_.find(std::make_pair(a.xferOwnerId, a.xferId));
+            if (d == dstApplied_.end()) continue;
+            int rollback = d->second.qty - (int)a.applied;
+            if (rollback > 0) {
+                xferDebt_[d->second.dst][d->second.key] += rollback;
+                char b[200]; _snprintf(b, sizeof(b) - 1,
+                    "[xfer] ROLLBACK id=%u sid='%s' qty=%d",
+                    a.xferId, d->second.key.first.c_str(), rollback);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+            char b[240]; _snprintf(b, sizeof(b) - 1,
+                "[xfer] ACK id=%u from=%u verdict=%s applied=%u/%u waitedMs=%lu sid='%s' role=%u",
+                a.xferId, a.ownerId, vn, (unsigned)a.applied, (unsigned)a.requested,
+                now - d->second.receivedMs, d->second.key.first.c_str(), (unsigned)a.role);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            dstApplied_.erase(d);
+            continue;
+        }
+        std::map<u32, XferOut>::iterator o = xferOut_.find(a.xferId);
+        if (o == xferOut_.end()) {
+            if (a.role & 1) {
+                char b[160]; _snprintf(b, sizeof(b) - 1,
+                    "[xfer] ACK-IGNORED id=%u from=%u role=%u (no pending intent)",
+                    a.xferId, a.ownerId, (unsigned)a.role);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+            continue;
+        }
+        XferOut& x = o->second;
+        if (a.role & 1) {
+            if (x.srcAcked) {
+                char b[160]; _snprintf(b, sizeof(b) - 1,
+                    "[xfer] ACK-DUPLICATE id=%u from=%u role=%u (source already answered)",
+                    a.xferId, a.ownerId, (unsigned)a.role);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                continue;
+            }
+            x.srcAcked = true;
+            int rollback = x.qty - (int)a.applied;
+            if (rollback > 0) {
+                if (x.srcPeer) releaseXferLatch(x.src, x.key, +rollback);
+                if (x.dstPeer) releaseXferLatch(x.dst, x.key, -rollback);
+                else {
+                    xferDebt_[x.dst][x.key] += rollback;
+                    char b[200]; _snprintf(b, sizeof(b) - 1,
+                        "[xfer] ROLLBACK id=%u sid='%s' qty=%d",
+                        a.xferId, x.key.first.c_str(), rollback);
+                    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                }
+            }
+        }
+        if (a.role & 2) {
+            x.dstAcked = true;
+            if (!x.srcPeer && (int)a.applied < x.qty) {
+                char b[200]; _snprintf(b, sizeof(b) - 1,
+                    "[xfer] TARGET-SHORT id=%u sid='%s' applied=%u/%d (own source already moved)",
+                    a.xferId, x.key.first.c_str(), (unsigned)a.applied, x.qty);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+        }
+        char b[240]; _snprintf(b, sizeof(b) - 1,
+            "[xfer] ACK id=%u from=%u verdict=%s applied=%u/%u waitedMs=%lu sid='%s' role=%u",
             a.xferId, a.ownerId, vn, (unsigned)a.applied, (unsigned)a.requested,
-            now - x.sentMs, x.key.first.c_str());
+            now - x.sentMs, x.key.first.c_str(), (unsigned)a.role);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
-        xferOut_.erase(o);
+        if ((!x.srcPeer || x.srcAcked) && (!x.dstPeer || x.dstAcked)) xferOut_.erase(o);
         (void)gw;
     }
     // Sweep intents nobody answered. The latches themselves already expire on
@@ -1900,14 +1986,14 @@ void Replicator::applyXferAcks(GameWorld* gw, Inbound& in, u32 localId) {
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
         xferOut_.erase(i++);
     }
+    for (std::map<std::pair<u32, u32>, DstApplied>::iterator d = dstApplied_.begin();
+         d != dstApplied_.end(); ) {
+        if (now - d->second.receivedMs < XFER_ACK_WAIT_MS) { ++d; continue; }
+        dstApplied_.erase(d++);
+    }
 }
 
-// Undo one intent's contribution to a latch. `delta` is the inverse of what
-// detectAndPublishTransfers added, so a lone intent lands the latch back on
-// zero and it is erased; a second, still-unanswered intent on the same
-// container and item leaves its own contribution behind to be cleared by its
-// own verdict. The deadline is deliberately untouched: it belongs to whatever
-// is left, not to what we just removed.
+// 只撤销一笔意图中未批准部分的保护贡献，其他意图及已批准部分的期限保持不变。
 void Replicator::releaseXferLatch(const Key& k, const XKey& key, int delta) {
     std::map<Key, std::map<XKey, XferLatch> >::iterator lt = xferLatch_.find(k);
     if (lt == xferLatch_.end()) return;

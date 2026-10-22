@@ -1653,11 +1653,20 @@ private:
         int           qty;
         bool          srcPeer;   // we latched src (it is peer-authored)
         bool          dstPeer;
+        bool          srcAcked;
+        bool          dstAcked;
         unsigned long sentMs;
     };
     std::map<u32, XferOut>                    xferOut_;
-    // Undo one intent's contribution to a peer end's reconcile-suppression
-    // latch (protocol 50). See the definition for why every verdict does this.
+    struct DstApplied {
+        Key           dst;
+        XKey          key;
+        int           qty;
+        unsigned long receivedMs;
+    };
+    std::map<std::pair<u32, u32>, DstApplied> dstApplied_;
+    std::map<Key, std::map<XKey, int> >       xferDebt_;
+    // 只撤销源权威未批准部分的远端保护，批准部分仍等快照追上或原期限到达。
     void releaseXferLatch(const Key& k, const XKey& key, int delta);
     std::map<std::pair<Key, std::string>, unsigned long> wdSuppress_;
     unsigned long                             xferScanMs_; // last detector scan

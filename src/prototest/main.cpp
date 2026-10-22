@@ -160,7 +160,14 @@ static void testSizes() {
     CHECK_EQ("sizeof(FixturePacket)",           sizeof(FixturePacket),           90); // v55: fixture identity
     CHECK_EQ("sizeof(CamHintPacket)",           sizeof(CamHintPacket),           17); // v43: camera hint
     CHECK_EQ("sizeof(CellClaimPacket)",         sizeof(CellClaimPacket),         21); // v49: cell claim
-    CHECK_EQ("sizeof(InvXferAckPacket)",        sizeof(InvXferAckPacket),        18); // v50: transfer verdict
+    CHECK_EQ("sizeof(InvXferAckPacket)",        sizeof(InvXferAckPacket),        19); // 协议 1007：权威角色
+    CHECK_EQ("InvXferAckPacket ownerId offset", offsetof(InvXferAckPacket, ownerId), 1);
+    CHECK_EQ("InvXferAckPacket xferOwnerId offset", offsetof(InvXferAckPacket, xferOwnerId), 5);
+    CHECK_EQ("InvXferAckPacket xferId offset", offsetof(InvXferAckPacket, xferId), 9);
+    CHECK_EQ("InvXferAckPacket applied offset", offsetof(InvXferAckPacket, applied), 13);
+    CHECK_EQ("InvXferAckPacket requested offset", offsetof(InvXferAckPacket, requested), 15);
+    CHECK_EQ("InvXferAckPacket verdict offset", offsetof(InvXferAckPacket, verdict), 17);
+    CHECK_EQ("InvXferAckPacket role offset", offsetof(InvXferAckPacket, role), 18);
     // A full entity batch must fit one ~1400 B datagram (NetLink chunking cap).
     CHECK("entity batch fits datagram",
           sizeof(EntityBatchHeader) + ENTITY_BATCH_MAX * sizeof(EntityState) <= 1428);
@@ -350,8 +357,8 @@ static void testSizes() {
     CHECK_EQ("EVT_SQUAD_MOVE id", (int)EVT_SQUAD_MOVE, 11);
     CHECK("EVT_SQUAD_MOVE distinct", EVT_SQUAD_MOVE != EVT_RECRUIT &&
           EVT_SQUAD_MOVE != EVT_NONE && EVT_SQUAD_MOVE != EVT_EXIT_FURNITURE);
-    CHECK_EQ("PROTOCOL_VERSION (v1006: per-player wallets)",
-             (int)PROTOCOL_VERSION, 1006);
+    CHECK_EQ("PROTOCOL_VERSION (v1007: authority transfer acknowledgments)",
+             (int)PROTOCOL_VERSION, 1007);
 
     // Protocol 52: the shared money pool. The two players spend from ONE wallet,
     // so the join reports CHANGES and the host the authoritative TOTAL - swap

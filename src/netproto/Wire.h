@@ -31,8 +31,9 @@ typedef double         f64;
 // 1003 加入多人对端名单与授权目标；1004 加入稳定玩家身份与存档归属表；
 // 1006 资金按人分开（MONEY 只发给余额所属的加入者，增减量按连接认人）；F2 创建角色改为按开局生成
 // （请求只带开局 SID，加入方把捏好的外观发给主机）；
+// 1007 转移回执只由权威发送并携带源/目标角色，源端裁决未批准部分的收回数量；
 // 双方须使用同一改进版，与官方 v0.51 不再互通
-const u16 PROTOCOL_VERSION = 1006;
+const u16 PROTOCOL_VERSION = 1007;
 
 // Session player cap (four-player first stage): the host + up to three joins.
 // Transport and replication are N-generic; the host enforces this policy limit
@@ -805,38 +806,19 @@ struct InvXferPacket {
     char material[48];
 };
 
-// ---- Protocol 50: transfer VERDICT ------------------------------------------
-// PKT_INV_XFER is optimistic. The author moves the item locally, latches both
-// peer ends so the owner's in-flight snapshots cannot reconcile the move away,
-// and then waits out a 10 s wall clock - because nothing ever comes back. That
-// deadline is a guess standing in for an answer: too short and a slow receiver
-// looks like a refusal, too long and a genuinely refused transfer stays visibly
-// duped for ten seconds. It is also a guess the author cannot improve on,
-// because whether the move succeeded is a fact only the RECEIVER has.
-//
-// So the receiver states it. One ack per intent, reliable, carrying how many
-// units actually landed:
-//   applied == quantity  ACCEPT  - the author drops its latches now, not on a
-//                                  timer, and the two worlds agree immediately
-//   0 < applied < qty    PARTIAL - the author keeps a latch for the shortfall
-//   applied == 0         REJECT  - the author drops every latch for the intent,
-//                                  which lets the owner's next snapshot
-//                                  reconcile the optimistic local move away.
-//                                  That is the rollback, and it happens through
-//                                  the existing reconcile path rather than a
-//                                  second mutation path that could itself dupe.
-// The wall clock stays as a BACKSTOP for a peer that never answers (an older
-// build, or a drop on a channel that is nominally reliable but disconnected),
-// so this strictly narrows the window rather than replacing one guess with a
-// dependency.
+// ---- 协议 1007：源/目标权威转移回执 -------------------------------------------
+// 拖动仍先在发起方完成。只有源权威裁决批准量，目标权威只报告实际放入量，旁观者不回执。
+// 未批准部分撤销远端保护，并从本机目标登记欠账；销毁等所有物品栏关闭后执行。
+// 批准部分继续保护至主人快照追上或原 10 秒期限，待确认记录仍在 15 秒后清理。
 struct InvXferAckPacket {
     u8  type;        // = PKT_INV_XFER_ACK
     u32 ownerId;     // sender of the ACK (the receiver that applied it)
     u32 xferOwnerId; // ownerId of the intent being answered
     u32 xferId;      // xferId of the intent being answered
-    u16 applied;     // units actually moved + fabricated (0 = rejected)
+    u16 applied;     // 源角色：批准量；目标角色：放入本机目标的数量；两端都是时二者相同
     u16 requested;   // units the intent asked for (echo, for log/audit clarity)
     u8  verdict;     // XFER_ACK_* below
+    u8  role;        // 1 = 源权威，2 = 目标权威，3 = 两端都是
 };
 
 enum XferAckVerdict {

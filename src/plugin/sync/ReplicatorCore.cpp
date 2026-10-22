@@ -278,6 +278,8 @@ void Replicator::resetSession(bool keepWalletSequence, bool keepWallets) {
     xferLatch_.clear();
     xferDefer_.clear();
     xferOut_.clear();
+    dstApplied_.clear();
+    xferDebt_.clear();
     appliedXfers_.clear();
     wdSuppress_.clear();
     xferScanMs_ = 0;
@@ -536,6 +538,10 @@ void Replicator::clearOwnerReplicationState(GameWorld* gw, u32 ownerId) {
     for (std::set<std::pair<u32, u32> >::iterator xi = appliedXfers_.begin();
          xi != appliedXfers_.end(); ) {
         if (xi->first == ownerId) appliedXfers_.erase(xi++); else ++xi;
+    }
+    for (std::map<std::pair<u32, u32>, DstApplied>::iterator di = dstApplied_.begin();
+         di != dstApplied_.end(); ) {
+        if (di->first.first == ownerId) dstApplied_.erase(di++); else ++di;
     }
     char b[128];
     _snprintf(b, sizeof(b) - 1,
