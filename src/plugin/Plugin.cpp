@@ -3112,7 +3112,8 @@ void installEngineDetours() {
 // self-gates each of the three concerns.
 void installTitleHook() {
     bool interactive = g_cfg.scenario.empty() && g_cfg.testSeconds == 0;
-    if (!g_cfg.save.empty() || interactive) {
+    // 跑测试场景的加入方不设存档、靠主机推送，同样需要这个钩子收存档
+    if (!g_cfg.save.empty() || interactive || !g_cfg.isHost) {
         if (KenshiLib::SUCCESS !=
             KenshiLib::AddHook(
                 KenshiLib::GetRealAddress(&TitleScreen::_NV_update),

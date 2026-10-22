@@ -1,4 +1,4 @@
-// ScenarioProbes.cpp - diagnostic probes + economy/faction/time scenarios
+﻿// ScenarioProbes.cpp - diagnostic probes + economy/faction/time scenarios
 // (monolith split from Scenario.cpp, 2026-07-12): spike (the numbered-probe
 // dispatcher), shop_probe, wallet_probe/money_sync, vendor_trade, recruit_probe/
 // recruit_sync, squad_probe/squad_sync, faction_probe/faction_sync,
@@ -2417,6 +2417,95 @@ private:
 const float CellAuthTogetherScenario::IDLE_LEG = 15.0f;
 const float CellAuthTogetherScenario::EDGE_LEG = 60.0f;
 
+// ===========================================================================
+// wallet_race（协议 1006 每人一个钱包）：主机和加入方在同一时刻各自改钱，核对
+// 谁的变化都没被漏记、也没有串到别人的钱上（以前第二个人的花销会被漏记）。
+//   * 三方在系统时钟（GetTickCount，本机多开时各进程共用）同一个 4 秒整点上改钱，
+//     每轮相隔一帧连改两次，让加入方同时有两个没被确认的变化量；
+//   * 金额按 ownRank 放大（主机 1 倍、好友1 2 倍、好友2 3 倍），主机日志的
+//     [wallet] FOLD 行能直接认出是谁的；每轮先加后减，余额始终不低于 0；
+//   * 改完后等主机重发余额再读：应等于开始时的余额加上本机全部变化量，中途每次
+//     改之前读到的数也必须和预期一致（被主机冲掉的变化会在这里露出来）。
+// 主机账本里各加入方的余额看主机的 [wallet] SEND 行，与加入方 WALLETRACE final 对照。
+// 三方都设 KENSHICOOP_SCENARIO=wallet_race、KENSHICOOP_ARM_MIN_PEERS=2，
+// KENSHICOOP_ARM_TIMEOUT_MS 设得足够长（依次手动启动三个副本要几分钟）。
+// ===========================================================================
+class WalletRaceScenario : public TimedScenario {
+public:
+    WalletRaceScenario()
+        : TimedScenario("wallet_race", /*evidenceMs=*/0),
+          firstSlot_(0), step_(0), endTick_(0), start_(-1), expect_(0),
+          drift_(0), writes_(0) {}
+
+    virtual void onStart(const ScenarioContext& ctx) {
+        // 第一轮放在布防后至少 LEAD_MS 的整点上，留时间给主机把本人余额发过来
+        firstSlot_ = (GetTickCount() + LEAD_MS) / SLOT_MS + 1;
+        int money = -1;
+        engine::readPlayerWallet(ctx.gw, &money);
+        char b[160];
+        _snprintf(b, sizeof(b) - 1,
+                  "SCENARIO WALLETRACE start who=%s rank=%u money=%d firstSlot=%lu",
+                  ctx.isHost ? "host" : "join", ctx.ownRank, money, firstSlot_);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+
+    virtual bool onTick(const ScenarioContext& ctx) {
+        if (step_ < STEPS) {
+            // 每轮第一笔等整点，第二笔紧跟在下一帧
+            if (step_ % 2 == 0 && GetTickCount() / SLOT_MS < firstSlot_ + step_ / 2)
+                return false;
+            int before = -1;
+            engine::readPlayerWallet(ctx.gw, &before);
+            if (step_ == 0) { start_ = before; expect_ = before; }
+            if (before != expect_) ++drift_;
+            int delta = DELTAS[step_] * ((int)ctx.ownRank + 1);
+            bool ok = before >= 0 && engine::writePlayerWallet(ctx.gw, before + delta);
+            if (ok) ++writes_;
+            expect_ += delta;
+            char b[200];
+            _snprintf(b, sizeof(b) - 1,
+                      "SCENARIO WALLETRACE step=%u who=%s delta=%d before=%d expect=%d ok=%d tick=%lu",
+                      step_, ctx.isHost ? "host" : "join", delta, before, expect_,
+                      ok ? 1 : 0, (unsigned long)GetTickCount());
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            if (++step_ == STEPS)
+                endTick_ = GetTickCount() + (ctx.isHost ? HOST_SETTLE_MS : JOIN_SETTLE_MS);
+            return false;
+        }
+        if (GetTickCount() < endTick_) return false;
+        int money = -1;
+        engine::readPlayerWallet(ctx.gw, &money);
+        passed_ = (writes_ == STEPS) && (drift_ == 0) && (money == expect_);
+        char b[200];
+        _snprintf(b, sizeof(b) - 1,
+                  "SCENARIO WALLETRACE final who=%s rank=%u start=%d money=%d expect=%d drift=%u writes=%u",
+                  ctx.isHost ? "host" : "join", ctx.ownRank, start_, money, expect_,
+                  drift_, writes_);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        return true;
+    }
+
+private:
+    static const unsigned int  STEPS          = 10;
+    static const unsigned long SLOT_MS        = 4000;
+    static const unsigned long LEAD_MS        = 8000;
+    // 加入方等主机至少一次定时重发（5 秒）；主机多等一会儿，免得先退出把加入方断开
+    static const unsigned long JOIN_SETTLE_MS = 8000;
+    static const unsigned long HOST_SETTLE_MS = 14000;
+    static const int           DELTAS[STEPS];
+
+    unsigned long firstSlot_;
+    unsigned int  step_;
+    unsigned long endTick_;
+    int           start_;
+    int           expect_;
+    unsigned int  drift_;
+    unsigned int  writes_;
+};
+// 每两项是一轮：余额从 0 开始也一直不低于 0（倍数 1 时依次为 700 500 200 250 670 270 210 200 233 226）
+const int WalletRaceScenario::DELTAS[WalletRaceScenario::STEPS] =
+    { 700, -200, -300, 50, 420, -400, -60, -10, 33, -7 };
+
 Scenario* makeProbeScenario(const std::string& name) {
     if (name == "spike")        return new SpikeScenario();
     if (name == "cell_probe")   return new CellProbeScenario();
@@ -2436,6 +2525,7 @@ Scenario* makeProbeScenario(const std::string& name) {
     if (name == "time_sync")     return new TimeProbeScenario(false);
     if (name == "hunger_probe")  return new HungerProbeScenario(true);
     if (name == "hunger_sync")   return new HungerProbeScenario(false);
+    if (name == "wallet_race")   return new WalletRaceScenario();
     return 0;
 }
 
