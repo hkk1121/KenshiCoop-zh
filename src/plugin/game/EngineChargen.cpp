@@ -61,6 +61,10 @@ bool showEditor(GameWorld* gw, const lektor<Character*>* chars, const Ogre::vect
         typedef void (__fastcall* ShowFn)(ForgottenGUI*, const lektor<Character*>*, CharacterEditMode, const Ogre::vector<GameDataReference>::type*);
         ShowFn show = (ShowFn)KenshiLib::GetRealAddress(&ForgottenGUI::showCharacterEditor);
         if (!show) return false;
+        // 原版 NEWGAME 构造时逐个 reload 角色外观（建模），"from file" 标记连它一起跳过了；不补的话没切到过的角色
+        // 没有建好模型，确认时 confirmButton（真实 0x5E94B0）查 AnimationClass::getIsActivated 为假，报“Invalid character race”
+        for (unsigned int i = 0; i < chars->size(); ++i)
+            if (chars->stuff[i] && chars->stuff[i]->getAppearance()) chars->stuff[i]->getAppearance()->reload();
         show(::gui, chars, EDIT_NEWGAME, races);
         editor = ::gui->characterEditor;
         gw->userPause(true);
