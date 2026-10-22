@@ -187,7 +187,7 @@ void Replicator::lifeSweep(GameWorld* gw, unsigned long now) {
     }
 }
 
-void Replicator::resetSession(bool keepWalletSequence) {
+void Replicator::resetSession(bool keepWalletSequence, bool keepWallets) {
     // Pointer caches (dangling after the swap) + everything keyed off them.
     targets_.clear();          // interp buffers + per-body drive state
     drivenChars_.clear();
@@ -291,8 +291,15 @@ void Replicator::resetSession(bool keepWalletSequence) {
     if (!keepWalletSequence) poolSeq_ = 0;
     poolAcked_ = 0;
     poolPending_.clear();
-    // 账本属于旧世界，读档后从新存档目录重新读
-    wallets_.clear(); walletsLoaded_ = false;
+    // 同一主机只重启网络时保留余额和首次开局记录，连接相关状态仍清零；读档则重新加载账本。
+    if (keepWallets) {
+        for (std::map<u64, Wallet>::iterator it = wallets_.begin(); it != wallets_.end(); ++it) {
+            it->second.acked = 0; it->second.connection = 0;
+            it->second.sent = -1; it->second.sentMs = 0;
+        }
+    } else {
+        wallets_.clear(); walletsLoaded_ = false;
+    }
     stealthPub_.clear();
     pinOwned_.clear();
     pinPeer_.clear();
@@ -356,7 +363,7 @@ void Replicator::resetSession(bool keepWalletSequence) {
     coop::logLine("[load] session reset: pointer caches, session maps, change gates cleared");
 }
 
-void Replicator::clearPeerReplicationState(GameWorld* gw) {
+void Replicator::clearPeerReplicationState(GameWorld* gw, bool keepWallets) {
     // Destroy every MINTED proxy body before resetSession() drops the map that
     // owns the pointers. The engine owns the bodies; a proxy left standing after
     // the peer that authored it is gone is a permanent ghost, and any map still
@@ -402,7 +409,7 @@ void Replicator::clearPeerReplicationState(GameWorld* gw) {
     // Now drop every map (proxyByKey_ included) back to freshly-launched state.
     for (std::map<u64, PeerStatusPacket>::iterator p = players_.begin(); p != players_.end(); ++p)
         if (p->first != playerIdentity_) p->second.present = 0;
-    resetSession();
+    resetSession(false, keepWallets);
 }
 
 void Replicator::clearOwnerReplicationState(GameWorld* gw, u32 ownerId) {
@@ -1272,7 +1279,10 @@ bool Replicator::takePeerBodyTabOwner(u32* ownerId) {
 }
 
 void Replicator::setPlayerIdentity(u64 id) {
-    if (playerIdentity_ != id) players_.clear();
+    if (playerIdentity_ != id) {
+        players_.clear();
+        wallets_.clear(); walletsLoaded_ = false;
+    }
     ownersDirty_ = true; ownersLoaded_ = false; ownersAttached_ = false;
     ownersHaveSnapshot_ = false; ownersFileWorld_ = 0;
     owners_.clear(); tabAliases_.clear(); pendingOwnerTabs_.clear();
@@ -1511,7 +1521,7 @@ void Replicator::syncOwners(GameWorld* gw, NetLink& net, Inbound& in, bool host)
         char name[64] = { 0 }; engine::saveInfo(name, sizeof(name), 0, 0);
         bool found = name[0] && readOwners(name);
         ownersLoaded_ = true;
-        if (host) {
+        if (host && !walletsLoaded_) {
             if (found) readPlayers(name);
             walletsLoaded_ = true;
         }

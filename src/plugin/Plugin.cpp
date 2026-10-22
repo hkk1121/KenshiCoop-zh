@@ -149,6 +149,7 @@ struct SessionController {
     // it can sit unconsumed mid-session. Armed on every coordinated load issue;
     // if the swap hasn't started after the grace window, pump execute() once.
     DWORD        loadPumpArmTick;  // != 0: backstop armed at this tick
+    bool         walletReloadPending; // 未执行会话重置的读档，禁止下次重连保留旧账本
 
     SessionController()
       : gameStarted(false), gameStartTick(0), autoLoadDone(false),
@@ -156,7 +157,7 @@ struct SessionController {
         saveReqId(0), bootstrapArmed(false),
         swapStartTick(0), swapHookTicks(0),
         loadSuppressOn(false), loadIdOut(0), loadIdSeen(0), loadReqId(0),
-        loadCommitBase(0), loadPumpArmTick(0) {}
+        loadCommitBase(0), loadPumpArmTick(0), walletReloadPending(false) {}
 };
 SessionController g_session;
 
@@ -330,7 +331,9 @@ void warnIfNoPortraits(const std::string& name) {
 // within a running game), so despawn our minted NPC + world-item proxies before
 // clearing the maps - else a reconnect leaves orphaned duplicates or bakes them
 // into the next save. Falls back to a plain map reset if no world has ticked yet.
-void sessionResetForUi() {
+void sessionResetForUi(bool keepWallets) {
+    keepWallets = keepWallets && !g_session.walletReloadPending && g_gameStarted &&
+                  g_swapStartTick == 0 && g_lastGw && coop::engine::gameplayLive(g_lastGw);
     coop::engine::cancelCharacterCreation(g_lastGw && coop::engine::gameplayLive(g_lastGw));
     g_characterPending = false; g_characterChoiceWorld = 0; g_characterAction = -1;
     g_characterRequests.clear(); g_characterAppearances.clear(); g_characterResults.clear(); g_characterWorld = 0;
@@ -343,8 +346,9 @@ void sessionResetForUi() {
     g_loadXferLastOwner = 0;
     g_loadXferSent.clear();
     g_loadXferRetries.clear();
-    if (g_lastGw) g_repl.clearPeerReplicationState(g_lastGw);
+    if (g_lastGw) g_repl.clearPeerReplicationState(g_lastGw, keepWallets);
     else          g_repl.resetSession();
+    g_session.walletReloadPending = false;
     g_repl.resetOwnersForWorld();
     g_inbound.flushWorldState();
     std::deque<coop::InboundOwners> owners; g_inbound.drainOwners(owners);
@@ -366,6 +370,7 @@ void sessionResetForWorldReload() {
     g_characterEditable.clear(); g_characterStartWaiting = false;
     g_peerBodyRepushDue.clear();
     g_repl.resetSession(true);
+    g_session.walletReloadPending = false;
     g_repl.resetOwnersForWorld();
     g_inbound.flushWorldState();
     g_net.bumpSessionEpoch(); // v44: post-reload batches supersede the old session
@@ -1444,6 +1449,8 @@ void tickWorldSwapEdge(GameWorld* gw) {
                 // inbound queues). Peer presence + suppression levers survive.
                 if (g_cfg.loadSync)
                     sessionResetForWorldReload();
+                else
+                    g_session.walletReloadPending = true;
             }
         }
     }
@@ -2550,7 +2557,7 @@ void coopUiConnect(bool isHost, bool useSteam, const unsigned long long* peerIds
     coop::steamp2p::shutdown();
     // World is live here (reconnect from within a running game): despawn minted
     // proxies before clearing maps so a re-connect leaves no orphaned duplicates.
-    sessionResetForUi();
+    sessionResetForUi(g_cfg.isHost && isHost);
 
     // 角色变化时同步日志标签；使用默认日志名时一并改名（KENSHICOOP_LOG 自定义路径不动）
     if (isHost != g_cfg.isHost) {
@@ -2638,7 +2645,7 @@ void coopUiDisconnect() {
     coop::steamp2p::shutdown();
     // World stays live on a manual disconnect: despawn minted proxies before
     // clearing maps so nothing lingers as a duplicate or gets baked into a save.
-    sessionResetForUi();
+    sessionResetForUi(g_cfg.isHost);
 }
 
 // 退出游戏时游戏会调用 SteamAPI_Shutdown，随后 steamclient 被卸载；网络线程若还在经 Steam P2P

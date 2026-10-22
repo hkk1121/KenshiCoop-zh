@@ -658,7 +658,7 @@ public:
     // - a peer that
     // did NOT reload keeps its per-sender stale-row guards, so restarting a
     // counter would make every new row look stale to it.
-    void resetSession(bool keepWalletSequence = false);
+    void resetSession(bool keepWalletSequence = false, bool keepWallets = false);
 
     // Peer-leave cleanup (Phase 2 crash hardening): called from the transport
     // leave edge when the LAST remote player disconnects mid-session (distinct
@@ -669,7 +669,7 @@ public:
     // crash" chain). This despawns every minted proxy body FIRST (SEH-guarded),
     // then resetSession() to clear the maps that referenced them. Safe if
     // reconnect follows: the new session re-censuses and re-mints from scratch.
-    void clearPeerReplicationState(GameWorld* gw);
+    void clearPeerReplicationState(GameWorld* gw, bool keepWallets = false);
 
     // ONE owner's leave cleanup (protocol 49): the session continues for
     // everyone else, so this is the SURGICAL subset of the full wipe above -
