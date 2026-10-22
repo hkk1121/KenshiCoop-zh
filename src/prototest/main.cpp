@@ -2011,7 +2011,7 @@ void testCharacterMailboxes() {
     CharacterRequestHeader rq; memset(&rq, 0, sizeof(rq)); rq.bytes = sizeof(bytes); rq.playerId = 0xF000000000000011ULL;
     CharacterAppearanceHeader app; memset(&app, 0, sizeof(app)); app.bytes = sizeof(bytes); app.worldId = 77;
     CharacterReplyPacket reply; memset(&reply, 0, sizeof(reply)); reply.requestId = 6; reply.connectionId = 9;
-    in.pushCharacterRequest(rq, bytes); in.pushCharacterAppearance(app, bytes); in.pushCharacterReply(reply);
+    in.pushCharacterRequest(rq, bytes); in.pushCharacterAppearance(0, app, bytes); in.pushCharacterReply(reply);
     in.flushWorldState();
     std::deque<InboundCharacterRequest> requests; in.drainCharacterRequests(requests);
     std::deque<InboundCharacterAppearance> appearances; in.drainCharacterAppearances(appearances);
@@ -2019,7 +2019,7 @@ void testCharacterMailboxes() {
     CHECK("chargen old-world requests dropped", requests.empty());
     CHECK("chargen old-world appearances dropped", appearances.empty());
     CHECK("chargen reply survives targeted reload", replies.size() == 1 && replies[0].requestId == 6 && replies[0].connectionId == 9);
-    for (u32 i = 0; i < 40; ++i) { rq.requestId = i; in.pushCharacterRequest(rq, bytes); in.pushCharacterAppearance(app, bytes); in.pushCharacterReply(reply); }
+    for (u32 i = 0; i < 40; ++i) { rq.requestId = i; in.pushCharacterRequest(rq, bytes); in.pushCharacterAppearance(0, app, bytes); in.pushCharacterReply(reply); }
     in.drainCharacterRequests(requests); in.drainCharacterAppearances(appearances); replies.clear(); in.drainCharacterReplies(replies);
     CHECK("chargen bounded request mailbox", requests.size() == 8 && requests[0].header.requestId == 32);
     CHECK("chargen bounded appearance mailbox", appearances.size() == 32);
