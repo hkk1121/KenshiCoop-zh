@@ -281,6 +281,7 @@ void Replicator::resetSession(bool keepWalletSequence, bool keepWallets) {
     xferOut_.clear();
     dstApplied_.clear();
     xferDebt_.clear();
+    xferShort_.clear();
     appliedXfers_.clear();
     wdSuppress_.clear();
     xferScanMs_ = 0;

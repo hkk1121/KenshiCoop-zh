@@ -1666,6 +1666,9 @@ private:
     };
     std::map<std::pair<u32, u32>, DstApplied> dstApplied_;
     std::map<Key, std::map<XKey, int> >       xferDebt_;
+    // 背包补造不出来：旁观时别人的转移在本机那份目标里还缺多少（按物品记最后一次），
+    // 本机随后收回同一样时移过去而不是删掉
+    std::map<XKey, DstApplied>                xferShort_;
     // 只撤销源权威未批准部分的远端保护，批准部分仍等快照追上或原期限到达。
     void releaseXferLatch(const Key& k, const XKey& key, int delta);
     std::map<std::pair<Key, std::string>, unsigned long> wdSuppress_;

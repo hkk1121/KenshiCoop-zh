@@ -1761,18 +1761,51 @@ void Replicator::applyTransfers(GameWorld* gw, Inbound& in, NetLink& net, u32 lo
             bool resolved = engine::resolveObjectByHand(cHand) != 0;
             for (std::map<XKey, int>::const_iterator item = debt->second.begin();
                  item != debt->second.end(); ++item) {
-                int removed = resolved ? engine::removeItemsFromContainer(gw, cHand,
-                    item->first.first.c_str(), item->first.second, item->second) : 0;
-                char b[240]; _snprintf(b, sizeof(b) - 1,
-                    "[xfer] DEBT hand=%u,%u,%u,%u,%u sid='%s' want=%d removed=%d resolved=%d",
+                // 背包补造不出来：旁观时记下的那个目标、它主人的快照里也确实还缺这一样时，把本机这份移过去，
+                // 不删（删了这台机器上就再也没有这个背包，主机上的还会写进存档）
+                int given = 0;
+                std::map<XKey, DstApplied>::iterator sh = xferShort_.find(item->first);
+                if (resolved && sh != xferShort_.end()) {
+                    const Key& tk = sh->second.dst;
+                    unsigned int tHand[5]; handForContainerKey(tk, tHand);
+                    std::map<Key, InvRecv>::const_iterator ri = invRecv_.find(tk);
+                    if (ri != invRecv_.end() && engine::resolveObjectByHand(tHand) != 0) {
+                        int want = 0, have = 0;
+                        for (size_t j = 0; j < ri->second.items.size(); ++j)
+                            if (ri->second.items[j].itemType == item->first.second &&
+                                item->first.first == ri->second.items[j].stringID)
+                                want += ri->second.items[j].quantity < 1 ? 1 : (int)ri->second.items[j].quantity;
+                        InvItemEntry cur[64];
+                        unsigned int nc = engine::captureContainerContents(gw, tHand, cur, 64, 0);
+                        for (unsigned int j = 0; j < nc; ++j)
+                            if (cur[j].itemType == item->first.second && item->first.first == cur[j].stringID)
+                                have += cur[j].quantity < 1 ? 1 : (int)cur[j].quantity;
+                        int give = want - have;
+                        if (give > item->second) give = item->second;
+                        if (give > sh->second.qty) give = sh->second.qty;
+                        if (give > 0)
+                            given = engine::moveItemBetweenContainers(gw, cHand, tHand,
+                                item->first.first.c_str(), item->first.second, give);
+                        if (given > 0) {
+                            xferBase_[tk][item->first] += given;
+                            if (isGearType(item->first.second))
+                                wdSuppress_[std::make_pair(tk, item->first.first)] = now + XFER_GRACE_MS;
+                        }
+                    }
+                    xferShort_.erase(sh);
+                }
+                int removed = (resolved && item->second > given) ? engine::removeItemsFromContainer(gw, cHand,
+                    item->first.first.c_str(), item->first.second, item->second - given) : 0;
+                char b[256]; _snprintf(b, sizeof(b) - 1,
+                    "[xfer] DEBT hand=%u,%u,%u,%u,%u sid='%s' want=%d removed=%d given=%d resolved=%d",
                     k.t, k.c, k.cs, k.i, k.s, item->first.first.c_str(), item->second,
-                    removed, resolved ? 1 : 0);
+                    removed, given, resolved ? 1 : 0);
                 b[sizeof(b) - 1] = '\0'; coop::logLine(b);
                 if (resolved && isGearType(item->first.second))
                     wdSuppress_[std::make_pair(k, item->first.first)] = now + XFER_GRACE_MS;
-                if (removed > 0) {
+                if (removed + given > 0) {
                     std::map<XKey, int>& base = xferBase_[k];
-                    if ((base[item->first] -= removed) <= 0) base.erase(item->first);
+                    if ((base[item->first] -= removed + given) <= 0) base.erase(item->first);
                 }
             }
             xferDebt_.erase(debt++);
@@ -1859,6 +1892,12 @@ void Replicator::applyTransfers(GameWorld* gw, Inbound& in, NetLink& net, u32 lo
             DstApplied d; d.dst = dk; d.key = key;
             d.qty = moved + fab; d.receivedMs = now;
             dstApplied_[id] = d;
+        }
+        // 旁观时背包补不出来：记下目标还缺多少。本机若也拿了这一样、随后被拒，执行收回时移过去（见开头）
+        if (!srcOwn && !dstOwn && engine::isContainerItemType(p.itemType) && moved + fab < (int)p.quantity) {
+            DstApplied s; s.dst = dk; s.key = key;
+            s.qty = (int)p.quantity - moved - fab; s.receivedMs = now;
+            xferShort_[key] = s;
         }
         // Latch OUR peer end(s) too: an in-flight stale snapshot (captured by its
         // owner before this transfer) must not reconcile the relocation away.
