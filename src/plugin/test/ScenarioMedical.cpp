@@ -6,6 +6,13 @@
 
 #include "ScenarioSupport.h"
 
+// 和 EngineInternal.h 一样关掉 boost 自动链接，ForgottenGUI.h 会引入 boost.thread
+#define BOOST_ALL_NO_LIB 1
+#define BOOST_ERROR_CODE_HEADER_ONLY 1
+#define BOOST_SYSTEM_NO_DEPRECATED 1
+#include <kenshi/Globals.h>         // gui（抢尸体场景开关物品栏）
+#include <kenshi/gui/ForgottenGUI.h>
+
 namespace coop {
 namespace {
 
@@ -610,13 +617,27 @@ const float CrawlMoveScenario::LEG = 20.0f;
 // 核对本机的尸体已空（好友1 没动手，空了说明别人的转移到了主人那里），并给每个身体打一行
 // LOOTINV（件数 + 内容指纹），三方对照指纹一致。需要 KENSHICOOP_INV_SYNC=1（场景模式下
 // 背包同步默认关）。
+//
+// loot_race（搜刮模式的抢尸体变体，跨主人转移 R3～R5）：好友1 在第 0 个整点打死自己一个角色；
+// 第 1 个整点各方认准尸体，记下尸体里每样东西开始时在所有身体上的总数；第 3 个整点主机和好友2
+// 同时把尸体里的东西全拿到自己一个活人身上。源主人好友1 先到先批，后到的被拒、从拿的人身上收回。
+// 最后各方核对本机尸体已空、每样东西在所有身体上的总数与开始时相同（LOOTKEY 行）。
+// loot_race_ui：另外三方在第 2～7 个整点开着自己一个活人的物品栏，收回和源头去掉都要等关窗（看 DEBT）；
+// 窗口中途被关掉的话 ui=0、判失败。
+// 布防时各方把自己的活人都喂饱（途中饿死会换手把，背包快照对不上）。
+// loot_race_full：在 _ui 基础上，两位拿的人同时往自己的目的地放 1 件测试物品作记号，
+// 好友1 第 2 个整点把本机看到多了记号的别人背包塞满，让源端放不进、走“关窗后再从源头去掉”。
 // ===========================================================================
 class OwnerDeathScenario : public TimedScenario {
 public:
-    explicit OwnerDeathScenario(bool loot)
-        : TimedScenario(loot ? "corpse_loot" : "owner_death", /*evidenceMs=*/0),
+    explicit OwnerDeathScenario(bool loot, int race = 0)
+        : TimedScenario(race == 3 ? "loot_race_full" : race == 2 ? "loot_race_ui" :
+                        race == 1 ? "loot_race" : loot ? "corpse_loot" : "owner_death",
+                        /*evidenceMs=*/0),
           loot_(loot), firstSlot_(0), killed_(false), looted_(false), moved_(0),
-          victim_(0), corpse_(0), nStart_(0), nTabs_(0) {}
+          victim_(0), corpse_(0), nStart_(0), nTabs_(0), race_(race), uiOpened_(false),
+          uiClosed_(false), uiOk_(0), uiLast_(0), uiChar_(0), marked_(false), filled_(false),
+          filledN_(0), dst_(0), nKeys_(0), nMark_(0) {}
 
     virtual void onStart(const ScenarioContext& ctx) {
         firstSlot_ = (GetTickCount() + LEAD_MS) / SLOT_MS + 1;
@@ -629,7 +650,21 @@ public:
             if (c) startAlive_[nStart_++] = c;
         }
         nTabs_ = engine::listPlayerTabs(ctx.gw, startTabs_, MAX_TABS);
+        // 抢尸体：把自己的活人都喂饱，免得途中饿死进阵亡编队、换了手把（各方阵亡编队里的编号可能不同，
+        // 背包快照对不上），也免得被当成尸体
+        unsigned int fed = 0;
+        for (unsigned int i = 0; race_ && i < n; ++i) {
+            if ((sq[i].bodyState & BODY_DEAD) || !ctx.ownTab ||
+                !ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial)) continue;
+            unsigned int h[5];
+            handFromEntity(sq[i], h);
+            if (engine::writeHungerByHand(h, FULL_HUNGER, -1.0f)) ++fed;
+        }
         char b[160];
+        if (race_) {
+            _snprintf(b, sizeof(b) - 1, "SCENARIO LOOTFEED who=%s fed=%u", ctx.isHost ? "host" : "join", fed);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
         _snprintf(b, sizeof(b) - 1,
                   "SCENARIO DEATHRUN start who=%s rank=%u bodies=%u alive=%u tabs=%u firstSlot=%lu",
                   ctx.isHost ? "host" : "join", ctx.ownRank, n, nStart_, nTabs_, firstSlot_);
@@ -707,10 +742,146 @@ public:
                           ctx.isHost ? "host" : "join", sq[i].hIndex, sq[i].hSerial);
                 b[sizeof(b) - 1] = '\0'; coop::logLine(b);
             }
+            // 抢尸体：记下尸体里的每样东西和它们开始时在所有身体上的总数；满包模式另记每个身体上的测试物品件数
+            char tsid[48] = ""; unsigned int ttype = 0;
+            if (race_ && corpse_) engine::commonTestItemSid(ctx.gw, tsid, sizeof(tsid), &ttype);
+            for (unsigned int pass = 0; race_ && corpse_ && pass < 2; ++pass)
+                for (unsigned int i = 0; i < n; ++i) {
+                    Character* c = engine::resolve(sq[i]);
+                    if (pass == 0 && c != corpse_) continue;
+                    unsigned int h[5];
+                    handFromEntity(sq[i], h);
+                    InvItemEntry items[MAX_ITEMS];
+                    unsigned int cnt = engine::captureContainerContents(ctx.gw, h, items, MAX_ITEMS, 0);
+                    int marks = 0;
+                    for (unsigned int j = 0; j < cnt; ++j) {
+                        int q = items[j].quantity < 1 ? 1 : (int)items[j].quantity;
+                        unsigned int k = 0;
+                        while (k < nKeys_ && (keys_[k].itemType != items[j].itemType ||
+                                              strcmp(keys_[k].stringID, items[j].stringID) != 0)) ++k;
+                        if (pass == 0 && k == nKeys_ && nKeys_ < MAX_ITEMS) {
+                            keys_[nKeys_] = items[j];
+                            keyStart_[nKeys_++] = 0;
+                        }
+                        if (pass == 1 && k < nKeys_) keyStart_[k] += q;
+                        if (tsid[0] && items[j].itemType == ttype && strcmp(items[j].stringID, tsid) == 0)
+                            marks += q;
+                    }
+                    if (pass == 1 && nMark_ < MAX_BODIES) {
+                        markWho_[nMark_] = c;
+                        markBase_[nMark_++] = marks;
+                    }
+                }
+            for (unsigned int k = 0; k < nKeys_; ++k) {
+                char b[200];
+                _snprintf(b, sizeof(b) - 1, "SCENARIO LOOTKEY start who=%s sid='%s' type=%u total=%d",
+                          ctx.isHost ? "host" : "join", keys_[k].stringID, keys_[k].itemType, keyStart_[k]);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
         }
-        // 搜刮：主机在第 3 个整点隔一项拿一项，好友2 在第 6 个整点把剩下的全拿走，都放到自己一个活人身上
+        // 抢尸体：两位拿的人第 1 个整点过 1 秒定下目的地（自己第一个活人），满包模式再放 1 件测试物品作记号
+        if (race_ && corpse_ && !marked_ && ctx.ownRank != 1 &&
+            GetTickCount() >= (firstSlot_ + 1) * SLOT_MS + MARK_DELAY_MS) {
+            marked_ = true;
+            EntityState sq[MAX_BODIES];
+            unsigned int n = engine::captureSquad(ctx.gw, false, sq, MAX_BODIES);
+            int pick = -1, added = 0;
+            for (unsigned int i = 0; i < n && pick < 0; ++i)
+                if (!(sq[i].bodyState & BODY_DEAD) && ctx.ownTab &&
+                    ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial)) pick = (int)i;
+            if (pick >= 0) {
+                dst_ = engine::resolve(sq[pick]);
+                unsigned int h[5];
+                handFromEntity(sq[pick], h);
+                if (race_ == 3) added = engine::addTestItemsToContainer(ctx.gw, h, 1, 0, 0);
+            }
+            char b[160];
+            _snprintf(b, sizeof(b) - 1, "SCENARIO LOOTMARK who=%s dst=%u,%u added=%d",
+                      ctx.isHost ? "host" : "join", pick >= 0 ? sq[pick].hIndex : 0,
+                      pick >= 0 ? sq[pick].hSerial : 0, added);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        // 满包模式：好友1 第 2 个整点把多了记号的别人背包（本机这份）塞满
+        if (race_ == 3 && corpse_ && !filled_ && ctx.ownRank == 1 && slot >= firstSlot_ + 2) {
+            filled_ = true;
+            char tsid[48] = ""; unsigned int ttype = 0;
+            engine::commonTestItemSid(ctx.gw, tsid, sizeof(tsid), &ttype);
+            EntityState sq[MAX_BODIES];
+            unsigned int n = engine::captureSquad(ctx.gw, false, sq, MAX_BODIES);
+            for (unsigned int i = 0; i < n && tsid[0]; ++i) {
+                if ((sq[i].bodyState & BODY_DEAD) || !ctx.ownTab ||
+                    ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial)) continue;
+                Character* c = engine::resolve(sq[i]);
+                int base = -1;
+                for (unsigned int m = 0; m < nMark_ && base < 0; ++m)
+                    if (markWho_[m] == c) base = markBase_[m];
+                unsigned int h[5];
+                handFromEntity(sq[i], h);
+                InvItemEntry items[MAX_ITEMS];
+                unsigned int cnt = engine::captureContainerContents(ctx.gw, h, items, MAX_ITEMS, 0);
+                int marks = 0;
+                for (unsigned int j = 0; j < cnt; ++j)
+                    if (items[j].itemType == ttype && strcmp(items[j].stringID, tsid) == 0)
+                        marks += items[j].quantity < 1 ? 1 : (int)items[j].quantity;
+                if (base < 0 || marks <= base) continue;
+                int added = 0;
+                while (added < FILL_MAX && engine::addTestItemsToContainer(ctx.gw, h, 1, 0, 0) == 1) ++added;
+                filledN_ += added;
+                cnt = engine::captureContainerContents(ctx.gw, h, items, MAX_ITEMS, 0);
+                char b[160];
+                _snprintf(b, sizeof(b) - 1, "SCENARIO LOOTFILL who=join idx=%u ser=%u marks=%d->%d added=%d entries=%u",
+                          sq[i].hIndex, sq[i].hSerial, base, marks, added, cnt);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+        }
+        // 开窗模式：三方第 2 个整点打开自己一个活人的物品栏（拿的人开目的地的），第 7 个整点关掉。
+        // 不开尸体的：尸体被拿空后游戏会自己关掉它的窗口
+        if (race_ >= 2 && corpse_ && !uiOpened_ && slot >= firstSlot_ + 2) {
+            uiOpened_ = true;
+            uiChar_ = dst_;
+            EntityState sq[MAX_BODIES];
+            unsigned int n = engine::captureSquad(ctx.gw, false, sq, MAX_BODIES);
+            for (unsigned int i = 0; i < n && !uiChar_; ++i)
+                if (!(sq[i].bodyState & BODY_DEAD) && ctx.ownTab &&
+                    ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial)) uiChar_ = engine::resolve(sq[i]);
+            bool shown = false;
+            __try {
+                if (::gui && uiChar_) shown = ::gui->showInventory(uiChar_->getHandle(), true, 0.0f, 0.0f) != 0;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                shown = false;
+            }
+            uiOk_ = engine::inventoryUiOpen() ? 1 : 0;
+            uiLast_ = uiOk_;
+            char b[120];
+            _snprintf(b, sizeof(b) - 1, "SCENARIO LOOTUI open who=%s shown=%d uiOpen=%d tick=%lu",
+                      ctx.isHost ? "host" : "join", shown ? 1 : 0, uiOk_, (unsigned long)GetTickCount());
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        // 开着的期间窗口状态一变就记一行（被游戏自己关掉时，收回会提前执行）
+        if (race_ >= 2 && uiOpened_ && !uiClosed_ && (engine::inventoryUiOpen() ? 1 : 0) != uiLast_) {
+            uiLast_ = engine::inventoryUiOpen() ? 1 : 0;
+            if (!uiLast_) uiOk_ = 0;
+            char b[120];
+            _snprintf(b, sizeof(b) - 1, "SCENARIO LOOTUI changed who=%s uiOpen=%d tick=%lu",
+                      ctx.isHost ? "host" : "join", uiLast_, (unsigned long)GetTickCount());
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        if (race_ >= 2 && uiOpened_ && !uiClosed_ && slot >= firstSlot_ + UI_CLOSE_SLOT) {
+            uiClosed_ = true;
+            __try {
+                if (::gui && uiChar_) ::gui->closeInventory(uiChar_->getHandle());
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+            char b[120];
+            _snprintf(b, sizeof(b) - 1, "SCENARIO LOOTUI close who=%s before=%d uiOpen=%d tick=%lu",
+                      ctx.isHost ? "host" : "join", uiLast_, engine::inventoryUiOpen() ? 1 : 0,
+                      (unsigned long)GetTickCount());
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        // 搜刮：主机在第 3 个整点隔一项拿一项，好友2 在第 6 个整点把剩下的全拿走，都放到自己一个活人身上；
+        // 抢尸体时两人都在第 3 个整点全拿（满包模式放到做了记号的那个人身上）
         if (loot_ && !looted_ && ctx.ownRank != 1 &&
-            slot >= firstSlot_ + KILL_GAP_SLOTS * (ctx.isHost ? 1 : 2)) {
+            slot >= firstSlot_ + KILL_GAP_SLOTS * (ctx.isHost || race_ ? 1 : 2)) {
             looted_ = true;
             EntityState sq[MAX_BODIES];
             unsigned int n = engine::captureSquad(ctx.gw, false, sq, MAX_BODIES);
@@ -718,7 +889,8 @@ public:
             for (unsigned int i = 0; i < n; ++i) {
                 if (corpse < 0 && corpse_ && engine::resolve(sq[i]) == corpse_) corpse = (int)i;
                 if (dst < 0 && !(sq[i].bodyState & BODY_DEAD) && ctx.ownTab &&
-                    ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial)) dst = (int)i;
+                    ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial) &&
+                    (!dst_ || engine::resolve(sq[i]) == dst_)) dst = (int)i;
             }
             unsigned int entries = 0;
             if (corpse >= 0 && dst >= 0) {
@@ -728,7 +900,7 @@ public:
                 InvItemEntry items[MAX_ITEMS];
                 entries = engine::captureContainerContents(ctx.gw, ch, items, MAX_ITEMS, &hash);
                 for (unsigned int k = 0; k < entries; ++k) {
-                    if (ctx.isHost && k % 2 == 1) continue;
+                    if (ctx.isHost && !race_ && k % 2 == 1) continue;
                     int got = engine::moveItemBetweenContainers(ctx.gw, ch, dh, items[k].stringID,
                                                                items[k].itemType,
                                                                items[k].quantity ? items[k].quantity : 1);
@@ -750,7 +922,8 @@ public:
             b[sizeof(b) - 1] = '\0'; coop::logLine(b);
             return false;
         }
-        if (slot < firstSlot_ + END_SLOTS + (ctx.isHost ? HOST_EXTRA_SLOTS : 0)) return false;
+        if (slot < firstSlot_ + END_SLOTS + (race_ ? RACE_EXTRA_SLOTS : 0) +
+                   (ctx.isHost ? HOST_EXTRA_SLOTS : 0)) return false;
 
         unsigned int dead[2] = { 0, 0 };
         bool haveDead = engine::readDeadSquadTab(ctx.gw, dead);
@@ -792,6 +965,8 @@ public:
         }
         // 搜刮模式：每个身体打一行件数和内容指纹供三方对照；本机的尸体（只有一个新死的）应已拿空
         int corpseLeft = -1;
+        int keyNow[MAX_ITEMS];
+        for (unsigned int k = 0; k < nKeys_; ++k) keyNow[k] = 0;
         for (unsigned int i = 0; loot_ && i < n; ++i) {
             unsigned int h[5], hash = 0;
             handFromEntity(sq[i], h);
@@ -799,15 +974,34 @@ public:
             unsigned int cnt = engine::captureContainerContents(ctx.gw, h, items, MAX_ITEMS, &hash);
             bool isCorpse = corpse_ && now[i] == corpse_;
             if (isCorpse) corpseLeft = (int)cnt;
+            for (unsigned int j = 0; j < cnt; ++j)
+                for (unsigned int k = 0; k < nKeys_; ++k)
+                    if (keys_[k].itemType == items[j].itemType && strcmp(keys_[k].stringID, items[j].stringID) == 0)
+                        keyNow[k] += items[j].quantity < 1 ? 1 : (int)items[j].quantity;
             _snprintf(b, sizeof(b) - 1,
                       "SCENARIO LOOTINV who=%s idx=%u ser=%u dead=%d corpse=%d count=%u hash=%08x",
                       ctx.isHost ? "host" : "join", sq[i].hIndex, sq[i].hSerial,
                       (sq[i].bodyState & BODY_DEAD) ? 1 : 0, isCorpse ? 1 : 0, cnt, hash);
             b[sizeof(b) - 1] = '\0'; coop::logLine(b);
         }
+        // 抢尸体：尸体里的每样东西在所有身体上的总数要与开始时相同
+        int keyBad = 0;
+        for (unsigned int k = 0; k < nKeys_; ++k) {
+            if (keyNow[k] != keyStart_[k]) ++keyBad;
+            _snprintf(b, sizeof(b) - 1, "SCENARIO LOOTKEY final who=%s sid='%s' type=%u start=%d now=%d",
+                      ctx.isHost ? "host" : "join", keys_[k].stringID, keys_[k].itemType,
+                      keyStart_[k], keyNow[k]);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        if (race_) {
+            _snprintf(b, sizeof(b) - 1, "SCENARIO LOOTRACE final who=%s rank=%u keys=%u keyBad=%d ui=%d filled=%d",
+                      ctx.isHost ? "host" : "join", ctx.ownRank, nKeys_, keyBad, uiOk_, filledN_);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
         if (loot_)
             passed_ = (ctx.ownRank == 1 ? victimOk : moved_ > 0) && corpseLeft == 0 &&
-                      vanished == 0 && misplaced == 0 && newTabs == 0 && newlyDead >= 1;
+                      vanished == 0 && misplaced == 0 && newTabs == 0 && newlyDead >= 1 &&
+                      (!race_ || (nKeys_ > 0 && keyBad == 0 && (race_ < 2 || uiOk_)));
         else
             passed_ = victimOk && vanished == 0 && misplaced == 0 && newTabs == 0 && newlyDead >= 3;
         _snprintf(b, sizeof(b) - 1,
@@ -828,6 +1022,12 @@ private:
     static const unsigned long END_SLOTS        = 12;
     // 主机多等两个整点再核对，免得先退出把加入方断开
     static const unsigned long HOST_EXTRA_SLOTS = 2;
+    // 抢尸体多等四个整点：关窗后的收回、对账和大背包 30 秒一次的补发
+    static const unsigned long RACE_EXTRA_SLOTS = 4;
+    static const unsigned long UI_CLOSE_SLOT    = 7;
+    static const unsigned long MARK_DELAY_MS    = 1000;
+    static const int           FILL_MAX         = 400;
+    static const float         FULL_HUNGER;
 
     bool          loot_;
     unsigned long firstSlot_;
@@ -840,7 +1040,26 @@ private:
     unsigned int  nStart_;
     unsigned int  startTabs_[MAX_TABS][2];
     unsigned int  nTabs_;
+    int           race_;
+    bool          uiOpened_;
+    bool          uiClosed_;
+    int           uiOk_;
+    int           uiLast_;
+    Character*    uiChar_;
+    bool          marked_;
+    bool          filled_;
+    int           filledN_;
+    Character*    dst_;
+    InvItemEntry  keys_[MAX_ITEMS];
+    int           keyStart_[MAX_ITEMS];
+    unsigned int  nKeys_;
+    Character*    markWho_[MAX_BODIES];
+    int           markBase_[MAX_BODIES];
+    unsigned int  nMark_;
 };
+
+// 饥饿值的引擎刻度约 0～3（ReplicatorChannels.cpp 协议 29 的注释）
+const float OwnerDeathScenario::FULL_HUNGER = 3.0f;
 
 } // namespace
 
@@ -851,6 +1070,9 @@ Scenario* makeMedicalScenario(const std::string& name) {
     if (name == "stats_sync")   return new StatsSyncScenario();
     if (name == "owner_death")  return new OwnerDeathScenario(false);
     if (name == "corpse_loot")  return new OwnerDeathScenario(true);
+    if (name == "loot_race")      return new OwnerDeathScenario(true, 1);
+    if (name == "loot_race_ui")   return new OwnerDeathScenario(true, 2);
+    if (name == "loot_race_full") return new OwnerDeathScenario(true, 3);
     return 0;
 }
 
