@@ -1452,6 +1452,26 @@ bool Replicator::localHandForFixtureKey(const Key& wire, unsigned int out[5]) co
     return true;
 }
 
+// 线上容器钥匙 → 交给引擎的本机手把：自己的容器原样，固定设施按配对换；第 3 步认
+// 换编队后编号变化的本机身体——对端快照里的钥匙在换手把处理里已绑到 proxyByKey_
+// （对端钥匙 → 本机身体），类型和序列号一致时输出该身体当前的本机手把。只换交给
+// 引擎的手把，invRecv_ / xferBase_ 等表仍按线上钥匙记。
+void Replicator::handForContainerKey(const Key& k, unsigned int out[5]) const {
+    if (ownedContainers_.count(k) == 0 && ownHands_.count(k) == 0) {
+        if (localHandForFixtureKey(k, out)) return;
+        std::map<Key, Character*>::const_iterator proxy = proxyByKey_.find(k);
+        if (proxy != proxyByKey_.end() && proxy->second != 0) {
+            ObjectHand oh;
+            if (engine::charHandOf(proxy->second, oh) &&
+                oh.type == k.t && oh.serial == k.s) {
+                oh.toObjOrder(out);
+                return;
+            }
+        }
+    }
+    out[0] = k.t; out[1] = k.c; out[2] = k.cs; out[3] = k.i; out[4] = k.s;
+}
+
 // Build-site pose subject translation. A construction site is created at RUNTIME,
 // so unlike every other pose fixture its hand is client-local: a placement logged
 // 0.3409.11111.2.3348877056 on the placer and ...2871948288 on the peer. A streamed

@@ -2176,12 +2176,9 @@ private:
     // where using the key verbatim reads and writes nothing. Keys WE author are
     // already local and are never translated, so an unlucky collision between
     // our hand for one fixture and the peer's for another cannot bite.
-    void handForContainerKey(const Key& k, unsigned int out[5]) const {
-        if (ownedContainers_.count(k) == 0 && ownHands_.count(k) == 0 &&
-            localHandForFixtureKey(k, out))
-            return;
-        out[0] = k.t; out[1] = k.c; out[2] = k.cs; out[3] = k.i; out[4] = k.s;
-    }
+    // 第 3 步：换编队后本机编号会变（阵亡编队按本机进入顺序编号），proxyByKey_ 里
+    // “对端钥匙 → 本机身体”的对照在类型和序列号一致时换回该身体当前的本机手把。
+    void handForContainerKey(const Key& k, unsigned int out[5]) const;
     // Protocol 23 recruitment sync state.
     bool recruitSync_;
     // Ownership PINS (protocols 23 + 35): per-hand overrides layered on the
