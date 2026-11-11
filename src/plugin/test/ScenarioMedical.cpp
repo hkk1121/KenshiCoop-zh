@@ -1055,7 +1055,7 @@ public:
             b[sizeof(b) - 1] = '\0'; coop::logLine(b);
         }
         if (deathRace_)
-            passed_ = victimOk && vanished == 0 && misplaced == 0 && newlyDead >= 3;
+            passed_ = victimOk && vanished == 0 && misplaced == 0 && newlyDead >= 3 && edited_ > 0;
         else if (loot_)
             passed_ = (ctx.ownRank == 1 ? victimOk : moved_ > 0) && corpseLeft == 0 &&
                       vanished == 0 && misplaced == 0 && newTabs == 0 && newlyDead >= 1 &&
