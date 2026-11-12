@@ -33,6 +33,7 @@
 #include "core/FpsLimit.h"
 #include "core/OwnRanks.h"
 #include "core/Inbound.h"
+#include "core/Update.h" // 自动更新：查版本/下载/替换（后台线程）
 #include "net/NetLink.h"
 #include "net/Discovery.h"
 #include "net/SteamP2P.h"
@@ -2656,6 +2657,8 @@ void (*g_steamShutdown_orig)() = 0;
 void steamShutdown_hook() {
     coopLog("[steam] SteamAPI_Shutdown: stopping net thread before Steam unloads");
     g_net.stop();
+    // 自动更新的后台线程也在 DLL 里：先请求它收尾，避免 DLL 卸载后线程还在跑。
+    coop::update::shutdown();
     coop::steaminvite::reset();
     coop::steamp2p::shutdown();
     g_steamShutdown_orig();
@@ -3158,6 +3161,11 @@ __declspec(dllexport) void startPlugin() {
     }
 
     logStartupBanner();
+
+    // 自动更新（交接文档 4.2）：启动时清理上次替换残留的 *.old / update_tmp；autoUpdate
+    // 开启且非 Harness 场景时，后台线程约 10 秒后检查一次 GitHub 发布（不阻塞加载）。
+    // 场景测试副本没有被换成发布版的风险，所以 KENSHICOOP_SCENARIO 非空时不自动检查。
+    coop::update::startup(g_cfg.updateProxy, g_cfg.autoUpdate && g_cfg.scenario.empty());
 
     // Hook the main-thread tick FIRST (early-return on failure), then wire the
     // replicator, engine detours and UI hooks as named install phases.

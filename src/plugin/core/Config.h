@@ -6,6 +6,7 @@
 #ifndef KENSHICOOP_CONFIG_H
 #define KENSHICOOP_CONFIG_H
 
+#include <map>
 #include <string>
 #include <set>
 #include <vector>
@@ -640,6 +641,13 @@ struct Config {
     bool               autoConnect;
     unsigned long long localPlayerId;
     std::string playerName;
+
+    // 自动更新（详见 core/Update.h 与交接文档）：从 GitHub 发布读新版本、下载核对后
+    // 自动替换，重启游戏生效。autoUpdate = false 时不自动检查（F2 面板“检查更新”
+    // 仍可用）；updateProxy 空 = 用系统代理，非空 = "host:port"（只支持 HTTP，
+    // WinHTTP 不支持 SOCKS）。面板“粘贴代理地址 / 清除代理”会写回配置文件并即时生效。
+    bool          autoUpdate;
+    std::string   updateProxy;
 };
 
 // Read every KENSHICOOP_* var into 'out', applying host/join defaults. Values in
@@ -676,6 +684,20 @@ int loadFpsLimit();
 
 void savePlayerBoxesHidden(bool hidden);
 bool loadPlayerBoxesHidden();
+
+// DLL 所在目录（末尾带反斜杠，例如 "...\\mods\\KenshiCoop\\"）；取不到时返回空串。
+// 自动更新的 update.json / update_tmp / *.old 都放在这个目录（与 coop_config.json 同目录）。
+std::string moduleDirPath();
+
+// 扁平 JSON 文本解析：与 coop_config.json 用的是同一个解析器，只认 "key": value
+// （字符串/数字/布尔，// 注释会被剥离）。发布附件的 update.json 就按扁平格式写，
+// 插件用这个函数读远端与本机的 update.json。
+std::map<std::string, std::string> parseFlatJsonText(const std::string& text);
+
+// 把 coop_config.json 里的一个字符串项写成 value：存在则替换值，不存在则插入。
+// 保留文件其它内容与注释，写 .tmp 后用 MoveFileExA 替换（沿用 localPlayerId 段做法）。
+// 目前只给自动更新的 updateProxy 用（F2 面板粘贴/清除代理）。成功返回 true。
+bool saveConfigString(const char* key, const std::string& value);
 
 } // namespace coop
 

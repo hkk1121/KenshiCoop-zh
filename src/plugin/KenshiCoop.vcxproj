@@ -66,7 +66,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>kenshilib.lib;OgreMain_x64.lib;MyGUIEngine_x64.lib;ws2_32.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>kenshilib.lib;OgreMain_x64.lib;MyGUIEngine_x64.lib;ws2_32.lib;winmm.lib;winhttp.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Harness|x64'">
@@ -89,7 +89,7 @@
            RVA in a text map. The PDB is useless without a tool that reads it. -->
       <GenerateMapFile>true</GenerateMapFile>
       <MapFileName>$(OutDir)KenshiCoop.map</MapFileName>
-      <AdditionalDependencies>kenshilib.lib;OgreMain_x64.lib;MyGUIEngine_x64.lib;ws2_32.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>kenshilib.lib;OgreMain_x64.lib;MyGUIEngine_x64.lib;ws2_32.lib;winmm.lib;winhttp.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -109,7 +109,7 @@
       <ProgramDatabaseFile>$(OutDir)KenshiCoop.pdb</ProgramDatabaseFile>
       <GenerateMapFile>true</GenerateMapFile>
       <MapFileName>$(OutDir)KenshiCoop.map</MapFileName>
-      <AdditionalDependencies>kenshilib.lib;OgreMain_x64.lib;MyGUIEngine_x64.lib;ws2_32.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>kenshilib.lib;OgreMain_x64.lib;MyGUIEngine_x64.lib;ws2_32.lib;winmm.lib;winhttp.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -123,6 +123,7 @@
     <ClCompile Include="core\Config.cpp" />
     <ClCompile Include="core\CrashDump.cpp" />
     <ClCompile Include="core\FpsLimit.cpp" />
+    <ClCompile Include="core\Update.cpp" />
     <ClCompile Include="net\NetLink.cpp" />
     <ClCompile Include="net\Discovery.cpp" />
     <ClCompile Include="net\SteamP2P.cpp" />
@@ -204,6 +205,7 @@
     <ClInclude Include="CoopLog.h" />
     <ClInclude Include="core\Config.h" />
     <ClInclude Include="core\FpsLimit.h" />
+    <ClInclude Include="core\Update.h" />
     <ClInclude Include="core\Inbound.h" />
     <ClInclude Include="net\NetLink.h" />
     <ClInclude Include="net\SteamP2P.h" />

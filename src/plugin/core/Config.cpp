@@ -75,14 +75,9 @@ std::map<std::string, std::string> parseFlatJson(const std::string& text) {
 
 // Absolute path to coop_config.json next to KenshiCoop.dll (fallback: cwd).
 std::string configFilePath() {
-    char buf[MAX_PATH];
-    HMODULE h = GetModuleHandleA("KenshiCoop.dll");
-    DWORD n = GetModuleFileNameA(h, buf, MAX_PATH); // h == 0 would give the exe path
-    if (h == 0 || n == 0 || n >= MAX_PATH) return "coop_config.json";
-    std::string p(buf, n);
-    size_t slash = p.find_last_of("\\/");
-    p = (slash != std::string::npos) ? p.substr(0, slash + 1) : std::string();
-    return p + "coop_config.json";
+    std::string dir = coop::moduleDirPath();
+    if (dir.empty()) return "coop_config.json";
+    return dir + "coop_config.json";
 }
 
 std::map<std::string, std::string> readConfigFile() {
@@ -370,6 +365,14 @@ void loadConfig(Config& c) {
     {
         std::string ac = envOr("KENSHICOOP_AUTOCONNECT", fileOr(f, "autoConnect", "0").c_str());
         c.autoConnect = (ac == "1" || ac == "true");
+    }
+
+    // 自动更新：默认开启；updateProxy 空 = 系统代理，非空 = "host:port"（详见 core/Update.h）。
+    // 环境变量覆盖方便本机实测三种联网方式，不影响正式安装（都不设时以配置文件为准）。
+    {
+        std::string au = envOr("KENSHICOOP_AUTO_UPDATE", fileOr(f, "autoUpdate", "1").c_str());
+        c.autoUpdate = (au == "1" || au == "true");
+        c.updateProxy = envOr("KENSHICOOP_UPDATE_PROXY", fileOr(f, "updateProxy", "").c_str());
     }
 
     // Protocol 36 movement-smoothness knobs. Defaults are the historical
@@ -727,6 +730,57 @@ bool loadPlayerBoxesHidden() {
     std::ifstream f(p.c_str(), std::ios::binary);
     int hidden = 0;
     return (f >> hidden) && hidden == 1;
+}
+
+std::string moduleDirPath() {
+    // 与 configFilePath 原先的定位方式一致：DLL 自身路径所在目录；取不到返回空串。
+    char buf[MAX_PATH];
+    HMODULE h = GetModuleHandleA("KenshiCoop.dll");
+    DWORD n = GetModuleFileNameA(h, buf, MAX_PATH); // h == 0 would give the exe path
+    if (h == 0 || n == 0 || n >= MAX_PATH) return std::string();
+    std::string p(buf, n);
+    size_t slash = p.find_last_of("\\/");
+    return (slash != std::string::npos) ? p.substr(0, slash + 1) : std::string();
+}
+
+std::map<std::string, std::string> parseFlatJsonText(const std::string& text) {
+    return parseFlatJson(text);
+}
+
+bool saveConfigString(const char* key, const std::string& value) {
+    if (!key || !*key) return false;
+    const std::string path = configFilePath();
+    std::ifstream input(path.c_str(), std::ios::binary);
+    std::string text((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    input.close();
+    if (text.empty()) text = "{\r\n}\r\n";
+    const std::string tag = std::string("\"") + key + "\"";
+    const std::string quoted = std::string("\"") + value + "\"";
+    const size_t pos = text.find(tag);
+    const size_t open = text.find('{');
+    if (pos != std::string::npos) {
+        size_t begin = text.find(':', pos);
+        if (begin == std::string::npos) return false;
+        ++begin;
+        size_t finish = text.find_first_of(",}\r\n", begin);
+        if (finish == std::string::npos) return false;
+        text.replace(begin, finish - begin, " " + quoted);
+    } else if (open != std::string::npos) {
+        // 沿用 localPlayerId 段的插行格式；空对象的首项不加尾逗号。
+        std::string row = "\r\n  " + tag + ": " + quoted + ",";
+        if (parseFlatJson(text).empty()) row.erase(row.size() - 1);
+        text.insert(open + 1, row);
+    } else {
+        return false;
+    }
+    const std::string temp = path + ".tmp";
+    std::ofstream output(temp.c_str(), std::ios::binary | std::ios::trunc);
+    if (!output) return false;
+    output.write(text.data(), (std::streamsize)text.size());
+    output.close();
+    if (!output) return false;
+    return MoveFileExA(temp.c_str(), path.c_str(),
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
 }
 
 } // namespace coop
