@@ -1032,7 +1032,13 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
             if (us.protocolChanged)
                 status += coop::tr(" - the co-op protocol changed, all players must update");
         } else if (us.stage == coop::update::STAGE_DEV_BUILD) {
-            status = coop::tr("Development build - auto-update disabled");
+            // 开发版只检查、只显示最新版本，不自动替换（交接文档 4.2）
+            char b[128];
+            _snprintf(b, sizeof(b) - 1,
+                      coop::tr("Development build - auto-update disabled (latest %s)"),
+                      us.latestBuild);
+            b[sizeof(b) - 1] = '\0';
+            status = b;
         } else if (us.stage == coop::update::STAGE_FAILED) {
             // 面板按失败环节给中文说法（交接文档 4.3.1 的“校验失败”等），后面带错误码
             std::string failedText;

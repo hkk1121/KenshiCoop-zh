@@ -3162,11 +3162,6 @@ __declspec(dllexport) void startPlugin() {
 
     logStartupBanner();
 
-    // 自动更新（交接文档 4.2）：启动时清理上次替换残留的 *.old / update_tmp；autoUpdate
-    // 开启且非 Harness 场景时，后台线程约 10 秒后检查一次 GitHub 发布（不阻塞加载）。
-    // 场景测试副本没有被换成发布版的风险，所以 KENSHICOOP_SCENARIO 非空时不自动检查。
-    coop::update::startup(g_cfg.updateProxy, g_cfg.autoUpdate && g_cfg.scenario.empty());
-
     // Hook the main-thread tick FIRST (early-return on failure), then wire the
     // replicator, engine detours and UI hooks as named install phases.
     if (!installMainLoopHook())
@@ -3188,6 +3183,13 @@ __declspec(dllexport) void startPlugin() {
         else
             coopLog("[steam] FAILED to hook SteamAPI_Shutdown; quitting may crash in the net thread");
     }
+
+    // 自动更新（交接文档 4.2）：启动时清理上次替换残留的 *.old / update_tmp；autoUpdate
+    // 开启且非 Harness 场景时，后台线程约 10 秒后检查一次 GitHub 发布（不阻塞加载）。
+    // 场景测试副本没有被换成发布版的风险，所以 KENSHICOOP_SCENARIO 非空时不自动检查。
+    // 放在 SteamAPI_Shutdown 钩子之后起线程：早退（installMainLoopHook 失败）时没有线程，
+    // 正常路径才有 update::shutdown 的收尾。
+    coop::update::startup(g_cfg.updateProxy, g_cfg.autoUpdate && g_cfg.scenario.empty());
     // 帧数上限（F2 面板切换），未设置时不限
     coop::fpslimit::install();
 

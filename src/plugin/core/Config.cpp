@@ -762,9 +762,19 @@ bool saveConfigString(const char* key, const std::string& value) {
         size_t begin = text.find(':', pos);
         if (begin == std::string::npos) return false;
         ++begin;
-        size_t finish = text.find_first_of(",}\r\n", begin);
-        if (finish == std::string::npos) return false;
-        text.replace(begin, finish - begin, " " + quoted);
+        // 跳过冒号后的空白：玩家可能把值写在下一行，按行边界截断会把旧值留下
+        while (begin < text.size() && (text[begin] == ' ' || text[begin] == '\t' ||
+                                       text[begin] == '\r' || text[begin] == '\n')) ++begin;
+        size_t finish;
+        if (begin < text.size() && text[begin] == '"') {
+            finish = text.find('"', begin + 1);
+            if (finish == std::string::npos) return false;
+            ++finish; // 闭合引号之后
+        } else {
+            finish = text.find_first_of(",}\r\n", begin);
+            if (finish == std::string::npos) return false;
+        }
+        text.replace(begin, finish - begin, quoted);
     } else if (open != std::string::npos) {
         // 沿用 localPlayerId 段的插行格式；空对象的首项不加尾逗号。
         std::string row = "\r\n  " + tag + ": " + quoted + ",";
@@ -778,9 +788,16 @@ bool saveConfigString(const char* key, const std::string& value) {
     if (!output) return false;
     output.write(text.data(), (std::streamsize)text.size());
     output.close();
-    if (!output) return false;
-    return MoveFileExA(temp.c_str(), path.c_str(),
-                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+    if (!output) {
+        DeleteFileA(temp.c_str()); // 写坏的临时文件不留在游戏目录
+        return false;
+    }
+    if (!MoveFileExA(temp.c_str(), path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileA(temp.c_str());
+        return false;
+    }
+    return true;
 }
 
 } // namespace coop

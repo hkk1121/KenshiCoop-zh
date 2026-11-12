@@ -33,7 +33,7 @@ namespace update {
 namespace {
 
 // 只访问固定地址，编进代码，不从配置读（交接文档 4.2）。查版本走 latest/download
-// （GitHub 会跳到最新 Release 的附件，不用 api.github.com，未登录每天只有 60 次）；
+// （GitHub 会跳到最新 Release 的附件，不用 api.github.com，未登录每小时只有 60 次）；
 // 文件按 update.json 里的 tag 取，避免下载途中有新发布、两个版本的文件混在一起。
 const char* const kCheckUrl =
     "https://github.com/hkk1121/KenshiCoop-zh/releases/latest/download/update.json";
@@ -44,8 +44,8 @@ const char* const kDownloadBase =
 const DWORD kAutoCheckDelayMs = 10000;
 // 分片等待粒度：shutdown 时线程能很快看到停止标志
 const DWORD kWaitSliceMs = 250;
-// 退出时等后台线程收尾的上限（毫秒）
-const DWORD kShutdownWaitMs = 3000;
+// 退出时等后台线程收尾的上限（毫秒）：必须大于 openSession 里的一次阻塞超时（15 秒）
+const DWORD kShutdownWaitMs = 16000;
 
 CRITICAL_SECTION g_cs;
 bool             g_csInit  = false;
@@ -276,6 +276,7 @@ bool sha256File(const std::string& path, std::string& hexOut) {
                     }
                 }
             }
+            if (hash) BCryptDestroyHash(hash);
             free(obj);
         }
         BCryptCloseAlgorithmProvider(alg, 0);
@@ -315,7 +316,8 @@ HINTERNET openSession(std::string& proxyLabel, HttpResult& h) {
         if (WinHttpGetIEProxyConfigForCurrentUser(&cfg)) {
             if (cfg.lpszProxy && cfg.lpszProxy[0]) {
                 char narrow[512];
-                int n = WideCharToMultiByte(CP_ACP, 0, cfg.lpszProxy, -1, narrow,
+                // 存成 UTF-8：widenUtf8 会按 UTF-8 再转回宽字符，非 ASCII 主机名不会坏
+                int n = WideCharToMultiByte(CP_UTF8, 0, cfg.lpszProxy, -1, narrow,
                                             sizeof(narrow), 0, 0);
                 if (n > 0) {
                     proxy = narrow;
@@ -339,15 +341,19 @@ HINTERNET openSession(std::string& proxyLabel, HttpResult& h) {
         h.err = GetLastError();
         return 0;
     }
-    // 连接、收发各 15～30 秒
-    WinHttpSetTimeouts(session, 15000, 15000, 15000, 30000);
+    // 连接、收发各 15 秒（文档允许 15～30 秒；取 15 秒是为了让 shutdown 的等待上限
+    // 能覆盖一次卡住的阻塞调用，见 shutdown()）。
+    WinHttpSetTimeouts(session, 15000, 15000, 15000, 15000);
     return session;
 }
 
 // GET url：memory 非空时追加到内存，savePath 非空时写入该文件（两者可都不需要）。
 // 只认 HTTP 200；HTTPS 证书按系统默认校验；GitHub 的跳转由 WinHTTP 默认跟。
+// 入口先清空 h：同一轮检查复用 HttpResult，别把上一次的状态码/错误码带过来。
 bool httpGet(HINTERNET session, const std::string& url, std::string* memory,
              const std::string* savePath, HttpResult& h, unsigned long long* bytesOut) {
+    h.err = 0;
+    h.status = 0;
     if (bytesOut) *bytesOut = 0;
     if (!session) { h.err = ERROR_INVALID_HANDLE; return false; }
     std::wstring wurl = widenUtf8(url);
@@ -753,12 +759,19 @@ void startupCleanup() {
     HANDLE h = FindFirstFileA((dir + "*.old").c_str(), &fd);
     if (h != INVALID_HANDLE_VALUE) {
         do {
-            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
-                DeleteFileA((dir + fd.cFileName).c_str());
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            // 只在同名目标文件还在时才删 .old：万一上次回滚失败、目标缺失，
+            // 这个 .old 是唯一的旧版本，留着给人手动恢复。
+            std::string name(fd.cFileName);
+            std::string target = dir + name.substr(0, name.size() - 4); // 去掉 ".old"
+            if (fileExists(target)) DeleteFileA((dir + name).c_str());
         } while (FindNextFileA(h, &fd));
         FindClose(h);
     }
     removeDirTree(dir + "update_tmp");
+    // 上次写到一半留下的临时文件（不会覆盖正式文件）
+    DeleteFileA((dir + "update.json.tmp").c_str());
+    DeleteFileA((dir + "coop_config.json.tmp").c_str());
 }
 
 } // namespace
@@ -778,7 +791,8 @@ void startup(const std::string& proxy, bool autoCheck) {
             g_proxy = normalized;
             unlockState();
         } else {
-            coop::logErrLine("[update] updateProxy in coop_config.json is invalid - using system proxy");
+            // 退回系统代理是正常行为，不按错误记（面板/日志都会显示实际用的代理）
+            coop::logLine("[update] updateProxy in coop_config.json is invalid - using system proxy");
         }
     }
     startupCleanup();
@@ -799,11 +813,21 @@ void shutdown() {
     InterlockedExchange(&g_stop, 1);
     if (g_event) SetEvent(g_event);
     if (g_thread) {
-        WaitForSingleObject(g_thread, kShutdownWaitMs);
-        CloseHandle(g_thread);
-        g_thread = 0;
-    }
-    if (g_event) {
+        // 等待上限要盖住一次卡住的 WinHTTP 阻塞调用（连接/发送/接收各 15 秒）；
+        // 线程在阻塞调用里无法及时看 g_stop，只能等它超时返回。
+        DWORD wr = WaitForSingleObject(g_thread, kShutdownWaitMs);
+        if (wr == WAIT_OBJECT_0) {
+            CloseHandle(g_thread);
+            g_thread = 0;
+            if (g_event) {
+                CloseHandle(g_event);
+                g_event = 0;
+            }
+        } else {
+            // 还没退出来：不关句柄，避免句柄被复用后线程再引用；进程退出时线程随之结束。
+            coop::logLine("[update] shutdown wait timed out leaving worker thread");
+        }
+    } else if (g_event) {
         CloseHandle(g_event);
         g_event = 0;
     }
