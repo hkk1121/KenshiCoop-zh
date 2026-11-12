@@ -2951,6 +2951,30 @@ static void __fastcall refreshSquads_hook(SquadManagementScreen* self) {
     b[sizeof(b) - 1] = '\0'; coop::logLine(b);
 }
 
+// 人数上限按人各算：Faction::getFactionSize（真实 0x7F2270）把 activePlatoons 各编队的人数相加，
+// 招募、对话条件、SQD 窗口的人数显示都拿它和 MAX_FACTION_SIZE 比，所以对玩家阵营只数本端编队
+// （同样是临时换名单）。存档信息里记的人数也随之变成本端的。
+typedef int (__fastcall* FactionSizeFn)(Faction* self);
+static FactionSizeFn g_factionSizeOrig = 0;
+
+static int __fastcall getFactionSize_hook(Faction* self) {
+    Faction* f = 0;
+    unsigned int n = 0, k = 0;
+    if (g_squadBarVisible) squadBarScanSeh(ou, &f, &n, &k);
+    if (!f || k == n || f != self) return g_factionSizeOrig(self);
+    Platoon** saved = f->activePlatoons.stuff;
+    f->activePlatoons.stuff = g_squadBarList;
+    f->activePlatoons.count = k;
+    int size = 0;
+    __try {
+        size = g_factionSizeOrig(self);
+    } __finally {
+        f->activePlatoons.stuff = saved;
+        f->activePlatoons.count = n;
+    }
+    return size;
+}
+
 bool installSquadBarHook() {
     intptr_t aUpdate  = KenshiLib::GetRealAddress(&MainBarGUI::updatePotraitsPlatoon);
     intptr_t aRefresh = KenshiLib::GetRealAddress(&MainBarGUI::refreshPortraitTabs);
@@ -2961,8 +2985,12 @@ bool installSquadBarHook() {
     if (KenshiLib::AddHook(aRefresh, (void*)&refreshPortraitTabs_hook,
                            (void**)&g_refreshTabsOrig) != KenshiLib::SUCCESS) return false;
     intptr_t aSquads = KenshiLib::GetRealAddress(&SquadManagementScreen::refreshSquads);
-    return aSquads && KenshiLib::AddHook(aSquads, (void*)&refreshSquads_hook,
-                                       (void**)&g_refreshSquadsOrig) == KenshiLib::SUCCESS;
+    intptr_t aSize   = KenshiLib::GetRealAddress(&Faction::getFactionSize);
+    if (!aSquads || !aSize ||
+        KenshiLib::AddHook(aSquads, (void*)&refreshSquads_hook,
+                           (void**)&g_refreshSquadsOrig) != KenshiLib::SUCCESS) return false;
+    return KenshiLib::AddHook(aSize, (void*)&getFactionSize_hook,
+                              (void**)&g_factionSizeOrig) == KenshiLib::SUCCESS;
 }
 
 void syncSquadBar(GameWorld* gw) {

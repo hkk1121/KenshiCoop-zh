@@ -1621,6 +1621,7 @@ void playerBoxPlaceSeh(DatapanelGUI* p, int x, int y, int w, int h, bool show) {
 void onPlayerBoxPage(DataPanelLine*);
 void onPlayerBoxHide(DataPanelLine*);
 void onPlayerBoxAction(DataPanelLine*);
+void onPlayerBoxClose(MyGUI::Window*, const std::string&);
 
 bool playerBoxBuildSeh(DatapanelGUI* p, const std::string* title,
                       const std::vector<std::pair<std::string, std::string> >* rows,
@@ -1750,6 +1751,7 @@ void coopPlayerBoxesTick(const std::vector<CoopPlayerBox>& boxes, bool active,
     std::string toggleFingerprint = toggleTitle + page + hide;
     if (!g_playerBoxToggle) {
         g_playerBoxToggle = g->createDatapanel(0.1f, 0.2f, 0.2f, 0.1f, false, layer, true);
+        if (g_playerBoxToggle) g_playerBoxToggle->setCloseCallback(MyGUI::newDelegate(&onPlayerBoxClose));
     }
     if (g_playerBoxToggle && toggleFingerprint != g_playerBoxToggleTitle &&
         playerBoxBuildSeh(g_playerBoxToggle, &toggleTitle, 0, true, &hide, &page, 0, 0)) g_playerBoxToggleTitle = toggleFingerprint;
@@ -1790,6 +1792,7 @@ void coopPlayerBoxesTick(const std::vector<CoopPlayerBox>& boxes, bool active,
         }
         if (!g_playerBoxes[i]) {
             g_playerBoxes[i] = g->createDatapanel(0.2f, 0.2f, 0.2f, 0.2f, true, layer, true);
+            if (g_playerBoxes[i]) g_playerBoxes[i]->setCloseCallback(MyGUI::newDelegate(&onPlayerBoxClose));
         }
         playerBoxPlaceSeh(g_playerBoxes[i], left + (int)i * (boxW + gap), bottom - boxH, boxW, boxH, true);
         if (g_playerBoxes[i] && (g_playerBoxTitles[i] != title || g_playerBoxRows[i] != rows) &&
@@ -1816,6 +1819,13 @@ void onPlayerBoxAction(DataPanelLine* line) {
         if (at == g_playerBoxActions[i].end()) continue;
         g_playerBoxClickedAction = at->second; g_playerBoxClicked = true; break;
     }
+}
+
+// 窗口右上角的 X：引擎默认只是 show(false)，下一帧又被本模块摆出来，所以改成与“隐藏玩家框”同义
+void onPlayerBoxClose(MyGUI::Window*, const std::string&) {
+    if (g_playerBoxesHidden) return;
+    g_playerBoxesHidden = true;
+    coop::logLine("[playerbox] hidden from close button");
 }
 } // namespace
 
