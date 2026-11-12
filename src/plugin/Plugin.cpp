@@ -3019,7 +3019,7 @@ void installEngineDetours() {
     if (g_cfg.squadSync) {
         if (coop::engine::installSquadBarHook()) {
             coop::engine::setSquadBarFilter(&coopSquadBarVisible);
-            coopLog("[squadbar] tab filter installed; the squad bar shows only your own squads");
+            coopLog("[squadbar] tab filter installed; the squad bar and the SQD window show only your own squads");
         } else {
             coopErr("[squadbar] tab filter installation failed; every squad stays in the squad bar");
         }

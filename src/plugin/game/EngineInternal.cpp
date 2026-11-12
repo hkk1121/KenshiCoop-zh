@@ -2922,6 +2922,35 @@ static void __fastcall refreshPortraitTabs_hook(MainBarGUI* self) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
+// SQD 编队管理窗口同样只列本端编队：SquadManagementScreen::refreshSquads（真实 0x48EA30）对
+// faction->activePlatoons 只读，按名单顺序重建列表，所以和编队栏一样在重建期间临时换名单。
+// “添加小队”的上限（onAddSquad，真实 0x4910C0）比的是列表项数而不是阵营编队总数，
+// 筛掉别人的编队后上限就按人各算。
+typedef void (__fastcall* SquadScreenFn)(SquadManagementScreen* self);
+static SquadScreenFn g_refreshSquadsOrig = 0;
+
+static void __fastcall refreshSquads_hook(SquadManagementScreen* self) {
+    Faction* f = 0;
+    unsigned int n = 0, k = 0;
+    if (g_squadBarVisible) squadBarScanSeh(ou, &f, &n, &k);
+    if (!f || k == n || f != self->faction) {
+        g_refreshSquadsOrig(self);
+        return;
+    }
+    Platoon** saved = f->activePlatoons.stuff;
+    f->activePlatoons.stuff = g_squadBarList;
+    f->activePlatoons.count = k;
+    __try {
+        g_refreshSquadsOrig(self);
+    } __finally {
+        f->activePlatoons.stuff = saved;
+        f->activePlatoons.count = n;
+    }
+    char b[96];
+    _snprintf(b, sizeof(b) - 1, "[squadbar] SQD list shown=%u/%u", k, n);
+    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+}
+
 bool installSquadBarHook() {
     intptr_t aUpdate  = KenshiLib::GetRealAddress(&MainBarGUI::updatePotraitsPlatoon);
     intptr_t aRefresh = KenshiLib::GetRealAddress(&MainBarGUI::refreshPortraitTabs);
@@ -2929,8 +2958,11 @@ bool installSquadBarHook() {
     if (!aUpdate || !aRefresh ||
         KenshiLib::AddHook(aUpdate, (void*)&updatePotraitsPlatoon_hook,
                            (void**)&g_platoonPortraitsOrig) != KenshiLib::SUCCESS) return false;
-    return KenshiLib::AddHook(aRefresh, (void*)&refreshPortraitTabs_hook,
-                              (void**)&g_refreshTabsOrig) == KenshiLib::SUCCESS;
+    if (KenshiLib::AddHook(aRefresh, (void*)&refreshPortraitTabs_hook,
+                           (void**)&g_refreshTabsOrig) != KenshiLib::SUCCESS) return false;
+    intptr_t aSquads = KenshiLib::GetRealAddress(&SquadManagementScreen::refreshSquads);
+    return aSquads && KenshiLib::AddHook(aSquads, (void*)&refreshSquads_hook,
+                                       (void**)&g_refreshSquadsOrig) == KenshiLib::SUCCESS;
 }
 
 void syncSquadBar(GameWorld* gw) {

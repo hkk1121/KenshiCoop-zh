@@ -78,6 +78,7 @@
 #include <kenshi/Globals.h>         // gui (ForgottenGUI*, KenshiLib data export)
 #include <kenshi/gui/ForgottenGUI.h> // ForgottenGUI::mainbar
 #include <kenshi/gui/MainBarGUI.h>  // MainBarGUI::speedButtons (vote-button probe)
+#include <kenshi/gui/SquadManagementScreen.h> // SquadManagementScreen::refreshSquads (SQD window lists own squads only)
 // NOTE: kenshi/ZoneManager.h cannot be included here - it redefines ParticlePool
 // (also defined by CombatClass.h above). The zone-loaded query lives in its own
 // TU (game/ZoneQuery.cpp); see engine::isZoneLoadedAt / engine::resolveZoneQuery.
