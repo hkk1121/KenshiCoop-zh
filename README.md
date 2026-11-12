@@ -1,235 +1,113 @@
-# KenshiCoop
+# KenshiCoop-zh
 
-Setup + Demo: [https://www.youtube.com/watch?v=OqwVRRZEYGM](https://www.youtube.com/watch?v=OqwVRRZEYGM)
+[Kenshi](https://lofigames.com/) 联机插件 [KenshiCoop](https://github.com/nhoral/KenshiCoop) 的中文化与改进版，
+以 [RE_Kenshi](https://github.com/BFrizzleFoShizzle/RE_Kenshi) /
+[KenshiLib](https://github.com/BFrizzleFoShizzle/KenshiLib) 插件的形式运行。
 
-Experimental **co-op multiplayer for [Kenshi](https://lofigames.com/)**, built as an
-[RE_Kenshi](https://github.com/BFrizzleFoShizzle/RE_Kenshi) /
-[KenshiLib](https://github.com/BFrizzleFoShizzle/KenshiLib) plugin.
+一名玩家当主机开自己的世界，好友通过 Steam（或局域网 / 直连 UDP）加入，各自带自己的编队在同一个世界里玩。
+插件同步编队、NPC、战斗、背包与装备、玩家之间的交易、丢在地上的物品、基地建造与容器内容、游戏速度等；
+任何一方存档都会变成一份共用存档，自动传给所有人。
 
-One player hosts their world; a friend connects (LAN, direct UDP, or Steam P2P)
-and plays their own squad inside it. The plugin replicates squads, NPCs, combat,
-inventory and equipment, direct trades between the players' squads, items
-dropped on the ground (both directions), base building and container contents,
-one shared money pool, game speed, and more - and saves are coordinated: any save
-either player makes becomes one shared save, streamed to both machines
-automatically.
+> **状态：开发中。** 这是业余项目，可能遇到不同步、闪退等问题。
+> 本版联机协议为 **1007**，与官方版 KenshiCoop（v0.51）**不互通**，所有玩家必须安装同一个版本。
 
-> **Status: work in progress.** This is a hobby project under active
-> development. Expect rough edges, desyncs, and crashes. Two players is the
-> validated configuration; **three players (host + 2 joins) is supported as
-> of protocol 49** (host-relayed star - see
-> [docs/THREE_PLAYER.md](docs/THREE_PLAYER.md)) and is still being soak
-> tested. The shipped release kit predates protocol 49; three-player needs a
-> build from source until the next release.
+## 相对官方版的主要改动
 
-## How it works
+- **简体中文界面**：F2 联机面板、状态条、提示全部中文（按游戏语言自动切换），附带 RE_Kenshi 设置界面的中文翻译。
+- **最多 4 人联机**：主机负责转发，加入方只连主机；第 3、4 人加入不会让前面的人重新联机。
+- **每人独立编队**：自己招募或新建的角色只进自己的编队，只能操控自己的编队；归属写进主机存档，掉线后保留。
+- **编队授权**：可以向好友申请控制某个编队，对方同意、拒绝、随时收回，借用方也可以主动归还。
+- **玩家框**：编队栏上方显示每位玩家的名字、在线状态、编队和成员，可隐藏。
+- **F2 创建角色**：加入方进世界后在 F2 面板选原版开局，用游戏自带的捏人界面建自己的角色，可反复创建。
+- **所有原版开局都能联机**：开局列表里有“联机：<开局名>”系列。
+- **每人独立资金**；科技和势力关系全队共用。
+- **Steam 好友房间**：主机不用填好友 ID，好友在房间列表里点一下就能连；也可以粘贴主机 Steam ID 先看房间信息。
+- **自动更新**：启动后从本仓库的 Release 检查并下载新版本，重启游戏生效；直连 GitHub 慢时可以在 F2 面板粘贴 HTTP 代理地址。
+- **帧数上限**：F2 面板里切换 不限 / 100 / 200 / 300 / 400 / 500。
+- 修复用户名或存档路径含中文时存档传输失败等问题。
 
-- `KenshiCoop.dll` is loaded into the game by RE_Kenshi. It hooks the engine via
-  KenshiLib and drives all game mutation on the main thread.
-- Networking is [ENet](https://github.com/lsalzman/enet) over UDP, with an
-  optional Steam P2P tunnel (no port forwarding needed).
-- The host is authoritative for the world; each client is authoritative for its
-  own squad. See `docs/API_REFERENCE.md` for the full engine-control surface and
-  wire protocol.
+## 安装
+
+需要 **Steam 版 Kenshi 1.0.65**，所有玩家的 Steam 都要在线。
+
+1. 退出 Kenshi。
+2. 从 [最新 Release](https://github.com/hkk1121/KenshiCoop-zh/releases/latest) 下载 `KenshiCoop-zh-<版本>.zip`，
+   把整个压缩包解压出来（不要在压缩软件里直接运行）。
+3. 双击 `install.cmd`，按提示操作：
+   - 自动找到 Steam 版 Kenshi 的游戏目录，找不到时把游戏文件夹拖进窗口；
+   - 第一次安装会打开包里自带的 RE_Kenshi 安装程序，在里面选择 Kenshi 游戏目录并安装，装完关掉它，脚本会继续；
+   - 自动在游戏的 Mods 列表里启用 KenshiCoop；你自己改过的 `coop_config.json` 不会被覆盖。
+4. 看到“安装完成”即可。
+
+装过 `20261112-1632` 及之后的版本后，以后会自动更新，不用再手动下载。
+F2 面板的“更新”一栏显示当前状态；下载慢时点“粘贴代理地址”填入 HTTP 代理（例如 `127.0.0.1:10808`，混合端口也可以），留空则走系统代理。
+
+## 联机
+
+1. 所有人安装同一个版本，启动游戏，按 **F2** 打开联机面板（主菜单和游戏内都能用）。
+2. **主机**：读取存档或用原版开局建好世界，把“角色”设为“主机”，连接方式选 STEAM，切换为“在线”，好友房间就开好了。
+3. **好友**：在主菜单按 F2，把“角色”设为“加入”，连接方式选 STEAM，在“房间列表”里点主机的房间即可连接。
+   也可以让主机“复制我的 Steam ID”发过来，粘贴后先看主机名、存档、人数和版本，再切换为“在线”。
+4. 等主机的世界传输完、自动读档进入世界。没有自己的角色时，按 F2 选一个开局，点“开始所选开局”，
+   在游戏自带的捏人界面里捏好角色并确认。
+5. 左上角状态条显示连接状态；切回“离线”即退出联机。
+
+默认只接受 Steam 直接好友加入，主机粘贴的 Steam ID 可以额外放行。
+局域网 / Tailscale / 直连 UDP 也能用：把连接方式切到 UDP，在 `<Kenshi>\mods\KenshiCoop\coop_config.json` 里填主机的 `ip` / `port`，
+或者用面板里的“扫描主机”。
+
+完整的使用说明（玩家框、编队授权、创建角色的细节和注意事项）在发布包里的 `README.txt`。
+
+### 出问题时
+
+- **连不上**：确认双方 Steam 在线且互为好友、主机已切到“在线”、双方版本相同，面板和状态条会提示具体原因。
+- **提示版本不一致**：所有人更新到同一个版本（`VERSION.txt` 里的“代码版本”要一致）。
+- **插件没有加载**：看 `<Kenshi>\RE_Kenshi_log.txt` 里有没有 `KenshiCoop`，重装 RE_Kenshi 通常能解决。
+- 反馈问题时请附上游戏目录下的 `KenshiCoop_host.log` 或 `KenshiCoop_join.log`。
+
+## 工作原理
+
+- `KenshiCoop.dll` 由 RE_Kenshi 载入游戏，通过 KenshiLib 挂接引擎，所有对游戏的改动都在主线程执行。
+- 网络用 [ENet](https://github.com/lsalzman/enet)（UDP），可选 Steam P2P 隧道，不需要端口转发。
+- 主机对世界有最终决定权，每位玩家对自己的编队有最终决定权。引擎接口与网络协议见 `docs/API_REFERENCE.md`（英文）。
 
 ```
-src/plugin/       The KenshiCoop plugin (net, sync/replication, engine facade, scenarios)
-src/netproto/     Shared wire-protocol headers (plain C++03, compiled by everything)
-src/netsim/       Protocol simulator
-src/prototest/    Wire-protocol unit tests
-src/tunneltest/   Steam-tunnel socket-hook tests
-scripts/          Build, deploy, session, and automated-test tooling (PowerShell)
-docs/             Build guide, engine/API reference, replication pitfalls
-third_party/      ENet patches, VC10 compat shim (deps are fetched, not committed)
+src/plugin/       KenshiCoop 插件本体（网络、同步、引擎封装、测试场景）
+src/netproto/     共用的网络协议头文件（C++03）
+src/netsim/       协议模拟器
+src/prototest/    网络协议单元测试
+src/tunneltest/   Steam 隧道套接字挂钩测试
+scripts/          编译、部署、联机会话、自动化测试脚本（PowerShell）
+docs/             编译指南、引擎与接口参考、同步踩坑记录（英文，沿用官方版）
+third_party/      ENet 补丁、VC10 兼容层（依赖需另行获取，不在仓库里）
 ```
 
-## Try it (play with a friend)
+## 编译
 
-Two players, two machines. You configure the session **inside the game** with
-an in-game panel (press **F2**) - you swap Steam IDs by clipboard right in the
-panel, so there's no config file to edit and no launcher scripts to run. (A tiny
-`coop_config.json` is only needed for LAN / direct-UDP games.)
-
-### Before you start (both players)
-
-1. **Kenshi 1.0.65 (Steam)**.
-2. **[RE_Kenshi 0.3.1+](https://www.nexusmods.com/kenshi/mods/847)** installed
-   (free Nexus mod - it loads the co-op plugin into the game).
-3. **Steam running and online** on both machines. That's the whole network
-   setup: the connection is Steam P2P, so there's no port forwarding, no
-   router configuration, and no IP addresses. (A direct-UDP mode is also
-   available for LAN / port-forwarded games.)
-
-### 1. Install the mod
-
-Grab `KenshiCoop-kit.zip` from the
-[latest release](https://github.com/nhoral/KenshiCoop/releases/latest) and
-unzip it anywhere (both players). You do not need to clone this repository -
-but if you did, the same kit is in [dist/mod-kit](dist/mod-kit).
-
-The zip contains a single **`KenshiCoop`** folder. Copy that folder into your
-Kenshi `mods` directory so you end up with
-`<Kenshi>\mods\KenshiCoop\KenshiCoop.dll` (default Steam path:
-`C:\Program Files (x86)\Steam\steamapps\common\Kenshi\mods\`). Then launch
-Kenshi and enable **KenshiCoop** in the Mods menu.
-
-### 2a. The two-click way (recommended: Tailscale + the menu buttons)
-
-Put everyone in one [tailscale](https://tailscale.com) network once (free for
-3 users; it's LAN-grade UDP over the internet with no port forwarding). After
-that, a session is:
-
-- **Host:** launch Kenshi, click **HOST GAME** on the main menu, then load
-  your save (or start a new game). Done.
-- **Everyone else:** launch Kenshi, click **JOIN GAME**. Done. It finds the
-  host on your tailnet/LAN by itself, picks your squad slot by itself (second
-  clicker gets squad 2, third gets squad 3), connects, and streams the host's
-  world in. The status row on the launcher narrates the whole thing.
-
-No IDs, no addresses, no settings. If JOIN says "No hosts found", the host
-isn't ONLINE yet (or isn't on your tailnet/LAN) - click it again once they
-are. The buttons use the UDP transport; for Steam transport use the panel
-(below).
-
-**Friends who are bad at computers:** make them a self-contained kit -
-`scripts\make_friend_kit.ps1 -AuthKey tskey-auth-...` packages the mod plus a
-double-click `SETUP.cmd` that installs everything AND joins them to your
-tailscale network with a pre-auth key (generate one at
-login.tailscale.com/admin/settings/keys - reusable, short expiry). They never
-make a Tailscale account or see a login: unzip, double-click, click Yes,
-launch Kenshi, JOIN GAME. Treat the zip like a password and revoke the key
-once they're in (their machines stay joined).
-
-### 2b. The full panel (press F2 - Steam transport / manual setup)
-
-The Co-op panel works at the **main menu** (before you load a game) as well as
-in-game, so the joining player doesn't need to load anything first.
-
-1. Press **F2** to open the Co-op panel.
-2. **Swap Steam IDs.** Each player clicks **"Copy my Steam ID"** and sends it to
-   the other (Steam chat, Discord, ...). When you receive your friend's ID, copy
-   it, then click **"Paste friend's Steam ID"** - the panel shows the ID it
-   captured. This is per-session (nothing is written to disk), so re-paste it if
-   you relaunch Kenshi.
-3. Leave **Transport** on **STEAM**.
-4. **Host:** load the save you want to play, or start a new game - pick
-   **Multiplayer (Wanderer x2)** from the start list for a ready-made two-squad
-   co-op start (see below). Then set **Role: HOST** and toggle **Connection** to
-   **ONLINE**.
-5. **Join:** straight from the **main menu** - no save needed - set
-   **Role: JOIN** and toggle **Connection** to **ONLINE**. The host streams its
-   world to you on connect and you load right into it. (If you already have an
-   identical copy of the host's save on disk, it's used as-is instead of
-   transferring.)
-6. The white status line shows live state, and a status banner in the **top-left
-   corner** shows it too - at the main menu as well as in-game, so a joining
-   player can watch the transfer before the world loads. Toggle **Connection** to
-   **OFFLINE** to leave.
-
-**LAN / direct-UDP (advanced):** skip the Steam ID swap. Open
-`<Kenshi>\mods\KenshiCoop\coop_config.json`, set `"transport": "udp"`, and put
-the host's address in `"ip"` / `"port"`. Then in the panel set **Transport: UDP**
-and go ONLINE. The `ip`/`port` are re-read whenever you go ONLINE, so no restart
-is needed after an edit.
-
-**Host browser in the panel:** with **Role: JOIN** and **Transport: UDP**, the
-**"Scan for hosts (Tailscale / LAN)"** button probes every machine in your
-tailnet (plus the local network) and lists whoever is hosting - name, address,
-save, player count. Click again to step through multiple found hosts; the
-picked one is what ONLINE connects to. (This is the same scan JOIN GAME runs -
-the panel version just lets you pick when several hosts are up.) Scanning uses
-the `tailscale` CLI if installed; without it you can still join by pasting the
-host's `100.x.y.z` address into the config as above. The host answers scan
-probes only from private/tailnet addresses - it never advertises to the open
-internet.
-
-### Good to know
-
-- **You each control your own squad.** With one squad tab per player, the host
-  runs squad 1 and the joining player squad 2. Your friend's squad is visible
-  and synced on your screen, but answers only to them. If your save has only
-  one squad, move some units into a second squad tab in-game to give them a crew.
-- **Two-player starts included.** The KenshiCoop mod ships two game starts (New
-  Game -> pick one from the list), both the vanilla Wanderer start with two
-  wanderers already split into separate squads, so the host gets squad 1 and the
-  joining player squad 2 with no manual tab-splitting:
-  - **"Multiplayer (Wanderer x2)"** - the plain version, vanilla in every other
-    way. Authored by [zeroit789](https://github.com/zeroit789).
-  - **"Multiplayer+ (Wanderer x2)"** - the same start with **500,000 cats** and both
-    characters at **50 in every stat**, for skipping the early grind. Kenshi has
-    a single player wallet and co-op shares it, so the 500,000 is the pair's
-    combined purse, not 500,000 each. The stats are a floor applied when the
-    world loads, so training past 50 sticks normally.
-- **The joining player doesn't need the host's save.** The host picks the save
-  (or starts a new game); when the join connects from the menu, the host's world
-  is streamed over automatically. Already having an identical copy on disk just
-  skips the transfer.
-- **Saving just works.** Any save either player makes during a session becomes
-  one shared save on both machines, streamed to the other side automatically.
-  To resume next time, the host loads that save and goes online, and the join
-  can reconnect straight from the main menu again.
-
-### Good to know (cosmetics)
-
-- **RE_Kenshi's settings window opens on every launch** by default. Untick
-  *"Open RE_Kenshi settings on startup"* in that window (or set
-  `"OpenSettingOnStart": false` in `<Kenshi>\RE_Kenshi.ini`) and the title
-  screen stays clean - just the game menu and the co-op launcher.
-
-### If something goes wrong
-
-- **"The co-op plugin has not started"** - RE_Kenshi didn't load it. Check
-  `<Kenshi>\RE_Kenshi_log.txt` for `KenshiCoop`; reinstalling
-  [RE_Kenshi](https://www.nexusmods.com/kenshi/mods/847) usually fixes it.
-- **No connection (Steam)** - both Steams must be online (not offline mode), and
-  each side must have **Pasted** the *other* player's ID (the panel shows the
-  captured ID - confirm it matches). If "Paste friend's Steam ID" reports the
-  clipboard wasn't a Steam ID, have your friend re-copy theirs. Look for
-  `[steam] session ... active=1` in `<Kenshi>\KenshiCoop_*.log`.
-- **"protocol mismatch" in the log** - one of you has an older build; both
-  players should re-install from the same release.
-
-The kit's `README.txt` has the full setup + troubleshooting list.
-
-## Building
-
-The plugin must be compiled with the **Visual C++ 2010 (v100) x64 toolset** (a
-KenshiLib requirement). Full toolchain setup, gotchas, and install steps are in
-[docs/BUILD_SETUP.md](docs/BUILD_SETUP.md). Short version, once prerequisites
-are in place:
+插件必须用 **Visual C++ 2010（v100）x64 工具集** 编译（KenshiLib 的要求）。
+完整的工具链搭建和注意事项见 [docs/BUILD_SETUP.md](docs/BUILD_SETUP.md)（英文）。准备好之后：
 
 ```bash
 cmd //c scripts/build_plugin.cmd
 ```
 
-Dependencies are fetched, not committed:
+依赖需另行获取：
 
-- KenshiLib + precompiled libs: clone
+- KenshiLib 和预编译库：把
   [KenshiLib_Examples_deps](https://github.com/BFrizzleFoShizzle/KenshiLib_Examples_deps)
-  into `third_party/KenshiLib_deps/`
-- ENet: clone [lsalzman/enet](https://github.com/lsalzman/enet) into
-  `third_party/enet/enet/` and apply the patches in `third_party/enet/patches/`
-  (see `third_party/enet/README.md`)
+  克隆到 `third_party/KenshiLib_deps/`
+- ENet：把 [lsalzman/enet](https://github.com/lsalzman/enet) 克隆到 `third_party/enet/enet/`，
+  再打上 `third_party/enet/patches/` 里的补丁（见 `third_party/enet/README.md`）
 
-## Development and testing
+## 致谢
 
-`scripts/` contains an automated two-client test harness: `dev_cycle.ps1`
-rebuilds, deploys to two local installs, launches host + join, runs a named
-scenario, and produces a numeric PASS/FAIL verdict from the two logs.
-`regress.ps1` runs the scenario regression suite. See
-[docs/BUILD_SETUP.md](docs/BUILD_SETUP.md) Parts D-E for details.
-
-## Credits
-
-- [BFrizzleFoShizzle](https://github.com/BFrizzleFoShizzle) - RE_Kenshi and
-  KenshiLib, which make plugins like this possible
-- [lsalzman/enet](https://github.com/lsalzman/enet) - UDP networking library
-- [zeroit789](https://github.com/zeroit789) - the "Multiplayer (Wanderer x2)"
-  co-op game start ([#15](https://github.com/nhoral/KenshiCoop/pull/15))
+- [nhoral](https://github.com/nhoral) - KenshiCoop 原作者，本仓库在其基础上修改
+- [BFrizzleFoShizzle](https://github.com/BFrizzleFoShizzle) - RE_Kenshi 和 KenshiLib，有了它们才能做这类插件
+- [lsalzman/enet](https://github.com/lsalzman/enet) - UDP 网络库
+- [zeroit789](https://github.com/zeroit789) - 双流浪者联机开局（[#15](https://github.com/nhoral/KenshiCoop/pull/15)）
 - Lo-Fi Games - Kenshi
 
-## License
+## 许可
 
-[AGPL-3.0](LICENSE). KenshiLib and RE_Kenshi are GPLv3; this plugin links
-KenshiLib under GPLv3 section 13 (GPL/AGPL combination). Not affiliated with
-Lo-Fi Games. Non-commercial fan project.
+[AGPL-3.0](LICENSE)。KenshiLib 和 RE_Kenshi 采用 GPLv3，本插件按 GPLv3 第 13 条（GPL / AGPL 组合）链接 KenshiLib。
+与 Lo-Fi Games 无关联，非商业的爱好者项目。
