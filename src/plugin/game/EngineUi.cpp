@@ -34,6 +34,7 @@ template<typename T> class ReorderableListItem;
 #include "../core/SteamId.h" // parseSteamId64 (paste button) + maskSteamId64 (id rows)
 #include "../core/Config.h"  // coop::tr (UI text localization)
 #include "../core/FpsLimit.h" // 帧数上限切换按钮
+#include "../core/Update.h"   // 自动更新状态行 + 检查/粘贴/清除代理三个按钮
 #include "../../netproto/Wire.h" // MAX_PLAYERS（小队槽位切换上限）
 
 namespace coop {
@@ -277,6 +278,18 @@ DataPanelLine_Button*   g_fpsBtn       = 0; // 帧数上限切换
 DataPanelLine_Button*   g_playerBoxBtn = 0; // 玩家框显示/隐藏（备用开关）
 bool                    g_playerBoxesHidden = false; // 玩家框隐藏设置，由玩家框驱动负责读写设置文件
 bool                    g_lastPlayerBoxesHidden = false;
+// 自动更新（交接文档第五节）：状态行 + 代理行 + 三个按钮。状态由 core/Update 的后台
+// 线程维护，面板每帧只读快照；g_updateLastUi 是重建闸门（状态文字变化就重建面板）。
+DataPanelLine*          g_updateLine      = 0;
+DataPanelLine*          g_updateProxyLine = 0;
+DataPanelLine_Button*   g_checkUpdateBtn  = 0;
+DataPanelLine_Button*   g_pasteProxyBtn   = 0;
+DataPanelLine_Button*   g_clearProxyBtn   = 0;
+std::string             g_updateStatusText;      // 状态行文字（重建时用）
+std::string             g_updateProxyText;       // 代理行文字（重建时用）
+std::string             g_updateLastUi;          // 上次显示的状态+代理文字（重建闸门）
+int                     g_updateNoticeCode = 0;  // 粘贴/清除代理失败的原因（0 = 无）
+DWORD                   g_updateNoticeUntil = 0; // 提示显示到什么时候（5 秒）
 DataPanelLine_Button*   g_authReqBtn   = 0; // 申请控制好友的小队（第 3 批）
 DataPanelLine_Button*   g_authYesBtn   = 0; // 同意对方申请
 DataPanelLine_Button*   g_authNoBtn    = 0; // 拒绝对方申请
@@ -454,6 +467,54 @@ void onPlayerBoxBtn(DataPanelLine*) {
     coop::logLine(g_playerBoxesHidden ? "[playerbox] hidden from F2 panel" : "[playerbox] shown from F2 panel");
 }
 
+// 自动更新按钮（交接文档第五节）。状态与后台线程都在 core/Update，“检查更新”在
+// 正在检查/下载或已更新待重启时点了没有效果。
+void onCheckUpdateBtn(DataPanelLine*) {
+    coop::update::Status st;
+    coop::update::getStatus(st);
+    if (st.stage == coop::update::STAGE_CHECKING ||
+        st.stage == coop::update::STAGE_DOWNLOADING ||
+        st.stage == coop::update::STAGE_UPDATED) {
+        coop::logLine("[coop-ui] update check ignored (busy or restart pending)");
+        return;
+    }
+    coop::logLine("[coop-ui] update check pressed");
+    coop::update::checkNow();
+    g_panel.needsRebuild = true;
+}
+// “粘贴代理地址”：面板不能打字（MyGUI 输入框在游戏里拿不到键盘焦点），所以照
+// “粘贴好友 Steam ID”的做法读剪贴板。校验通过就写回 coop_config.json 并立即生效；
+// 不通过就在状态行显示原因（5 秒），配置不变。
+void onPasteProxyBtn(DataPanelLine*) {
+    std::string clip;
+    int result = clipboardGetText(clip) ? coop::update::applyProxyText(clip) : 1;
+    if (result == 0) {
+        g_updateNoticeCode = 0;
+        coop::logLine("[coop-ui] update proxy pasted ok=1");
+    } else {
+        g_updateNoticeCode = result;
+        g_updateNoticeUntil = GetTickCount() + 5000;
+        char b[64];
+        _snprintf(b, sizeof(b) - 1, "[coop-ui] update proxy pasted ok=0 code=%d", result);
+        b[sizeof(b) - 1] = '\0';
+        coop::logLine(b);
+    }
+    g_panel.needsRebuild = true;
+}
+// “清除代理”：写回空值，恢复用系统代理。
+void onClearProxyBtn(DataPanelLine*) {
+    int result = coop::update::clearProxy();
+    if (result == 0) {
+        g_updateNoticeCode = 0;
+        coop::logLine("[coop-ui] update proxy cleared");
+    } else {
+        g_updateNoticeCode = result;
+        g_updateNoticeUntil = GetTickCount() + 5000;
+        coop::logLine("[coop-ui] update proxy clear FAILED");
+    }
+    g_panel.needsRebuild = true;
+}
+
 // 小队控制授权按钮（第 3 批）：把动作码交回插件，由插件调用 Replicator。
 void onAuthReqBtn(DataPanelLine*) {
     if (g_authFn) g_authFn(0);
@@ -489,6 +550,11 @@ struct PanelStrings {
     const std::string *selfKey, *selfVal, *copyKey, *copyCap;
     const std::string *fpsKey, *fpsCap;
     const std::string *playerBoxKey, *playerBoxCap;
+    // 自动更新：状态行 + 下载代理行 + 三个按钮（文案全部走语言文件）
+    const std::string *updateKey, *updateVal, *updateProxyKey, *updateProxyVal;
+    const std::string *checkUpdateKey, *checkUpdateCap;
+    const std::string *pasteProxyKey, *pasteProxyCap;
+    const std::string *clearProxyKey, *clearProxyCap;
     const std::string *authKey, *authVal, *authReqCap;
     const std::string *authYesCap, *authNoCap, *authRevokeCap;
     const std::string *authReqKey, *authYesKey, *authNoKey, *authRevokeKey;
@@ -542,6 +608,13 @@ void panelBuildSeh(DatapanelGUI* p, const PanelStrings* s) {
         p->addSpace(0, 0.35f);
         g_fpsBtn = p->setLineButton(*s->fpsKey, *s->fpsCap, 0);
         g_playerBoxBtn = p->setLineButton(*s->playerBoxKey, *s->playerBoxCap, 0);
+        p->addSpace(0, 0.35f);
+        // 自动更新（交接文档第五节）：状态行 + 下载代理行 + 检查/粘贴/清除三个按钮
+        g_updateLine = p->setLine(*s->updateKey, *s->updateVal, *s->empty, 0, false, true);
+        g_updateProxyLine = p->setLine(*s->updateProxyKey, *s->updateProxyVal, *s->empty, 0, false, true);
+        g_checkUpdateBtn  = p->setLineButton(*s->checkUpdateKey, *s->checkUpdateCap, 0);
+        g_pasteProxyBtn   = p->setLineButton(*s->pasteProxyKey, *s->pasteProxyCap, 0);
+        g_clearProxyBtn   = p->setLineButton(*s->clearProxyKey, *s->clearProxyCap, 0);
         p->addSpace(0, 0.35f);
         // 小队控制授权（第 3 批）：状态行 + 申请按钮（+ 条件出现的同意/拒绝/收回）
         g_authLine   = p->setLine(*s->authKey, *s->authVal, *s->empty, 0, false, true);
@@ -739,6 +812,8 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
             g_pasteIdBtn = 0; g_scanBtn = 0;
             g_debugLine = 0; g_discLine = 0; g_peerLine = 0; g_selfLine = 0;
             g_fpsBtn = 0; g_playerBoxBtn = 0;
+            g_updateLine = 0; g_updateProxyLine = 0;
+            g_checkUpdateBtn = 0; g_pasteProxyBtn = 0; g_clearProxyBtn = 0;
             g_authReqBtn = 0; g_authYesBtn = 0; g_authNoBtn = 0;
             g_authRevokeBtn = 0; g_authLine = 0;
             g_panel.open = false;
@@ -922,6 +997,68 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
     if (discDetail != g_panel.lastDisc) g_panel.needsRebuild = true;
     if (g_playerBoxesHidden != g_lastPlayerBoxesHidden) { g_lastPlayerBoxesHidden = g_playerBoxesHidden; g_panel.needsRebuild = true; }
 
+    // 自动更新（交接文档第五节）：把 core/Update 的后台线程状态拼成两行面板文字；
+    // 文字（含 5 秒内的粘贴/清除代理失败提示）一变就重建面板。
+    {
+        coop::update::Status us;
+        coop::update::getStatus(us);
+        const bool notice = g_updateNoticeCode != 0 && GetTickCount() < g_updateNoticeUntil;
+        std::string status;
+        if (notice) {
+            status = coop::tr(g_updateNoticeCode == 1 ? "Clipboard is empty" :
+                              g_updateNoticeCode == 2 ? "Only HTTP proxies are supported (mixed ports work too)" :
+                              g_updateNoticeCode == 4 ? "Could not write coop_config.json" :
+                                                        "Not a proxy address - use host:port");
+        } else if (us.stage == coop::update::STAGE_CHECKING) {
+            status = coop::tr("Checking for updates...");
+        } else if (us.stage == coop::update::STAGE_UP_TO_DATE) {
+            char b[96];
+            _snprintf(b, sizeof(b) - 1, coop::tr("Up to date (%s)"), us.latestBuild);
+            b[sizeof(b) - 1] = '\0';
+            status = b;
+        } else if (us.stage == coop::update::STAGE_DOWNLOADING) {
+            char b[96];
+            _snprintf(b, sizeof(b) - 1, coop::tr("Downloading %u/%u"),
+                      (unsigned)us.fileIndex, (unsigned)us.fileCount);
+            b[sizeof(b) - 1] = '\0';
+            status = b;
+        } else if (us.stage == coop::update::STAGE_UPDATED) {
+            char b[192];
+            _snprintf(b, sizeof(b) - 1, coop::tr("Updated to %s (%s) - restart the game to apply"),
+                      us.latestBuild, us.latestCommit);
+            b[sizeof(b) - 1] = '\0';
+            status = b;
+            // 远端协议号与本机不同：多提示一句所有玩家都要更新（交接文档 4.3.7）
+            if (us.protocolChanged)
+                status += coop::tr(" - the co-op protocol changed, all players must update");
+        } else if (us.stage == coop::update::STAGE_DEV_BUILD) {
+            status = coop::tr("Development build - auto-update disabled");
+        } else if (us.stage == coop::update::STAGE_FAILED) {
+            // 面板按失败环节给中文说法（交接文档 4.3.1 的“校验失败”等），后面带错误码
+            std::string failedText;
+            if (us.failedStage == 2) failedText = coop::tr("Checksum failed");
+            else if (us.failedStage == 1) failedText = coop::tr("Download failed");
+            else if (us.failedStage == 3) failedText = coop::tr("Replace failed");
+            else failedText = coop::tr("Check failed");
+            char b[192];
+            _snprintf(b, sizeof(b) - 1, coop::tr("Update failed: %s (%s)"),
+                      failedText.c_str(), us.reason);
+            b[sizeof(b) - 1] = '\0';
+            status = b;
+        } else {
+            status = coop::tr("Not checked");
+        }
+        std::string proxy = coop::update::proxyText();
+        std::string proxyUi;
+        if (proxy.empty()) proxyUi = coop::tr("system proxy");
+        else proxyUi = proxy;
+        // 闸门里额外带上“提示是否还在显示”，5 秒到期时也会重建一次。
+        const std::string uiKey = status + "\n" + proxyUi + (notice ? "\nnotice" : "\n-");
+        if (uiKey != g_updateLastUi) { g_updateLastUi = uiKey; g_panel.needsRebuild = true; }
+        g_updateStatusText = status;
+        g_updateProxyText  = proxyUi;
+    }
+
     // Create the window once (outside SEH - see the header note on C2712).
     // Layer MUST be "Info": spike 48 proved createFloatingLabel renders non-null
     // there. "Windows" is not a visible MyGUI layer here - the panel is minted
@@ -1038,6 +1175,12 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         std::string playerBoxCap = coop::tr(!st->running ? "Player boxes: available when online"
                                             : g_playerBoxesHidden ? "Player boxes: hidden    (click to show)"
                                                                   : "Player boxes: shown    (click to hide)");
+        // 自动更新（交接文档第五节）：状态行 + 代理行 + 三个按钮
+        std::string updateKey       = coop::tr("Update");
+        std::string updateProxyKey  = coop::tr("Download proxy");
+        std::string checkUpdateKey  = "updatecheck",  checkUpdateCap  = coop::tr("Check for updates");
+        std::string pasteProxyKey   = "updateproxy",  pasteProxyCap   = coop::tr("Paste proxy address");
+        std::string clearProxyKey   = "updateclearproxy", clearProxyCap = coop::tr("Clear proxy");
         // 小队控制授权（第 3 批）：状态行文字 + 按钮文案 + 条件显示标志
         std::string authKey = coop::tr("Squad control");
         std::string authVal;
@@ -1109,6 +1252,11 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         ps.copyKey = &copyKey; ps.copyCap = &copyCap;
         ps.fpsKey = &fpsKey; ps.fpsCap = &fpsCap;
         ps.playerBoxKey = &playerBoxKey; ps.playerBoxCap = &playerBoxCap;
+        ps.updateKey = &updateKey; ps.updateVal = &g_updateStatusText;
+        ps.updateProxyKey = &updateProxyKey; ps.updateProxyVal = &g_updateProxyText;
+        ps.checkUpdateKey = &checkUpdateKey; ps.checkUpdateCap = &checkUpdateCap;
+        ps.pasteProxyKey = &pasteProxyKey; ps.pasteProxyCap = &pasteProxyCap;
+        ps.clearProxyKey = &clearProxyKey; ps.clearProxyCap = &clearProxyCap;
         ps.authKey = &authKey; ps.authVal = &authVal; ps.authReqCap = &authReqCap;
         ps.authYesCap = &authYesCap; ps.authNoCap = &authNoCap;
         ps.authRevokeCap = &authRevokeCap;
@@ -1138,6 +1286,9 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         if (g_pasteIdBtn) g_pasteIdBtn->callback = MyGUI::newDelegate(&onPasteIdBtn);
         if (g_fpsBtn)     g_fpsBtn->callback     = MyGUI::newDelegate(&onFpsBtn);
         if (g_playerBoxBtn) g_playerBoxBtn->callback = MyGUI::newDelegate(&onPlayerBoxBtn);
+        if (g_checkUpdateBtn) g_checkUpdateBtn->callback = MyGUI::newDelegate(&onCheckUpdateBtn);
+        if (g_pasteProxyBtn)  g_pasteProxyBtn->callback  = MyGUI::newDelegate(&onPasteProxyBtn);
+        if (g_clearProxyBtn)  g_clearProxyBtn->callback  = MyGUI::newDelegate(&onClearProxyBtn);
         if (g_characterTemplateBtn) g_characterTemplateBtn->callback = MyGUI::newDelegate(&onCharacterTemplateBtn);
         if (g_characterCreateBtn) g_characterCreateBtn->callback = MyGUI::newDelegate(&onCharacterCreateBtn);
         if (g_scanBtn)    g_scanBtn->callback    = MyGUI::newDelegate(&onScanBtn);
@@ -1152,6 +1303,8 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         dbgColourSeh(g_peerLine, false);
         dbgColourSeh(g_selfLine, false);
         dbgColourSeh(g_authLine, false);
+        dbgColourSeh(g_updateLine, false);
+        dbgColourSeh(g_updateProxyLine, false);
 
         g_panel.built = true;
         g_panel.needsRebuild = false;
