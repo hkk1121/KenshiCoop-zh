@@ -46,6 +46,7 @@ struct Status {
     int  failedStage;      // 失败发生在哪一步：0 检查 / 1 下载 / 2 校验 / 3 替换（stage 不为 FAILED 时无意义）
     int  fileIndex;        // 正在下载第几个文件（1 起；不在下载阶段时是 0 或上一次的值）
     int  fileCount;        // 本次要下载的文件总数
+    unsigned fileBytes;    // 当前文件已下载的字节数（每 32 KB 更新一次）
     int  protocolChanged;  // 1 = 远端 protocol 与本机协议号不同（面板提示所有玩家都要更新）
 };
 
@@ -56,8 +57,8 @@ struct Status {
 //     线程只等 F2 的手动检查。
 void startup(const std::string& proxy, bool autoCheck);
 
-// 退出（主线程，SteamAPI_Shutdown 钩子调用）：请求后台线程停止，等它收尾（上限 16 秒，
-// 盖住一次卡住的 WinHTTP 阻塞调用）。等到就关句柄；等不到（线程正卡在网络调用里）
+// 退出（主线程，SteamAPI_Shutdown 钩子调用）：请求后台线程停止，等它收尾（上限 2 秒，
+// 够正在进行的文件替换做完）。等到就关句柄；等不到（线程正卡在网络调用里）
 // 就保留句柄让进程退出时一起结束，避免关掉的句柄被复用后线程再引用。
 // 没启动过时是空操作。
 void shutdown();

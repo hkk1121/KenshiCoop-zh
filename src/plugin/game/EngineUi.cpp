@@ -1013,13 +1013,13 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
             status = coop::tr("Checking for updates...");
         } else if (us.stage == coop::update::STAGE_UP_TO_DATE) {
             char b[96];
-            _snprintf(b, sizeof(b) - 1, coop::tr("Up to date (%s)"), us.latestBuild);
+            _snprintf(b, sizeof(b) - 1, coop::tr("Up to date (%s)"), us.localBuild);
             b[sizeof(b) - 1] = '\0';
             status = b;
         } else if (us.stage == coop::update::STAGE_DOWNLOADING) {
             char b[96];
-            _snprintf(b, sizeof(b) - 1, coop::tr("Downloading %u/%u"),
-                      (unsigned)us.fileIndex, (unsigned)us.fileCount);
+            _snprintf(b, sizeof(b) - 1, coop::tr("Downloading %u/%u (%u KB)"),
+                      (unsigned)us.fileIndex, (unsigned)us.fileCount, us.fileBytes / 1024);
             b[sizeof(b) - 1] = '\0';
             status = b;
         } else if (us.stage == coop::update::STAGE_UPDATED) {
@@ -1047,7 +1047,7 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
             else if (us.failedStage == 3) failedText = coop::tr("Replace failed");
             else failedText = coop::tr("Check failed");
             char b[192];
-            _snprintf(b, sizeof(b) - 1, coop::tr("Update failed: %s (%s)"),
+            _snprintf(b, sizeof(b) - 1, coop::tr("Failed: %s (%s)"),
                       failedText.c_str(), us.reason);
             b[sizeof(b) - 1] = '\0';
             status = b;

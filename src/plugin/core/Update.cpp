@@ -44,8 +44,9 @@ const char* const kDownloadBase =
 const DWORD kAutoCheckDelayMs = 10000;
 // 分片等待粒度：shutdown 时线程能很快看到停止标志
 const DWORD kWaitSliceMs = 250;
-// 退出时等后台线程收尾的上限（毫秒）：必须大于 openSession 里的一次阻塞超时（15 秒）
-const DWORD kShutdownWaitMs = 16000;
+// 退出时等后台线程收尾的上限（毫秒）：只为让正在进行的文件替换（毫秒级）做完；
+// 卡在网络调用里的线程不等，它只碰网络，进程退出时一起结束
+const DWORD kShutdownWaitMs = 2000;
 
 CRITICAL_SECTION g_cs;
 bool             g_csInit  = false;
@@ -96,7 +97,7 @@ std::string mapValue(const std::map<std::string, std::string>& m, const std::str
     return it == m.end() ? std::string() : it->second;
 }
 
-// 44.2 字段里的文件名列表（"a|b|c"），去掉空白后逐个取出
+// files 字段里的文件名列表（"a|b|c"），去掉空白后逐个取出
 void splitFiles(const std::string& s, std::vector<std::string>& out) {
     out.clear();
     size_t start = 0;
@@ -204,6 +205,7 @@ void setDownloading(int index, int count) {
     g_status.stage = STAGE_DOWNLOADING;
     g_status.fileIndex = index;
     g_status.fileCount = count;
+    g_status.fileBytes = 0;
     unlockState();
 }
 
@@ -341,8 +343,7 @@ HINTERNET openSession(std::string& proxyLabel, HttpResult& h) {
         h.err = GetLastError();
         return 0;
     }
-    // 连接、收发各 15 秒（文档允许 15～30 秒；取 15 秒是为了让 shutdown 的等待上限
-    // 能覆盖一次卡住的阻塞调用，见 shutdown()）。
+    // 连接、收发各 15 秒（文档允许 15～30 秒）。
     WinHttpSetTimeouts(session, 15000, 15000, 15000, 15000);
     return session;
 }
@@ -413,6 +414,7 @@ bool httpGet(HINTERNET session, const std::string& url, std::string* memory,
                     if (fileOk) {
                         std::vector<char> buf(16384);
                         unsigned long long total = 0;
+                        unsigned long long reported = 0;
                         bool readOk = true;
                         for (;;) {
                             if (stopRequested()) {
@@ -447,6 +449,13 @@ bool httpGet(HINTERNET session, const std::string& url, std::string* memory,
                                 }
                             }
                             total += got;
+                            // 面板的下载进度：每多 32 KB 更新一次，慢速直连时也能看出在动
+                            if (savePath && total - reported >= 32768) {
+                                reported = total;
+                                lockState();
+                                g_status.fileBytes = (unsigned)total;
+                                unlockState();
+                            }
                         }
                         if (bytesOut) *bytesOut = total;
                         ok = readOk;
@@ -633,6 +642,9 @@ void runCheck() {
     if (!hasLocal) verdict = "dev-skip";
     else if (man.buildTime > localBuild) verdict = "update";
     setLatest(man.buildTime, man.commit);
+    lockState();
+    copyStr(g_status.localBuild, sizeof(g_status.localBuild), localBuild);
+    unlockState();
     {
         char line[224];
         _snprintf(line, sizeof(line) - 1,
@@ -813,8 +825,8 @@ void shutdown() {
     InterlockedExchange(&g_stop, 1);
     if (g_event) SetEvent(g_event);
     if (g_thread) {
-        // 等待上限要盖住一次卡住的 WinHTTP 阻塞调用（连接/发送/接收各 15 秒）；
-        // 线程在阻塞调用里无法及时看 g_stop，只能等它超时返回。
+        // 只等正在进行的文件替换做完；线程卡在 WinHTTP 阻塞调用里时看不到 g_stop，不等它，
+        // 免得退出游戏时卡住。
         DWORD wr = WaitForSingleObject(g_thread, kShutdownWaitMs);
         if (wr == WAIT_OBJECT_0) {
             CloseHandle(g_thread);
