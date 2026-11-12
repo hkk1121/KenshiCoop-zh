@@ -629,8 +629,9 @@ const float CrawlMoveScenario::LEG = 20.0f;
 // 好友1 第 2 个整点把本机看到多了记号的别人背包塞满，让源端放不进、走“关窗后再从源头去掉”。
 // death_race（阵亡编队编号不一致验证）：三方在第 0 个整点同时各打死自己一个角色，不按名次错开、
 // 优先挑身上有物品的，编号因此在各自机器上错开；第 2 个整点各方用 removeItemsFromContainer 从
-// 自己那具尸体上拿走 1 件（先散放、后穿戴），模拟主人改尸体背包、别人要跟上；第 5 个整点沿用
-// DEATHSEEN / LOOTINV 输出，另打一行 DEATHRACE final。需要 KENSHICOOP_INV_SYNC=1。
+// 自己那具尸体上拿走 1 件（先散放、后穿戴，尸体上什么都没有就放进 1 件测试物品），模拟主人改尸体背包、
+// 别人要跟上；第 5 个整点沿用 DEATHSEEN / LOOTINV 输出，另打一行 DEATHRACE final。布防时同样把自己的
+// 活人喂饱。需要 KENSHICOOP_INV_SYNC=1。
 // ===========================================================================
 class OwnerDeathScenario : public TimedScenario {
 public:
@@ -657,8 +658,9 @@ public:
         nTabs_ = engine::listPlayerTabs(ctx.gw, startTabs_, MAX_TABS);
         // 抢尸体：把自己的活人都喂饱，免得途中饿死进阵亡编队、换了手把（各方阵亡编队里的编号可能不同，
         // 背包快照对不上），也免得被当成尸体
+        // 死亡赛同样喂饱：免得下手前就饿死，轮到下手时名下没有活人
         unsigned int fed = 0;
-        for (unsigned int i = 0; race_ && i < n; ++i) {
+        for (unsigned int i = 0; (race_ || deathRace_) && i < n; ++i) {
             if ((sq[i].bodyState & BODY_DEAD) || !ctx.ownTab ||
                 !ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial)) continue;
             unsigned int h[5];
@@ -666,7 +668,7 @@ public:
             if (engine::writeHungerByHand(h, FULL_HUNGER, -1.0f)) ++fed;
         }
         char b[160];
-        if (race_) {
+        if (race_ || deathRace_) {
             _snprintf(b, sizeof(b) - 1, "SCENARIO LOOTFEED who=%s fed=%u", ctx.isHost ? "host" : "join", fed);
             b[sizeof(b) - 1] = '\0'; coop::logLine(b);
         }
@@ -907,7 +909,7 @@ public:
                     engine::resolve(sq[i]) == corpse_) at = (int)i;
             unsigned int ser = 0;
             const char* sid = "";
-            int removed = 0;
+            int removed = 0, added = 0;
             InvItemEntry items[MAX_ITEMS];
             if (at >= 0) {
                 unsigned int h[5];
@@ -923,12 +925,15 @@ public:
                     sid = items[pick].stringID;
                     removed = engine::removeItemsFromContainer(ctx.gw, h, items[pick].stringID,
                                                                items[pick].itemType, 1);
+                } else {
+                    // 尸体上什么都没有（比如裸身开局的人）：改为放进 1 件测试物品，同样是主人改了尸体背包
+                    added = engine::addTestItemsToContainer(ctx.gw, h, 1, 0, 0);
                 }
             }
-            edited_ = removed;
+            edited_ = removed + added;
             char b[160];
-            _snprintf(b, sizeof(b) - 1, "SCENARIO DEATHRACE edit who=%s ser=%u sid='%s' removed=%d",
-                      ctx.isHost ? "host" : "join", ser, sid, removed);
+            _snprintf(b, sizeof(b) - 1, "SCENARIO DEATHRACE edit who=%s ser=%u sid='%s' removed=%d added=%d",
+                      ctx.isHost ? "host" : "join", ser, sid, removed, added);
             b[sizeof(b) - 1] = '\0'; coop::logLine(b);
         }
         // 搜刮：主机在第 3 个整点隔一项拿一项，好友2 在第 6 个整点把剩下的全拿走，都放到自己一个活人身上；
