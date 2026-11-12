@@ -1061,8 +1061,7 @@ void Replicator::applyWeaponDrops(GameWorld* gw, Inbound& in) {
         Key ok; ok.t = p.oType; ok.c = p.oContainer; ok.cs = p.oContainerSerial;
         ok.i = p.oIndex; ok.s = p.oSerial;
         if (ownHands_.count(ok) != 0) continue;     // we own this char -> we dropped it locally
-        unsigned int ownerHand[5] = { p.oType, p.oContainer, p.oContainerSerial,
-                                      p.oIndex, p.oSerial };
+        unsigned int ownerHand[5]; handForContainerKey(ok, ownerHand);
         void* dropped = 0;
         int moved = engine::relocateWeaponToGround(gw, ownerHand, p.stringID, p.itemType,
                                                    p.x, p.y, p.z, &dropped);

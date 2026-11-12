@@ -234,6 +234,8 @@ void Replicator::applyMedical(GameWorld* gw, Inbound& in, NetLink& net, u32 owne
         if (ownHands_.find(k) != ownHands_.end()) continue; // never write our own truth
         unsigned int hand[5] = { k.t, k.c, k.cs, k.i, k.s };
         Character* c = engine::resolveCharByHand(hand[3], hand[4], hand[0], hand[1], hand[2]);
+        // 主人换队后序列号会变，本机身体仍是旧手把：按线上钥匙绑定的本机身体找
+        if (!c && proxyByKey_.count(k)) c = proxyByKey_[k];
         if (!c) continue;
         engine::MedicalRead w;
         memset(&w, 0, sizeof(w));
@@ -502,6 +504,7 @@ void Replicator::applyStats(GameWorld* gw, Inbound& in) {
         k.i = p.sIndex; k.s = p.sSerial;
         if (ownHands_.find(k) != ownHands_.end()) continue; // never write our own truth
         Character* c = engine::resolveCharByHand(k.i, k.s, k.t, k.c, k.cs);
+        if (!c && proxyByKey_.count(k)) c = proxyByKey_[k];
         if (!c) continue;
         engine::StatsRead w;
         memset(&w, 0, sizeof(w));
@@ -2087,6 +2090,16 @@ void Replicator::publishSquadMoves(GameWorld* gw, NetLink& net, u32 ownerId) {
         Key nk; nk.t = edges[i].after[0]; nk.c = edges[i].after[1];
         nk.cs = edges[i].after[2]; nk.i = edges[i].after[3]; nk.s = edges[i].after[4];
         bool exited = (nk.t | nk.c | nk.cs | nk.i | nk.s) == 0;
+        // 别人的尸体被本机引擎清出阵亡编队：不是本端的人离队，不广播（归属判断同 publishOwned），
+        // 否则各端收到后解绑这具尸体再重新铸一具
+        if (exited && haveDead && ok.c == deadTab[0] && ok.cs == deadTab[1] &&
+            !pinOwned_.count(ok) && (!isHostRole() || pinPeer_.count(ok))) {
+            pinPeer_.erase(ok);
+            char xb[128]; _snprintf(xb, sizeof(xb) - 1,
+                "[squad] EVT skip peer corpse exit old=%u,%u,%u,%u,%u", ok.t, ok.c, ok.cs, ok.i, ok.s);
+            xb[sizeof(xb) - 1] = '\0'; coop::logLine(xb);
+            continue;
+        }
         // The old hand is dead either way - drop any pin it carried (a moved
         // recruit / a re-moved member must not leave a stale claim behind).
         pinOwned_.erase(ok);
