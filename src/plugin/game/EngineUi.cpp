@@ -277,6 +277,7 @@ DataPanelLine_Button*   g_pasteIdBtn   = 0; // "Paste friend's Steam ID" from cl
 DataPanelLine_Button*   g_fpsBtn       = 0; // 帧数上限切换
 DataPanelLine_Button*   g_playerBoxBtn = 0; // 玩家框显示/隐藏（备用开关）
 bool                    g_playerBoxesHidden = false; // 玩家框隐藏设置，由玩家框驱动负责读写设置文件
+bool                    g_playerBoxesOff = false;    // F2 面板里完全隐藏（连标题条一起），同一个设置文件
 bool                    g_lastPlayerBoxesHidden = false;
 // 自动更新（交接文档第五节）：状态行 + 代理行 + 三个按钮。状态由 core/Update 的后台
 // 线程维护，面板每帧只读快照；g_updateLastUi 是重建闸门（状态文字变化就重建面板）。
@@ -462,9 +463,10 @@ void onFpsBtn(DataPanelLine*) {
 }
 void onPlayerBoxBtn(DataPanelLine*) {
     if (!g_panel.lastConnected) return;
-    g_playerBoxesHidden = !g_playerBoxesHidden;
+    g_playerBoxesOff = !g_playerBoxesOff;
+    if (!g_playerBoxesOff) g_playerBoxesHidden = false;
     g_panel.needsRebuild = true;
-    coop::logLine(g_playerBoxesHidden ? "[playerbox] hidden from F2 panel" : "[playerbox] shown from F2 panel");
+    coop::logLine(g_playerBoxesOff ? "[playerbox] hidden from F2 panel" : "[playerbox] shown from F2 panel");
 }
 
 // 自动更新按钮（交接文档第五节）。状态与后台线程都在 core/Update，“检查更新”在
@@ -1179,8 +1181,8 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         std::string fpsCap   = fb;
         std::string playerBoxKey = "playerboxes";
         std::string playerBoxCap = coop::tr(!st->running ? "Player boxes: available when online"
-                                            : g_playerBoxesHidden ? "Player boxes: hidden    (click to show)"
-                                                                  : "Player boxes: shown    (click to hide)");
+                                            : g_playerBoxesOff ? "Player boxes: completely hidden    (click to show)"
+                                                               : "Player boxes: shown    (click to hide completely)");
         // 自动更新（交接文档第五节）：状态行 + 代理行 + 三个按钮
         std::string updateKey       = coop::tr("Update");
         std::string updateProxyKey  = coop::tr("Download proxy");
@@ -1685,10 +1687,15 @@ void readPlayerBoxRoster(GameWorld* gw, std::vector<CoopPlayerSquad>& out) {
 
 void coopPlayerBoxesTick(const std::vector<CoopPlayerBox>& boxes, bool active,
                          unsigned long long world) {
-    static bool loaded = false, savedHidden = false, loggedFallback = false;
-    if (!loaded) { g_playerBoxesHidden = savedHidden = loadPlayerBoxesHidden(); loaded = true; }
-    if (savedHidden != g_playerBoxesHidden) {
-        savePlayerBoxesHidden(g_playerBoxesHidden); savedHidden = g_playerBoxesHidden;
+    static bool loaded = false, loggedFallback = false;
+    static int savedHidden = 0;
+    if (!loaded) {
+        savedHidden = loadPlayerBoxesHidden();
+        g_playerBoxesOff = savedHidden == 2; g_playerBoxesHidden = savedHidden == 1; loaded = true;
+    }
+    if (savedHidden != (g_playerBoxesOff ? 2 : g_playerBoxesHidden ? 1 : 0)) {
+        savedHidden = g_playerBoxesOff ? 2 : g_playerBoxesHidden ? 1 : 0;
+        savePlayerBoxesHidden(savedHidden);
     }
     ForgottenGUI* g = ::gui;
     for (int i = 0; i < 4; ++i) if (g_playerBoxes[i] && !playerBoxAliveSeh(g, g_playerBoxes[i])) {
@@ -1709,7 +1716,7 @@ void coopPlayerBoxesTick(const std::vector<CoopPlayerBox>& boxes, bool active,
     int screenW = 0, screenH = 0;
     MyGUI::IntCoord bar;
     bool fallback = false;
-    bool show = !g_panel.open && playerBoxAnchorSeh(g, &screenW, &screenH, &bar, &fallback);
+    bool show = !g_panel.open && !g_playerBoxesOff && playerBoxAnchorSeh(g, &screenW, &screenH, &bar, &fallback);
     if (!show || boxes.empty()) {
         for (int i = 0; i < 4; ++i) playerBoxPlaceSeh(g_playerBoxes[i], 0, 0, 0, 0, false);
         playerBoxPlaceSeh(g_playerBoxToggle, 0, 0, 0, 0, false);

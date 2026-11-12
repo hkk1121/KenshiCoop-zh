@@ -158,8 +158,8 @@ Steam room join timed out - try pasting the host ID=Steam 房间加入超时，�
 # 第三阶段玩家框
 Hide player boxes=隐藏玩家框
 Show player boxes=显示玩家框
-Player boxes: shown    (click to hide)=玩家框：显示中    （点击隐藏）
-Player boxes: hidden    (click to show)=玩家框：已隐藏    （点击显示）
+Player boxes: shown    (click to hide completely)=玩家框：显示中    （点击完全隐藏）
+Player boxes: completely hidden    (click to show)=玩家框：已完全隐藏    （点击显示）
 Player boxes: available when online=玩家框：需要联机才能使用
 Players %u/%u - next page=玩家 %u/%u 页：下一页
 Co-op players=联机玩家

@@ -682,8 +682,9 @@ void saveFpsLimit(int fps);
 int loadFpsLimit();
 
 
-void savePlayerBoxesHidden(bool hidden);
-bool loadPlayerBoxesHidden();
+// 0 显示、1 收起（只留标题条）、2 完全隐藏（F2 面板里关掉）
+void savePlayerBoxesHidden(int hidden);
+int loadPlayerBoxesHidden();
 
 // DLL 所在目录（末尾带反斜杠，例如 "...\\mods\\KenshiCoop\\"）；取不到时返回空串。
 // 自动更新的 update.json / update_tmp / *.old 都放在这个目录（与 coop_config.json 同目录）。

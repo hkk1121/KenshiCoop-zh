@@ -718,20 +718,20 @@ int loadFpsLimit() {
 }
 
 
-void savePlayerBoxesHidden(bool hidden) {
+void savePlayerBoxesHidden(int hidden) {
     std::string p = configFilePath();
     p = p.substr(0, p.find_last_of("\\/") + 1) + "coop_player_boxes_hidden.txt";
     std::ofstream f(p.c_str(), std::ios::binary | std::ios::trunc);
     if (!f) { coop::logErrLine("[playerbox] hide preference save failed"); return; }
-    f << (hidden ? 1 : 0) << "\n";
+    f << hidden << "\n";
 }
 
-bool loadPlayerBoxesHidden() {
+int loadPlayerBoxesHidden() {
     std::string p = configFilePath();
     p = p.substr(0, p.find_last_of("\\/") + 1) + "coop_player_boxes_hidden.txt";
     std::ifstream f(p.c_str(), std::ios::binary);
     int hidden = 0;
-    return (f >> hidden) && hidden == 1;
+    return (f >> hidden) && (hidden == 1 || hidden == 2) ? hidden : 0;
 }
 
 std::string moduleDirPath() {
