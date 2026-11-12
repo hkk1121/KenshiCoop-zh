@@ -1756,12 +1756,17 @@ void coopPlayerBoxesTick(const std::vector<CoopPlayerBox>& boxes, bool active,
     }
     std::string toggleTitle = coop::tr("Co-op players");
     std::string toggleFingerprint = toggleTitle + page + hide;
+    // 标题条的内容变了就销毁重建：在已摆好尺寸的面板上重填，按钮行排不出来
+    // （2026-11-13 实测：点过一次按钮或 X 后那一行不见；先放大再缩回也只露出一条边）
+    if (g_playerBoxToggle && toggleFingerprint != g_playerBoxToggleTitle) {
+        panelDestroySeh(g, g_playerBoxToggle); g_playerBoxToggle = 0;
+    }
     if (!g_playerBoxToggle) {
         g_playerBoxToggle = g->createDatapanel(0.1f, 0.2f, 0.2f, 0.1f, false, layer, true);
         if (g_playerBoxToggle) g_playerBoxToggle->setCloseCallback(MyGUI::newDelegate(&onPlayerBoxClose));
+        if (g_playerBoxToggle && playerBoxBuildSeh(g_playerBoxToggle, &toggleTitle, 0, true, &hide, &page, 0, 0))
+            g_playerBoxToggleTitle = toggleFingerprint;
     }
-    if (g_playerBoxToggle && toggleFingerprint != g_playerBoxToggleTitle &&
-        playerBoxBuildSeh(g_playerBoxToggle, &toggleTitle, 0, true, &hide, &page, 0, 0)) g_playerBoxToggleTitle = toggleFingerprint;
     playerBoxPlaceSeh(g_playerBoxToggle, left, bottom - stripH - (g_playerBoxesHidden ? 0 : boxH + gap), stripW, stripH, true);
     for (unsigned int i = 0; i < 4; ++i) {
         if (i >= count || g_playerBoxesHidden) { playerBoxPlaceSeh(g_playerBoxes[i], 0, 0, 0, 0, false); continue; }
