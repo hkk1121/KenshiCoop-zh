@@ -630,7 +630,8 @@ const float CrawlMoveScenario::LEG = 20.0f;
 // death_race（阵亡编队编号不一致验证）：三方在第 0 个整点同时各打死自己一个角色，不按名次错开、
 // 优先挑身上有物品的，编号因此在各自机器上错开；第 2 个整点各方用 removeItemsFromContainer 从
 // 自己那具尸体上拿走 1 件（先散放、后穿戴，尸体上什么都没有就放进 1 件测试物品），模拟主人改尸体背包、
-// 别人要跟上；第 5 个整点沿用 DEATHSEEN / LOOTINV 输出，另打一行 DEATHRACE final。布防时同样把自己的
+// 别人要跟上；第 4 个整点名下还有活人的一方从别人的新尸体里拿 1 件到自己活人身上（转移意图一路）；
+// 第 9 个整点沿用 DEATHSEEN / LOOTINV 输出，另打一行 DEATHRACE final。布防时同样把自己的
 // 活人喂饱。需要 KENSHICOOP_INV_SYNC=1。
 // ===========================================================================
 class OwnerDeathScenario : public TimedScenario {
@@ -938,18 +939,34 @@ public:
         }
         // 搜刮：主机在第 3 个整点隔一项拿一项，好友2 在第 6 个整点把剩下的全拿走，都放到自己一个活人身上；
         // 抢尸体时两人都在第 3 个整点全拿（满包模式放到做了记号的那个人身上）
-        if (loot_ && !deathRace_ && !looted_ && ctx.ownRank != 1 &&
-            slot >= firstSlot_ + KILL_GAP_SLOTS * (ctx.isHost || race_ ? 1 : 2)) {
+        // 死亡赛：第 4 个整点，名下还有活人的一方从别人的新尸体里（挑东西最多的那具，它在本机的编号
+        // 多半与主人那边不同）拿 1 件放到自己一个活人身上，走的是转移意图而不是背包快照
+        if (loot_ && !looted_ && (deathRace_ || ctx.ownRank != 1) &&
+            slot >= firstSlot_ + (deathRace_ ? DEATHRACE_LOOT_SLOT :
+                                  KILL_GAP_SLOTS * (ctx.isHost || race_ ? 1 : 2))) {
             looted_ = true;
             EntityState sq[MAX_BODIES];
             unsigned int n = engine::captureSquad(ctx.gw, false, sq, MAX_BODIES);
             int corpse = -1, dst = -1;
+            unsigned int most = 0;
             for (unsigned int i = 0; i < n; ++i) {
-                if (corpse < 0 && corpse_ && engine::resolve(sq[i]) == corpse_) corpse = (int)i;
+                Character* c = engine::resolve(sq[i]);
+                if (!deathRace_ && corpse < 0 && corpse_ && c == corpse_) corpse = (int)i;
+                if (deathRace_ && c && c != corpse_ && (sq[i].bodyState & BODY_DEAD)) {
+                    bool fresh = false;
+                    for (unsigned int s = 0; s < nStart_ && !fresh; ++s) fresh = startAlive_[s] == c;
+                    unsigned int h[5];
+                    handFromEntity(sq[i], h);
+                    InvItemEntry seen[MAX_ITEMS];
+                    unsigned int cnt = fresh ? engine::captureContainerContents(ctx.gw, h, seen, MAX_ITEMS, 0) : 0;
+                    if (cnt > most) { most = cnt; corpse = (int)i; }
+                }
                 if (dst < 0 && !(sq[i].bodyState & BODY_DEAD) && ctx.ownTab &&
                     ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial) &&
-                    (!dst_ || engine::resolve(sq[i]) == dst_)) dst = (int)i;
+                    (!dst_ || c == dst_)) dst = (int)i;
             }
+            // 死亡赛：记下本机有没有活人可放，最后判定时没有活人的一方不要求搜到东西
+            if (deathRace_ && dst >= 0) dst_ = engine::resolve(sq[dst]);
             unsigned int entries = 0;
             if (corpse >= 0 && dst >= 0) {
                 unsigned int ch[5], dh[5], hash = 0;
@@ -958,9 +975,10 @@ public:
                 InvItemEntry items[MAX_ITEMS];
                 entries = engine::captureContainerContents(ctx.gw, ch, items, MAX_ITEMS, &hash);
                 for (unsigned int k = 0; k < entries; ++k) {
-                    if (ctx.isHost && !race_ && k % 2 == 1) continue;
+                    if (ctx.isHost && !race_ && !deathRace_ && k % 2 == 1) continue;
                     int got = engine::moveItemBetweenContainers(ctx.gw, ch, dh, items[k].stringID,
                                                                items[k].itemType,
+                                                               deathRace_ ? 1 :
                                                                items[k].quantity ? items[k].quantity : 1);
                     moved_ += got;
                     char m[200];
@@ -968,6 +986,7 @@ public:
                               ctx.isHost ? "host" : "join", k, items[k].stringID, items[k].itemType,
                               (unsigned int)items[k].quantity, (unsigned int)items[k].equipped, got);
                     m[sizeof(m) - 1] = '\0'; coop::logLine(m);
+                    if (deathRace_ && got > 0) break;
                 }
             }
             char b[240];
@@ -980,7 +999,7 @@ public:
             b[sizeof(b) - 1] = '\0'; coop::logLine(b);
             return false;
         }
-        // 死亡赛：第 5 个整点核对（主机沿用 HOST_EXTRA_SLOTS 晚两个整点再核对，免得先退出把加入方断开）
+        // 死亡赛：第 9 个整点核对（主机沿用 HOST_EXTRA_SLOTS 晚两个整点再核对，免得先退出把加入方断开）
         unsigned long finalSlot = firstSlot_ +
             (deathRace_ ? DEATHRACE_FINAL_SLOT : END_SLOTS + (race_ ? RACE_EXTRA_SLOTS : 0)) +
             (ctx.isHost ? HOST_EXTRA_SLOTS : 0);
@@ -1060,7 +1079,8 @@ public:
             b[sizeof(b) - 1] = '\0'; coop::logLine(b);
         }
         if (deathRace_)
-            passed_ = victimOk && vanished == 0 && misplaced == 0 && newlyDead >= 3 && edited_ > 0;
+            passed_ = victimOk && vanished == 0 && misplaced == 0 && newlyDead >= 3 && edited_ > 0 &&
+                      (!dst_ || moved_ > 0);
         else if (loot_)
             passed_ = (ctx.ownRank == 1 ? victimOk : moved_ > 0) && corpseLeft == 0 &&
                       vanished == 0 && misplaced == 0 && newTabs == 0 && newlyDead >= 1 &&
@@ -1088,8 +1108,9 @@ private:
     static const unsigned long LEAD_MS          = 8000;
     static const unsigned long KILL_GAP_SLOTS   = 3;
     static const unsigned long END_SLOTS        = 12;
-    // 死亡赛在第 2 个整点改尸体背包、第 5 个整点核对
-    static const unsigned long DEATHRACE_FINAL_SLOT = 5;
+    // 死亡赛在第 2 个整点改尸体背包、第 4 个整点搜别人的尸体、第 9 个整点核对
+    static const unsigned long DEATHRACE_LOOT_SLOT  = 4;
+    static const unsigned long DEATHRACE_FINAL_SLOT = 9;
     // 主机多等两个整点再核对，免得先退出把加入方断开
     static const unsigned long HOST_EXTRA_SLOTS = 2;
     // 抢尸体多等四个整点：关窗后的收回、对账和大背包 30 秒一次的补发
