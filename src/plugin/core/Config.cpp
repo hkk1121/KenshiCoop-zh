@@ -36,6 +36,8 @@ std::map<std::string, std::string> parseFlatJson(const std::string& text) {
         size_t nl = text.find('\n', i);
         std::string line = text.substr(i, nl == std::string::npos ? std::string::npos : nl - i);
         size_t c = line.find("//");
+        // 紧跟在冒号后的 "//" 是地址的一部分（如 "http://host:port"），不算注释
+        while (c != std::string::npos && c > 0 && line[c - 1] == ':') c = line.find("//", c + 2);
         if (c != std::string::npos) line = line.substr(0, c);
         s += line;
         s += '\n';
