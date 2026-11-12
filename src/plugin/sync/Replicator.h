@@ -2809,6 +2809,8 @@ public:
     Tab canonicalTab(const Tab& tab, u32 author = OWNER_ID_ALL) const;
     u64 tabOwnerIdentity(const Tab& tab) const;
     void claimLocalTab(const Tab& tab);
+    // 本端在 SQD 窗口删掉了一支空编队：广播 EVT_SQUAD_AUTH 动作 6，主机同时去掉归属表行。
+    void releaseLocalTab(const Tab& tab);
     void placeRecruit(GameWorld* gw, Character* c);
     Tab registerPeerTab(GameWorld* gw, u32 author, const Tab& source, bool foreign);
     void syncOwners(GameWorld* gw, NetLink& net, Inbound& in, bool host);

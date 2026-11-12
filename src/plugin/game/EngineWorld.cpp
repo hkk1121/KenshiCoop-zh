@@ -1824,5 +1824,23 @@ bool readDeadSquadTab(GameWorld* gw, unsigned int out[2]) {
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
+int destroyEmptyPlayerSquad(GameWorld* gw, unsigned int container, unsigned int serial) {
+    __try {
+        if (!gw || !gw->player) return 0;
+        Faction* faction = gw->player->getFaction();
+        if (!faction) return 0;
+        for (unsigned int i = 0; i < faction->activePlatoons.size(); ++i) {
+            Platoon* p = faction->activePlatoons[i];
+            if (!p) continue;
+            const hand& h = p->getHandle();
+            if (h.container != container || h.containerSerial != serial) continue;
+            if (p->getCharacterCount() > 0 || faction->activePlatoons.size() <= 1) return 2;
+            faction->destroyPlatoon(p);
+            return 1;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return 0;
+}
+
 } // namespace engine
 } // namespace coop

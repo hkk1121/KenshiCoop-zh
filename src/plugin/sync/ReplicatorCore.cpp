@@ -980,6 +980,21 @@ void Replicator::sendSquadAuth(NetLink& net, u32 ownerId, u32 targetId,
 // 收到 EVT_SQUAD_AUTH。接收半只改状态（拿不到 NetLink），需要回的消息进 tabOutbox_。
 void Replicator::applySquadAuth(GameWorld* gw, const EventPacket& ev) {
     if (!squadSync_) return;
+    if ((unsigned char)ev.arg == 6) {     // DELETE：发送方删掉了自己的一支空编队（发给所有人）
+        Tab gone = canonicalTab(Tab((u32)ev.sContainer, (u32)ev.sContainerSerial), ev.ownerId);
+        std::map<Tab, OwnerRow>::iterator row = owners_.find(gone);
+        // 主机删自己的编队时当场去掉归属表行，新表可能比这条事件先到（2026-11-13 实测），
+        // 所以好友一侧查不到行也照做；主机一侧必须查到行且主人是发送方
+        if (ev.ownerId == localId_ ||
+            (row != owners_.end() ? row->second.playerId != identityForOwner(ev.ownerId) : isHostRole())) return;
+        int result = engine::destroyEmptyPlayerSquad(gw, gone.first, gone.second);
+        if (isHostRole() && result != 2) { owners_.erase(row); ++ownersRevision_; ownersDirty_ = true; }
+        char d[144];
+        _snprintf(d, sizeof(d) - 1, "[owners] squad deleted by owner=%u tab=%u,%u result=%d",
+                  (unsigned)ev.ownerId, gone.first, gone.second, result);
+        d[sizeof(d) - 1] = '\0'; coop::logLine(d);
+        return;
+    }
     if (ev.targetOwnerId != localId_) return;
     unsigned char kind = (unsigned char)ev.arg;
     std::pair<u32, u32> tab((u32)ev.sContainer, (u32)ev.sContainerSerial);
@@ -1854,6 +1869,24 @@ void Replicator::setPlayerStart(GameWorld* gw, u32 author, const std::string& st
     else if (moneySync_) w.money += money;
     char b[200];
     _snprintf(b, sizeof(b) - 1, "[wallet] START player=%llu start='%s' money=%d first=%d", identity, start.c_str(), money, first ? 1 : 0);
+    b[sizeof(b) - 1] = 0; coop::logLine(b);
+}
+
+void Replicator::releaseLocalTab(const Tab& tab) {
+    if (!sessionLive_ || !squadSync_ || !(tab.first | tab.second)) return;
+    Tab canonical = canonicalTab(tab);
+    pendingOwnerTabs_.erase(tab);
+    u64 owner = tabOwnerIdentity(canonical);
+    bool mine = owner == 0 || owner == playerIdentity_;
+    if (mine) {
+        SquadAuthMsg m; m.kind = 6; m.targetId = OWNER_ID_ALL;
+        m.c = canonical.first; m.cs = canonical.second;
+        tabOutbox_.push_back(m);
+        if (isHostRole() && owners_.erase(canonical)) { ++ownersRevision_; ownersDirty_ = true; }
+    }
+    char b[160];
+    _snprintf(b, sizeof(b) - 1, "[owners] local squad deleted tab=%u,%u canonical=%u,%u sent=%d",
+              tab.first, tab.second, canonical.first, canonical.second, mine ? 1 : 0);
     b[sizeof(b) - 1] = 0; coop::logLine(b);
 }
 

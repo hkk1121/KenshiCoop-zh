@@ -2240,10 +2240,14 @@ bool installSelectionGuardHook();
 // 不走 objectSelected 的路径）。调用方用 worldLive 门控。
 void enforcePeerSelection(GameWorld* gw);
 
-void setSquadOwnershipCallbacks(void (*recruit)(Character*), void (*created)(unsigned int, unsigned int));
+void setSquadOwnershipCallbacks(void (*recruit)(Character*), void (*created)(unsigned int, unsigned int),
+                                void (*removed)(unsigned int, unsigned int));
 bool installSquadCreateHook();
 unsigned int listPlayerTabs(GameWorld* gw, unsigned int (*out)[2], unsigned int maxOut);
 bool createPlayerSquad(GameWorld* gw, unsigned int out[2]);
+// 销毁玩家阵营里标签为 (container, serial) 的空编队（别人删掉自己的空编队后本机照做）。
+// 返回 0 = 本机没有这支编队，1 = 已销毁，2 = 有成员或是最后一支，没动。
+int destroyEmptyPlayerSquad(GameWorld* gw, unsigned int container, unsigned int serial);
 
 // ---- 编队栏只显示本端编队（判定见 Replicator::squadBarVisible） ----------------
 // 分类器按编队标签 (container, containerSerial) 返回是否显示在本端编队栏（非 0 = 显示）。

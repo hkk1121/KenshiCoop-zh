@@ -958,6 +958,7 @@ RecruitFn g_recruitHookOrig = 0;
 CreateSquadFn g_createSquadOrig = 0;
 static void (*g_recruitOwnership)(Character*) = 0;
 static void (*g_squadCreated)(unsigned int, unsigned int) = 0;
+static void (*g_squadRemoved)(unsigned int, unsigned int) = 0;
 bool __fastcall recruit_hook(PlayerInterface* self, Character* c, bool editor) {
     unsigned int hb[5] = { 0, 0, 0, 0, 0 };
     bool haveBefore = false;
@@ -2805,8 +2806,9 @@ void enforcePeerSelection(GameWorld* gw) {
 }
 
 
-void setSquadOwnershipCallbacks(void (*recruit)(Character*), void (*created)(unsigned int, unsigned int)) {
-    g_recruitOwnership = recruit; g_squadCreated = created;
+void setSquadOwnershipCallbacks(void (*recruit)(Character*), void (*created)(unsigned int, unsigned int),
+                                void (*removed)(unsigned int, unsigned int)) {
+    g_recruitOwnership = recruit; g_squadCreated = created; g_squadRemoved = removed;
 }
 
 static ActivePlatoon* __fastcall createSquad_hook(PlayerInterface* self) {
@@ -2820,10 +2822,35 @@ static ActivePlatoon* __fastcall createSquad_hook(PlayerInterface* self) {
     return squad;
 }
 
+// SQD 窗口“删除”：SquadManagementScreen::removeSquad（真实 0x491290）在编队有成员或阵营只剩一支时
+// 只弹提示，否则调 Faction::destroyPlatoon。先记下标签，调用后名单确实少了才通知（删除同步）。
+typedef void (__fastcall* RemoveSquadFn)(SquadManagementScreen* self, SquadManagementScreen::SquadData* squad);
+static RemoveSquadFn g_removeSquadOrig = 0;
+
+static void __fastcall removeSquad_hook(SquadManagementScreen* self, SquadManagementScreen::SquadData* squad) {
+    unsigned int tab[2] = { 0, 0 }, before = 0;
+    __try {
+        if (squad && squad->platoon && squad->platoon->me && self->faction) {
+            const hand& h = squad->platoon->me->getHandle();
+            tab[0] = h.container; tab[1] = h.containerSerial;
+            before = self->faction->activePlatoons.count;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { before = 0; }
+    g_removeSquadOrig(self, squad);
+    __try {
+        if (g_squadRemoved && before && self->faction->activePlatoons.count < before)
+            g_squadRemoved(tab[0], tab[1]);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
 bool installSquadCreateHook() {
     intptr_t addr = KenshiLib::GetRealAddress(&PlayerInterface::createSquad);
-    return addr && KenshiLib::AddHook(addr, (void*)&createSquad_hook,
-                                    (void**)&g_createSquadOrig) == KenshiLib::SUCCESS;
+    intptr_t aRemove = KenshiLib::GetRealAddress(&SquadManagementScreen::removeSquad);
+    if (!addr || !aRemove ||
+        KenshiLib::AddHook(addr, (void*)&createSquad_hook,
+                           (void**)&g_createSquadOrig) != KenshiLib::SUCCESS) return false;
+    return KenshiLib::AddHook(aRemove, (void*)&removeSquad_hook,
+                              (void**)&g_removeSquadOrig) == KenshiLib::SUCCESS;
 }
 
 // 新开局（signal 置为 NEWGAME）时引擎不改 currentGame，它仍指向上一次存档：

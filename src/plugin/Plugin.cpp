@@ -257,6 +257,7 @@ void (*g_titleUpdate_orig)(TitleScreen*)   = 0;
 void startNetworking();
 void coopRecruitOwnSquad(Character* c);
 void coopCreatedSquad(unsigned int container, unsigned int serial);
+void coopRemovedSquad(unsigned int container, unsigned int serial);
 int coopSquadBarVisible(unsigned int container, unsigned int containerSerial);
 void coopUiConnect(bool isHost, bool useSteam, const unsigned long long* peerIds,
                    unsigned int peerCount, unsigned int ownRank);
@@ -3012,7 +3013,7 @@ void installEngineDetours() {
     // is the A/B escape hatch (squad_probe forces it off to keep the unsynced
     // baseline measurable).
     g_repl.setSquadSync(g_cfg.squadSync);
-    coop::engine::setSquadOwnershipCallbacks(&coopRecruitOwnSquad, &coopCreatedSquad);
+    coop::engine::setSquadOwnershipCallbacks(&coopRecruitOwnSquad, &coopCreatedSquad, &coopRemovedSquad);
     if (g_cfg.squadSync && !coop::engine::installSquadCreateHook())
         coopErr("[owners] squad creation hook installation failed");
     // 编队栏只显示本端编队（借到别人的编队期间只显示借来的），判定见 Replicator::squadBarVisible
@@ -3741,5 +3742,9 @@ void coopPlayerBoxesDrive(GameWorld* gw) {
 
 int coopSquadBarVisible(unsigned int container, unsigned int containerSerial) {
     return g_repl.squadBarVisible(std::make_pair((coop::u32)container, (coop::u32)containerSerial)) ? 1 : 0;
+}
+
+void coopRemovedSquad(unsigned int container, unsigned int serial) {
+    g_repl.releaseLocalTab(std::make_pair((coop::u32)container, (coop::u32)serial));
 }
 } // namespace
