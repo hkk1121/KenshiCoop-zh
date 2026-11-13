@@ -1157,11 +1157,16 @@ const float OwnerDeathScenario::FULL_HUNGER = 3.0f;
 // wound_kit（手动包扎测试的布置，不判定）：布防时各方把自己名下的活人喂饱、四肢伤到 40、
 // 血量降到 70，并各发 2 个基础急救包（209-gamedata.base）。之后一直不结束，游戏保持运行，
 // 由人手动换队、互相包扎，看 [med] TREAT SEND / TREAT RECV。需要 KENSHICOOP_INV_SYNC=1。
+// kill_hold（同一个类）：不弄伤、不发急救包，三方在同一个 4 秒整点各把自己名下的活人头部伤到致命
+// （与 death_race 同一条判死路），各机阵亡编队编号因此错开；之后同样不结束，供手动从尸体上丢装备。
 class WoundKitScenario : public TimedScenario {
 public:
-    WoundKitScenario() : TimedScenario("wound_kit", 0) {}
+    explicit WoundKitScenario(bool kill = false)
+        : TimedScenario(kill ? "kill_hold" : "wound_kit", 0), kill_(kill), killed_(false), slot_(0) {}
 
     virtual void onStart(const ScenarioContext& ctx) {
+        slot_ = (GetTickCount() + 8000) / 4000 + 1;
+        if (kill_) return;
         EntityState sq[64];
         unsigned int n = engine::captureSquad(ctx.gw, false, sq, 64);
         for (unsigned int i = 0; i < n; ++i) {
@@ -1179,7 +1184,41 @@ public:
         }
     }
 
-    virtual bool onTick(const ScenarioContext&) { return false; }
+    virtual bool onTick(const ScenarioContext& ctx) {
+        if (!kill_ || killed_ || GetTickCount() / 4000 < slot_) return false;
+        killed_ = true;
+        EntityState sq[64];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, 64);
+        for (unsigned int i = 0; i < n; ++i) {
+            if ((sq[i].bodyState & BODY_DEAD) || !ctx.ownTab ||
+                !ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial)) continue;
+            Character* c = engine::resolve(sq[i]);
+            int heads = 0;
+            __try {
+                MedicalSystem* med = c ? &c->medical : 0;
+                for (unsigned int k = 0; med && k < (unsigned int)med->anatomy.count; ++k) {
+                    MedicalSystem::HealthPartStatus* p = med->anatomy.stuff[k];
+                    if (!p || p->whatAmI != MedicalSystem::HealthPartStatus::PART_HEAD) continue;
+                    p->flesh     = -(p->_maxHealth * 3.0f + 100.0f);
+                    p->fleshStun = p->flesh;
+                    ++heads;
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                heads = -2;
+            }
+            char b[160];
+            _snprintf(b, sizeof(b) - 1, "SCENARIO KILLHOLD who=%s idx=%u ser=%u tab=%u,%u heads=%d",
+                      ctx.isHost ? "host" : "join", sq[i].hIndex, sq[i].hSerial,
+                      sq[i].hContainer, sq[i].hContainerSerial, heads);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        return false;
+    }
+
+private:
+    bool          kill_;
+    bool          killed_;
+    unsigned long slot_;
 };
 
 } // namespace
@@ -1196,6 +1235,7 @@ Scenario* makeMedicalScenario(const std::string& name) {
     if (name == "loot_race_ui")   return new OwnerDeathScenario(true, 2);
     if (name == "loot_race_full") return new OwnerDeathScenario(true, 3);
     if (name == "wound_kit")      return new WoundKitScenario();
+    if (name == "kill_hold")      return new WoundKitScenario(true);
     return 0;
 }
 
