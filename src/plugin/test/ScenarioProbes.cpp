@@ -2599,10 +2599,12 @@ public:
         // 轮到自己就招一个：先 baked，没有可招的原版 NPC 再运行时生成
         if (!recruited_ && slot >= firstSlot_ + GAP_SLOTS * ctx.ownRank) {
             recruited_ = true;
-            unsigned int hb[5], ha[5];
+            unsigned int hb[5] = { 0 }, ha[5] = { 0 };
             // 近处没有原版 NPC 时放宽到 400u：baked 招募双方都已有这具身体，
             // 归属立刻就能核对；运行时生成的要等远端铸造（约 10 秒）
-            res_ = engine::probeRecruit(ctx.gw, false, hb, ha, 400.0f);
+            const char* runtime = std::getenv("KENSHICOOP_RECRUIT_RUNTIME");
+            res_ = runtime && std::atoi(runtime) == 1 ? -9
+                : engine::probeRecruit(ctx.gw, false, hb, ha, 400.0f);
             leg_ = 0;
             if (res_ != 1) {
                 res_ = engine::probeRecruit(ctx.gw, true, hb, ha, 60.0f);
@@ -2661,10 +2663,8 @@ public:
                 unsigned int owner = ctx.tabOwnerRank
                                          ? ctx.tabOwnerRank(tabs[t][0], tabs[t][1])
                                          : 0xFFFFFFFFu;
-                // 归属表里没有的空编队是远端铸造代理体留下的临时容器，只记录不算错；
-                // 有人的未知编队才是真的没归属
-                bool cons = (owner == 0xFFFFFFFFu) ? (members == 0)
-                                                   : ((mine != 0) == (owner == ctx.ownRank));
+                // 空编队也必须有归属；主机兜底日志由跑场景脚本另外核对。
+                bool cons = owner != 0xFFFFFFFFu && ((mine != 0) == (owner == ctx.ownRank));
                 if (!cons) tabsOk = false;
                 char tb[200];
                 _snprintf(tb, sizeof(tb) - 1,
@@ -2716,7 +2716,7 @@ private:
 //   * 主机和好友1 等到好友2 的 PeerStatus 变 offline，再等 1 个整点核对：好友2 的每个
 //     编队 ownTab 为 0、归属仍是 rank 2，身体一个不少，命令分类仍是对方控制（2）；
 //   * 然后各自移动自己的人，并记录双方队长的位置，证明一人掉线其他人照常同步；
-//   * 等到好友2 重新上线后 20 秒再核对：好友2 的编队仍锁在它名下、自己的编队仍归自己；
+//   * 等到好友2 重新上线后 60 秒再核对：好友2 的编队仍锁在它名下、自己的编队仍归自己；
 //     核对完再保持 60 秒才出 RESULT（本段一出 RESULT 进程 4 秒后就退出，会把好友2
 //     重连那一段的连接掐掉）。
 // 好友2 离线期间它的角色在主机上照常被模拟（用户已确认合理，不算问题）。
@@ -2812,7 +2812,7 @@ public:
             phase_ = 6; phaseTick_ = GetTickCount();
             return false;
         }
-        // 好友2 重连那一段自己还要核对 20 秒；本段先退出会把它的连接掐掉，所以多留一会儿
+        // 好友2 重连后会移动并保持在线供跨机核对；本段先退出会掐掉连接，所以多留一会儿
         if (GetTickCount() - phaseTick_ < KEEPALIVE_MS) return false;
         char b[220];
         _snprintf(b, sizeof(b) - 1,
@@ -2829,7 +2829,7 @@ private:
     static const unsigned long LEAD_MS           = 8000;
     static const unsigned long SETTLE_MS         = 4000;
     static const unsigned long POS_DELAY_MS      = 8000;
-    static const unsigned long BACK_SETTLE_MS    = 20000;
+    static const unsigned long BACK_SETTLE_MS    = 60000;
     static const unsigned long KEEPALIVE_MS      = 60000;
     static const unsigned long DROP_TIMEOUT_MS   = 240000;
     static const unsigned long BACK_TIMEOUT_MS   = 300000;
@@ -2862,6 +2862,14 @@ private:
                     peerBodies_[nPeerBodies_][1] = sq[i].hSerial;
                     ++nPeerBodies_;
                 }
+                char b[260];
+                _snprintf(b, sizeof(b) - 1,
+                          "SCENARIO OFFLINEBODY who=%s rank=%u stage=base idx=%u ser=%u tab=%u,%u "
+                          "dead=%d pos=%.1f,%.1f,%.1f",
+                          ctx.isHost ? "host" : "join", ctx.ownRank, sq[i].hIndex, sq[i].hSerial,
+                          sq[i].hContainer, sq[i].hContainerSerial,
+                          (sq[i].bodyState & BODY_DEAD) ? 1 : 0, sq[i].x, sq[i].y, sq[i].z);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
             }
             if (ctx.ownTab && ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial)) {
                 bool seen = false;
@@ -2929,14 +2937,33 @@ private:
         EntityState sq[SCN_MAX_BODIES];
         unsigned int n = engine::captureSquad(ctx.gw, false, sq, SCN_MAX_BODIES);
         unsigned int own = countOwnBodies(ctx, sq, n);
-        bool online = !ctx.playerOnline || ctx.playerOnline(2) == 1;
+        unsigned int bodyBad = 0;
+        for (unsigned int k = 0; k < nPeerBodies_; ++k) {
+            bool hit = false;
+            for (unsigned int i = 0; i < n; ++i) {
+                if (sq[i].hIndex != peerBodies_[k][0] || sq[i].hSerial != peerBodies_[k][1]) continue;
+                hit = ctx.tabOwnerRank && ctx.tabOwnerRank(sq[i].hContainer, sq[i].hContainerSerial) == 2;
+                char b[260];
+                _snprintf(b, sizeof(b) - 1,
+                          "SCENARIO OFFLINEBODY who=%s rank=%u stage=back idx=%u ser=%u tab=%u,%u "
+                          "dead=%d pos=%.1f,%.1f,%.1f",
+                          ctx.isHost ? "host" : "join", ctx.ownRank, sq[i].hIndex, sq[i].hSerial,
+                          sq[i].hContainer, sq[i].hContainerSerial,
+                          (sq[i].bodyState & BODY_DEAD) ? 1 : 0, sq[i].x, sq[i].y, sq[i].z);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                break;
+            }
+            if (!hit) ++bodyBad;
+        }
+        bool online = ctx.playerOnline && ctx.playerOnline(2) == 1;
         bool ok = nPeerTabs_ > 0 && tabBad == 0 && ownBad == 0 && own == baseOwn_ && online;
+        ok = ok && bodyBad == 0;
         char b[240];
         _snprintf(b, sizeof(b) - 1,
                   "SCENARIO OFFLINEBACKCHK who=%s rank=%u tabs=%u tabBad=%u ownBad=%u own=%u "
-                  "online=%d ok=%d",
+                  "online=%d bodyBad=%u ok=%d",
                   ctx.isHost ? "host" : "join", ctx.ownRank, nPeerTabs_, tabBad, ownBad, own,
-                  online ? 1 : 0, ok ? 1 : 0);
+                  online ? 1 : 0, bodyBad, ok ? 1 : 0);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
         return ok;
     }
@@ -3022,7 +3049,8 @@ class OfflineLockBackScenario : public TimedScenario {
 public:
     OfflineLockBackScenario()
         : TimedScenario("offline_lock_back", /*evidenceMs=*/0),
-          startTick_(0), baseReady_(false), baseOwn_(0), nOwnTabs_(0) {}
+          startTick_(0), baseReady_(false), baseOwn_(0), nOwnTabs_(0),
+          moved_(false), moveOk_(false), finalTick_(0) {}
 
     virtual void onStart(const ScenarioContext& ctx) {
         startTick_ = GetTickCount();
@@ -3031,6 +3059,7 @@ public:
     }
 
     virtual bool onTick(const ScenarioContext& ctx) {
+        if (finalTick_) return GetTickCount() - finalTick_ >= KEEPALIVE_MS;
         if (!baseReady_) {
             if (!ctx.ownersReady || !ctx.ownersReady()) return false;
             EntityState sq[SCN_MAX_BODIES];
@@ -3039,6 +3068,13 @@ public:
             nOwnTabs_ = 0;
             for (unsigned int i = 0; i < n; ++i) {
                 if (!ctx.ownTab || !ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial)) continue;
+                char b[260];
+                _snprintf(b, sizeof(b) - 1,
+                          "SCENARIO OFFLINEBODY who=join rank=2 stage=base idx=%u ser=%u tab=%u,%u "
+                          "dead=%d pos=%.1f,%.1f,%.1f",
+                          sq[i].hIndex, sq[i].hSerial, sq[i].hContainer, sq[i].hContainerSerial,
+                          (sq[i].bodyState & BODY_DEAD) ? 1 : 0, sq[i].x, sq[i].y, sq[i].z);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
                 bool seen = false;
                 for (unsigned int t = 0; t < nOwnTabs_; ++t)
                     if (ownTabs_[t][0] == sq[i].hContainer &&
@@ -3059,6 +3095,29 @@ public:
             b[sizeof(b) - 1] = '\0'; coop::logLine(b);
             return false;
         }
+        if (!moved_ && GetTickCount() - startTick_ >= MOVE_AT_MS) {
+            moved_ = true;
+            EntityState sq[SCN_MAX_BODIES];
+            unsigned int n = engine::captureSquad(ctx.gw, false, sq, SCN_MAX_BODIES);
+            int pick = -1;
+            for (unsigned int i = 0; i < n; ++i) {
+                if ((sq[i].bodyState & BODY_DEAD) || !ctx.ownTab ||
+                    !ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial)) continue;
+                if (pick < 0 || sq[i].hIndex < sq[pick].hIndex ||
+                    (sq[i].hIndex == sq[pick].hIndex && sq[i].hSerial < sq[pick].hSerial)) pick = (int)i;
+            }
+            float x = 0.0f, y = 0.0f, z = 0.0f;
+            if (pick >= 0) {
+                Character* c = engine::resolve(sq[pick]);
+                moveOk_ = c && engine::readPos(c, &x, &y, &z) && engine::orderMoveTo(c, x + 4.0f, y, z);
+            }
+            char b[240];
+            _snprintf(b, sizeof(b) - 1,
+                      "SCENARIO OFFLINEBACKMOVE idx=%u ser=%u from=%.1f,%.1f,%.1f to=%.1f moved=%d",
+                      pick >= 0 ? sq[pick].hIndex : 0, pick >= 0 ? sq[pick].hSerial : 0,
+                      x, y, z, x + 4.0f, moveOk_ ? 1 : 0);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
         if (GetTickCount() - startTick_ < SETTLE_MS) return false;
         unsigned int tabBad = 0, readable = 0;
         for (unsigned int t = 0; t < nOwnTabs_; ++t)
@@ -3066,15 +3125,22 @@ public:
         EntityState sq[SCN_MAX_BODIES];
         unsigned int n = engine::captureSquad(ctx.gw, false, sq, SCN_MAX_BODIES);
         for (unsigned int i = 0; i < n; ++i) {
-            if ((sq[i].bodyState & BODY_DEAD) || !ctx.ownTab ||
-                !ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial)) continue;
+            if (!ctx.ownTab || !ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial)) continue;
+            char b[260];
+            _snprintf(b, sizeof(b) - 1,
+                      "SCENARIO OFFLINEBODY who=join rank=2 stage=back idx=%u ser=%u tab=%u,%u "
+                      "dead=%d pos=%.1f,%.1f,%.1f",
+                      sq[i].hIndex, sq[i].hSerial, sq[i].hContainer, sq[i].hContainerSerial,
+                      (sq[i].bodyState & BODY_DEAD) ? 1 : 0, sq[i].x, sq[i].y, sq[i].z);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            if (sq[i].bodyState & BODY_DEAD) continue;
             Character* c = engine::resolve(sq[i]);
             float x = 0.0f, y = 0.0f, z = 0.0f;
             if (c && engine::readPos(c, &x, &y, &z)) ++readable;
         }
         unsigned int own = countOwnBodies(ctx, sq, n);
-        bool online = !ctx.playerOnline || (ctx.playerOnline(0) == 1 && ctx.playerOnline(1) == 1);
-        bool ok = nOwnTabs_ > 0 && tabBad == 0 && readable == baseOwn_ && own == baseOwn_ && online;
+        bool online = ctx.playerOnline && ctx.playerOnline(0) == 1 && ctx.playerOnline(1) == 1;
+        bool ok = nOwnTabs_ > 0 && tabBad == 0 && readable == baseOwn_ && own == baseOwn_ && online && moveOk_;
         char b[220];
         _snprintf(b, sizeof(b) - 1,
                   "SCENARIO OFFLINEBACKFINAL who=join rank=2 tabs=%u tabBad=%u own=%u readable=%u "
@@ -3082,17 +3148,23 @@ public:
                   nOwnTabs_, tabBad, own, readable, online ? 1 : 0, ok ? 1 : 0);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
         passed_ = ok;
-        return true;
+        finalTick_ = GetTickCount();
+        return false;
     }
 
 private:
     static const unsigned long SETTLE_MS = 20000;
+    static const unsigned long MOVE_AT_MS = 8000;
+    static const unsigned long KEEPALIVE_MS = 60000;
 
     unsigned long  startTick_;
     bool           baseReady_;
     unsigned int   baseOwn_;
     unsigned int   ownTabs_[SCN_MAX_TABS][2];
     unsigned int   nOwnTabs_;
+    bool           moved_;
+    bool           moveOk_;
+    unsigned long  finalTick_;
 };
 
 // ===========================================================================
@@ -3113,7 +3185,7 @@ public:
     AuthIsolatedScenario()
         : TimedScenario("auth_isolated", /*evidenceMs=*/0),
           firstSlot_(0), step_(0), baseReady_(false), baseOwn_(0), nOwnTabs_(0),
-          bOwner_(0), ok_(true) {
+          bOwner_(0), ok_(true), lastIsolatedSlot_(0) {
         btab_[0] = 0; btab_[1] = 0;
     }
 
@@ -3129,6 +3201,16 @@ public:
     virtual bool onTick(const ScenarioContext& ctx) {
         if (!baseReady_) {
             if (!recordBase(ctx)) return false;
+        }
+        unsigned long slot = GetTickCount() / SLOT_MS;
+        if (ctx.ownRank == 2 && slot != lastIsolatedSlot_) {
+            bool isolated = checkIsolated(ctx);
+            if (!isolated) ok_ = false;
+            char b[160];
+            _snprintf(b, sizeof(b) - 1, "SCENARIO AUTHISOLATED rank=2 slot=%lu ok=%d",
+                      slot, isolated ? 1 : 0);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            lastIsolatedSlot_ = slot;
         }
         if (step_ >= STEPS) return true;
         if (GetTickCount() / SLOT_MS < firstSlot_ + OFFSETS[step_]) return false;
@@ -3223,7 +3305,8 @@ private:
                 ownTabs_[nOwnTabs_][1] = tabs[t][1];
                 ++nOwnTabs_;
             }
-            if (ctx.ownRank == 1 && owner == 0 && (btab_[0] | btab_[1]) == 0) {
+            if (ctx.ownRank <= 1 && owner == 0 && ((btab_[0] | btab_[1]) == 0 ||
+                tabs[t][0] < btab_[0] || (tabs[t][0] == btab_[0] && tabs[t][1] < btab_[1]))) {
                 btab_[0] = tabs[t][0];
                 btab_[1] = tabs[t][1];
                 bOwner_ = ctx.tabOwner ? ctx.tabOwner(tabs[t][0], tabs[t][1]) : 0;
@@ -3294,6 +3377,13 @@ private:
         EntityState sq[SCN_MAX_BODIES];
         unsigned int n = engine::captureSquad(ctx.gw, false, sq, SCN_MAX_BODIES);
         if (countOwnBodies(ctx, sq, n) != baseOwn_) ok = false;
+        for (unsigned int i = 0; i < n; ++i) {
+            if ((sq[i].bodyState & BODY_DEAD) || !ctx.ownTab ||
+                !ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial)) continue;
+            Character* c = engine::resolve(sq[i]);
+            float x = 0.0f, y = 0.0f, z = 0.0f;
+            if (!c || !engine::readPos(c, &x, &y, &z)) ok = false;
+        }
         return ok;
     }
 
@@ -3305,7 +3395,42 @@ private:
         bool ok = true;
         if (ctx.ownRank == 0) {
             bool want = (phase == 1 || phase == 5);
-            ok = (grant == (want ? 1 : 0)) && (pend == 0);
+            ok = (grant == (want ? 1 : 0)) && pend == 0 && borrow == 0 && req == 0 &&
+                 ctx.ownTab && (btab_[0] | btab_[1]) != 0 &&
+                 ctx.ownTab(btab_[0], btab_[1]) != 0;
+            unsigned int tabs[SCN_MAX_TABS][2];
+            unsigned int nt = engine::listPlayerTabs(ctx.gw, tabs, SCN_MAX_TABS);
+            for (unsigned int k = 0; k < nOwnTabs_; ++k) {
+                bool hit = false;
+                for (unsigned int t = 0; t < nt; ++t)
+                    if (tabs[t][0] == ownTabs_[k][0] && tabs[t][1] == ownTabs_[k][1]) { hit = true; break; }
+                if (!hit || !ctx.ownTab || ctx.ownTab(ownTabs_[k][0], ownTabs_[k][1]) == 0) ok = false;
+            }
+            // 授权出去后编队栏仍可见，实际控制权必须用命令分类核对。
+            EntityState sq[SCN_MAX_BODIES];
+            unsigned int n = engine::captureSquad(ctx.gw, false, sq, SCN_MAX_BODIES);
+            unsigned int targetBodies = 0, checked = 0, classBad = 0;
+            for (unsigned int i = 0; i < n; ++i) {
+                if (sq[i].bodyState & BODY_DEAD) continue;
+                bool original = false;
+                for (unsigned int k = 0; k < nOwnTabs_; ++k)
+                    if (sq[i].hContainer == ownTabs_[k][0] && sq[i].hContainerSerial == ownTabs_[k][1]) {
+                        original = true; break;
+                    }
+                if (!original) continue;
+                bool target = sq[i].hContainer == btab_[0] && sq[i].hContainerSerial == btab_[1];
+                if (target) ++targetBodies;
+                unsigned int h[5];
+                handFromEntity(sq[i], h);
+                if (!ctx.orderClass || ctx.orderClass(h) != (want && target ? 2 : 1)) ++classBad;
+                ++checked;
+            }
+            ok = ok && targetBodies > 0 && checked == baseOwn_ && classBad == 0;
+            char b[200];
+            _snprintf(b, sizeof(b) - 1,
+                      "SCENARIO AUTHCONTROL who=host phase=%d targetBodies=%u checked=%u classBad=%u ok=%d",
+                      phase, targetBodies, checked, classBad, ok ? 1 : 0);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
         } else if (ctx.ownRank == 1) {
             bool want = (phase == 1 || phase == 5);
             if (want) ok = checkBorrowed(ctx, true);
@@ -3334,6 +3459,7 @@ private:
     unsigned int   btab_[2];
     coop::u64      bOwner_;
     bool           ok_;
+    unsigned long  lastIsolatedSlot_;
 };
 
 // 第 0～13 步所在的整点（相对 firstSlot_）。第 9 步距第 8 步的申请 24 秒，越过 20 秒超时。
