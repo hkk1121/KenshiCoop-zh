@@ -1162,7 +1162,8 @@ const float OwnerDeathScenario::FULL_HUNGER = 3.0f;
 class WoundKitScenario : public TimedScenario {
 public:
     explicit WoundKitScenario(bool kill = false)
-        : TimedScenario(kill ? "kill_hold" : "wound_kit", 0), kill_(kill), killed_(false), slot_(0) {}
+        : TimedScenario(kill ? "kill_hold" : "wound_kit", 0), kill_(kill), killed_(false), slot_(0),
+          dropped_(false), nVictims_(0) {}
 
     virtual void onStart(const ScenarioContext& ctx) {
         slot_ = (GetTickCount() + 8000) / 4000 + 1;
@@ -1185,6 +1186,32 @@ public:
     }
 
     virtual bool onTick(const ScenarioContext& ctx) {
+        // 判死后第 6 个整点：主人把自己每具尸体上的一件武器（没有就任意一件穿戴的）直接丢到地上，
+        // 与手动从尸体物品栏拖到地面是同一个 Inventory::dropItem
+        if (kill_ && killed_ && !dropped_ && GetTickCount() / 4000 >= slot_ + 6) {
+            dropped_ = true;
+            for (unsigned int v = 0; v < nVictims_; ++v) {
+                ObjectHand oh;
+                if (!engine::charHandOf(victims_[v], oh)) continue;
+                unsigned int h[5];
+                oh.toObjOrder(h);
+                InvItemEntry items[64];
+                unsigned int n = engine::captureContainerContents(ctx.gw, h, items, 64, 0);
+                int pick = -1;
+                for (unsigned int i = 0; i < n; ++i) {
+                    if (!items[i].equipped) continue;
+                    if (pick < 0) pick = (int)i;
+                    if (items[i].itemType == 2) { pick = (int)i; break; }
+                }
+                int dr = pick < 0 ? -1 : engine::dropItemFromInventory(ctx.gw, h, items[pick].stringID,
+                                                                       items[pick].itemType, 1, 0, true);
+                char b[200];
+                _snprintf(b, sizeof(b) - 1, "SCENARIO KILLHOLD drop who=%s hand=%u,%u,%u,%u,%u sid='%s' type=%u dropped=%d",
+                          ctx.isHost ? "host" : "join", h[0], h[1], h[2], h[3], h[4],
+                          pick < 0 ? "" : items[pick].stringID, pick < 0 ? 0u : (unsigned)items[pick].itemType, dr);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+        }
         if (!kill_ || killed_ || GetTickCount() / 4000 < slot_) return false;
         killed_ = true;
         EntityState sq[64];
@@ -1193,6 +1220,7 @@ public:
             if ((sq[i].bodyState & BODY_DEAD) || !ctx.ownTab ||
                 !ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial)) continue;
             Character* c = engine::resolve(sq[i]);
+            if (c && nVictims_ < 16) victims_[nVictims_++] = c;
             int heads = 0;
             __try {
                 MedicalSystem* med = c ? &c->medical : 0;
@@ -1219,6 +1247,9 @@ private:
     bool          kill_;
     bool          killed_;
     unsigned long slot_;
+    bool          dropped_;
+    Character*    victims_[16];
+    unsigned int  nVictims_;
 };
 
 } // namespace
