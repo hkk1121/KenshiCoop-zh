@@ -315,7 +315,7 @@ void Replicator::applyMedical(GameWorld* gw, Inbound& in, NetLink& net, u32 owne
         MedRecv&   r = it->second;
         if (!r.have || (now - r.lastFwdMs) < FWD_THROTTLE_MS) continue;
         if (ownHands_.find(k) != ownHands_.end()) continue;
-        unsigned int hand[5] = { k.t, k.c, k.cs, k.i, k.s };
+        unsigned int hand[5]; handForContainerKey(k, hand);
         engine::MedicalRead mr;
         if (!engine::readMedicalByHand(hand, &mr) || !mr.valid) continue;
         TreatmentPacket tp;
@@ -1465,10 +1465,12 @@ void Replicator::handForContainerKey(const Key& k, unsigned int out[5]) const {
         std::map<Key, Character*>::const_iterator proxy = proxyByKey_.find(k);
         if (proxy != proxyByKey_.end() && proxy->second != 0) {
             ObjectHand oh;
-            if (engine::charHandOf(proxy->second, oh) &&
-                oh.type == k.t && oh.serial == k.s) {
+            // 主人在 SQD 窗口换队后序列号可能变，本机身体仍是旧序列号：本机手把登记在
+            // pinPeer_ 里（别人的编队成员）时同样换算；运行时生成的 NPC 代理不在其中
+            if (engine::charHandOf(proxy->second, oh) && oh.type == k.t) {
                 oh.toObjOrder(out);
-                return;
+                Key lk; lk.t = out[0]; lk.c = out[1]; lk.cs = out[2]; lk.i = out[3]; lk.s = out[4];
+                if (oh.serial == k.s || pinPeer_.count(lk) != 0) return;
             }
         }
     }
