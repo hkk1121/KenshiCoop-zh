@@ -2716,7 +2716,9 @@ private:
 //   * 主机和好友1 等到好友2 的 PeerStatus 变 offline，再等 1 个整点核对：好友2 的每个
 //     编队 ownTab 为 0、归属仍是 rank 2，身体一个不少，命令分类仍是对方控制（2）；
 //   * 然后各自移动自己的人，并记录双方队长的位置，证明一人掉线其他人照常同步；
-//   * 等到好友2 重新上线后 20 秒再核对：好友2 的编队仍锁在它名下、自己的编队仍归自己。
+//   * 等到好友2 重新上线后 20 秒再核对：好友2 的编队仍锁在它名下、自己的编队仍归自己；
+//     核对完再保持 60 秒才出 RESULT（本段一出 RESULT 进程 4 秒后就退出，会把好友2
+//     重连那一段的连接掐掉）。
 // 好友2 离线期间它的角色在主机上照常被模拟（用户已确认合理，不算问题）。
 // ===========================================================================
 class OfflineLockScenario : public TimedScenario {
@@ -2803,13 +2805,19 @@ public:
             }
             return false;
         }
-        if (GetTickCount() - phaseTick_ < BACK_SETTLE_MS) return false;
-        bool ok = checkBack(ctx);
-        if (!ok) ok_ = false;
+        if (phase_ == 5) {
+            if (GetTickCount() - phaseTick_ < BACK_SETTLE_MS) return false;
+            bool ok = checkBack(ctx);
+            if (!ok) ok_ = false;
+            phase_ = 6; phaseTick_ = GetTickCount();
+            return false;
+        }
+        // 好友2 重连那一段自己还要核对 20 秒；本段先退出会把它的连接掐掉，所以多留一会儿
+        if (GetTickCount() - phaseTick_ < KEEPALIVE_MS) return false;
         char b[220];
         _snprintf(b, sizeof(b) - 1,
                   "SCENARIO OFFLINEFINAL who=%s rank=%u tabs=%u own=%u ok=%d",
-                  ctx.isHost ? "host" : "join", ctx.ownRank, nPeerTabs_, nOwnTabs_, ok ? 1 : 0);
+                  ctx.isHost ? "host" : "join", ctx.ownRank, nPeerTabs_, nOwnTabs_, ok_ ? 1 : 0);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
         passed_ = ok_;
         return true;
@@ -2822,6 +2830,7 @@ private:
     static const unsigned long SETTLE_MS         = 4000;
     static const unsigned long POS_DELAY_MS      = 8000;
     static const unsigned long BACK_SETTLE_MS    = 20000;
+    static const unsigned long KEEPALIVE_MS      = 60000;
     static const unsigned long DROP_TIMEOUT_MS   = 240000;
     static const unsigned long BACK_TIMEOUT_MS   = 300000;
     static const float         MOVE_DIST;
