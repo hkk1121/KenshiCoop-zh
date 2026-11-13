@@ -38,6 +38,7 @@
 // 本分支（zh-cn-improvements）新增：其余原版开局各生成一个“联机：<中文名>”版本（记录 7 起），
 // 资金、出生地、阵营关系、科技、限定种族、角色模板全部沿用原版，另加一个相同配置的第 2 小队给加入方；
 // 开局界面文字取自游戏 locale\zh_CN\gamedata.po 直接写成中文，原有两个流浪者开局也改为中文显示名。
+// 2026-11-13 起开局记录（3、6 和 7 起每组的 +0）不再写进 .mod，只保留角色和小队模板，编号仍冻结。
 // 本机 Kenshi 不在默认路径时：dotnet run -- "G:\SteamLibrary\steamapps\common\Kenshi"
 using OpenConstructionSet.Data;
 using OpenConstructionSet.Mods;
@@ -327,13 +328,15 @@ foreach (var (vanillaSid, baseId) in coopVariants)
         newSave, values, refs, []));
 }
 
-Item[] items = [wanderer2, wandererSquad2, wandererStart, plusWanderer, plusSquad2, plusStart, .. variantItems];
+// 2026-11-13：F2 创建角色已能直接用原版开局，“联机：”开局不再写进 .mod；
+// 角色和小队模板记录照旧保留（已有存档按 StringId 引用）
+Item[] items = [.. new[] { wanderer2, wandererSquad2, wandererStart, plusWanderer, plusSquad2, plusStart }.Concat(variantItems)
+    .Where(i => i.Type != ItemType.NewGameStartoff)];
 
 // ---- 4) Assemble and write ---------------------------------------------------
 var header = new Header(1, "",
-    "KenshiCoop 的数据部分：联机开局。每个原版开局都有对应的“联机：”版本，资金、出生地、角色配置与原版相同，" +
-    "另加一个相同配置的第 2 小队给加入方；“联机+：流浪者”另有 50 万共享资金、两人全属性 50。" +
-    "纯数据 mod，联机需要 KenshiCoop 插件。")
+    "KenshiCoop 的数据部分：旧版“联机：”开局用过的角色与小队模板，留给已有存档使用；开局本身已移除，" +
+    "联机请直接用原版开局，好友进世界后按 F2 创建角色。纯数据 mod，联机需要 KenshiCoop 插件。")
 {
     Dependencies = ["gamedata.base", "Newwworld.mod", "rebirth.mod", "Dialogue.mod"],
 };
@@ -369,8 +372,8 @@ if (verify.Items.Count != items.Length)
 // Every StringId we have ever published must still be present and of the right type.
 (string Sid, ItemType Type)[] expected =
 [
-    (Sid(1), ItemType.Character), (Sid(2), ItemType.SquadTemplate), (Sid(3), ItemType.NewGameStartoff),
-    (Sid(4), ItemType.Character), (Sid(5), ItemType.SquadTemplate), (Sid(6), ItemType.NewGameStartoff),
+    (Sid(1), ItemType.Character), (Sid(2), ItemType.SquadTemplate),
+    (Sid(4), ItemType.Character), (Sid(5), ItemType.SquadTemplate),
 ];
 foreach (var (sid, type) in expected)
 {
@@ -432,32 +435,9 @@ foreach (var (sid, squad2Sid, money) in new[]
             errors.Add($"{sid}: value '{key}' differs from the vanilla Wanderer start");
 }
 
-// 原版各开局的联机版：两个小队、两队内容相同；除 squad 外的引用和资金等数值与原版一致
-foreach (var (vanillaSid, baseId) in coopVariants)
-{
-    var st = verify.Items.FirstOrDefault(i => i.StringId == Sid(baseId));
-    if (st is null || st.Type != ItemType.NewGameStartoff) { errors.Add($"{Sid(baseId)}: missing co-op start for {vanillaSid}"); continue; }
-    var squads = st.ReferenceCategories.FirstOrDefault(c => c.Name == "squad")?.References ?? [];
-    if (squads.Count != 2 || squads[1].TargetId != Sid(baseId + 2)) { errors.Add($"{st.Name}: squad refs are not host + {Sid(baseId + 2)}"); continue; }
-    string Shape(string sid)
-    {
-        var item = verify.Items.FirstOrDefault(i => i.StringId == sid);
-        var cats = item?.ReferenceCategories ?? Effective(sid).Refs;
-        return string.Join(";", cats.SelectMany(c => c.References.Select(r => $"{c.Name}:{r.TargetId}:{r.Value0}:{r.Value1}:{r.Value2}")));
-    }
-    if (Shape(squads[0].TargetId) != Shape(squads[1].TargetId))
-        errors.Add($"{st.Name}: join squad differs from host squad");
-    var (_, vanillaRefs) = Effective(vanillaSid);
-    string Others(IEnumerable<ReferenceCategory> cats) =>
-        string.Join(";", cats.Where(c => c.Name != "squad").SelectMany(c => c.References.Select(r => $"{c.Name}:{r.TargetId}:{r.Value0}:{r.Value1}:{r.Value2}")));
-    if (Others(st.ReferenceCategories) != Others(vanillaRefs))
-        errors.Add($"{st.Name}: non-squad references differ from vanilla");
-    var vanillaValues = MergedValues(vanillaSid);
-    foreach (var kv in vanillaValues.Where(k => k.Key is not ("description" or "difficulty" or "style")))
-        if (!Equals(st.Values.TryGetValue(kv.Key, out var v) ? v : null, kv.Value))
-            errors.Add($"{st.Name}: value '{kv.Key}' differs from vanilla");
-    Console.WriteLine($"  co-op start \"{st.Name}\": money={st.Values["money"]} host={squads[0].TargetId} -> {Shape(squads[1].TargetId)}");
-}
+// “联机：”开局已不再发布，文件里不应再有开局记录
+if (verify.Items.Any(i => i.Type == ItemType.NewGameStartoff))
+    errors.Add("the .mod still carries a game start");
 
 Console.WriteLine();
 if (errors.Count > 0)
@@ -466,8 +446,7 @@ if (errors.Count > 0)
     foreach (var e in errors) Console.WriteLine($"  - {e}");
     return 1;
 }
-Console.WriteLine($"VERIFICATION OK: {items.Length} records, {2 + coopVariants.Length} co-op starts wired to two squads, " +
-                  $"legacy StringIds intact, Multiplayer+ money = {PlusStartMoney}.");
+Console.WriteLine($"VERIFICATION OK: {items.Length} records, no game starts, legacy StringIds intact.");
 return 0;
 
 // ---- Helpers -----------------------------------------------------------------
