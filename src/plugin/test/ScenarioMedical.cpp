@@ -1154,6 +1154,34 @@ private:
 // 饥饿值的引擎刻度约 0～3（ReplicatorChannels.cpp 协议 29 的注释）
 const float OwnerDeathScenario::FULL_HUNGER = 3.0f;
 
+// wound_kit（手动包扎测试的布置，不判定）：布防时各方把自己名下的活人喂饱、四肢伤到 40、
+// 血量降到 70，并各发 2 个基础急救包（209-gamedata.base）。之后一直不结束，游戏保持运行，
+// 由人手动换队、互相包扎，看 [med] TREAT SEND / TREAT RECV。需要 KENSHICOOP_INV_SYNC=1。
+class WoundKitScenario : public TimedScenario {
+public:
+    WoundKitScenario() : TimedScenario("wound_kit", 0) {}
+
+    virtual void onStart(const ScenarioContext& ctx) {
+        EntityState sq[64];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, 64);
+        for (unsigned int i = 0; i < n; ++i) {
+            if ((sq[i].bodyState & BODY_DEAD) || !ctx.ownTab ||
+                !ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial)) continue;
+            unsigned int h[5];
+            handFromEntity(sq[i], h);
+            engine::writeHungerByHand(h, 3.0f, -1.0f);
+            bool ok = engine::woundSubjectLimbs(ctx.gw, h, 40.0f, 70.0f);
+            int kits = engine::addItemsToContainerBySid(ctx.gw, h, "209-gamedata.base", 4, 2, 0, "", "");
+            char b[160];
+            _snprintf(b, sizeof(b) - 1, "SCENARIO WOUNDKIT who=%s hand=%u,%u,%u,%u,%u wound=%d kits=%d",
+                      ctx.isHost ? "host" : "join", h[0], h[1], h[2], h[3], h[4], ok ? 1 : 0, kits);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+    }
+
+    virtual bool onTick(const ScenarioContext&) { return false; }
+};
+
 } // namespace
 
 Scenario* makeMedicalScenario(const std::string& name) {
@@ -1167,6 +1195,7 @@ Scenario* makeMedicalScenario(const std::string& name) {
     if (name == "loot_race")      return new OwnerDeathScenario(true, 1);
     if (name == "loot_race_ui")   return new OwnerDeathScenario(true, 2);
     if (name == "loot_race_full") return new OwnerDeathScenario(true, 3);
+    if (name == "wound_kit")      return new WoundKitScenario();
     return 0;
 }
 
