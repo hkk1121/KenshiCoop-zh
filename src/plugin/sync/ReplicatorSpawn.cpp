@@ -1014,6 +1014,7 @@ void Replicator::rekeyPeerBody(GameWorld* gw, u32 authorId, const Key& oldK,
     // from any batch or reply still in flight for the dead key.
     targets_.erase(oldK);
     spawnReq_.erase(oldK);
+    medRecv_.erase(oldK);      // 旧钥匙的包扎检测一并清掉，否则包扎期间还按旧钥匙转发
     rekeyedOld_[oldK] = nowMs();
     if (carryDeath || carryKo) {
         Driven& nd = targets_[newK]; // stream fills interp; we seed only the latch
