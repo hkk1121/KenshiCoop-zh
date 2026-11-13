@@ -2506,6 +2506,829 @@ private:
 const int WalletRaceScenario::DELTAS[WalletRaceScenario::STEPS] =
     { 700, -200, -300, 50, 420, -400, -60, -10, 33, -7 };
 
+// ===========================================================================
+// 2026-11-13 交接的三个场景（招募归属 / 掉线锁定 / 授权互不影响）共用的小工具。
+// ===========================================================================
+static const unsigned int SCN_MAX_BODIES  = 64;
+static const unsigned int SCN_MAX_TABS    = 16;
+static const float        SCN_FULL_HUNGER = 3.0f;
+
+// 把本机名下的活人喂饱，免得测试途中饿死、换手把，干扰人数核对。
+static unsigned int feedOwnLiving(const ScenarioContext& ctx) {
+    EntityState sq[SCN_MAX_BODIES];
+    unsigned int n = engine::captureSquad(ctx.gw, false, sq, SCN_MAX_BODIES);
+    unsigned int fed = 0;
+    for (unsigned int i = 0; i < n; ++i) {
+        if ((sq[i].bodyState & BODY_DEAD) || !ctx.ownTab ||
+            !ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial)) continue;
+        unsigned int h[5];
+        handFromEntity(sq[i], h);
+        if (engine::writeHungerByHand(h, SCN_FULL_HUNGER, -1.0f)) ++fed;
+    }
+    return fed;
+}
+
+// 本机名下的活人数（三个新场景共用）。
+static unsigned int countOwnBodies(const ScenarioContext& ctx, const EntityState* sq,
+                                   unsigned int n) {
+    unsigned int own = 0;
+    for (unsigned int i = 0; i < n; ++i)
+        if (!(sq[i].bodyState & BODY_DEAD) && ctx.ownTab &&
+            ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial)) ++own;
+    return own;
+}
+
+// ===========================================================================
+// recruit_owner（统一测试顺序第 3 层第 1 项）：三方各招一个人，核对新人只进招募方名下。
+//   * 主机第 0 个整点、好友1 第 6 个、好友2 第 12 个（系统时钟，本机多开共用）；先
+//     baked（附近的原版 NPC），没有可招的就退回运行时生成（远端铸造要等约 10 秒）；
+//   * 每轮招募后隔 5 个整点（第 5、11、17 个）三方各自核对：按编队归属数每个 rank 名下
+//     的活人数 == 开始时 +（该 rank 是否已经招过）；自己名下人数（编队栏判定）同样 +1；
+//   * 最后一轮再列一遍全部编队（RECRUITTAB：own= 本机编队栏是否显示、owner= 归属
+//     rank、members= 人数），并检查 own 与 owner 一致，供离线对照归属表。主机日志另外
+//     要查有没有 [owners] unknown tab=... -> host fallback。
+// ===========================================================================
+class RecruitOwnerScenario : public TimedScenario {
+public:
+    RecruitOwnerScenario()
+        : TimedScenario("recruit_owner", /*evidenceMs=*/0),
+          firstSlot_(0), baseReady_(false), recruited_(false), recruitOk_(false),
+          leg_(-1), res_(-9), check_(0), baseTotal_(0), baseOwn_(0),
+          checksOk_(true) {
+        baseRank_[0] = baseRank_[1] = baseRank_[2] = 0;
+    }
+
+    virtual void onStart(const ScenarioContext& ctx) {
+        // 第一个整点放在布防后至少 LEAD_MS，留时间给归属表接上
+        firstSlot_ = (GetTickCount() + LEAD_MS) / SLOT_MS + 1;
+        feedOwnLiving(ctx);
+        char b[200];
+        _snprintf(b, sizeof(b) - 1,
+                  "SCENARIO RECRUITSTART who=%s rank=%u firstSlot=%lu",
+                  ctx.isHost ? "host" : "join", ctx.ownRank, firstSlot_);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+
+    virtual bool onTick(const ScenarioContext& ctx) {
+        // 归属表接上后才记基线：没接上时 ownTab 对任何编队都返回非 0
+        if (!baseReady_) {
+            if (!ctx.ownersReady || !ctx.ownersReady()) return false;
+            EntityState sq[SCN_MAX_BODIES];
+            unsigned int n = engine::captureSquad(ctx.gw, false, sq, SCN_MAX_BODIES);
+            baseTotal_ = n;
+            baseOwn_ = countOwnBodies(ctx, sq, n);
+            // 按编队归属数每个 rank 名下的活人：这是核对“新人只进招募方名下”的基线
+            baseRank_[0] = baseRank_[1] = baseRank_[2] = 0;
+            for (unsigned int i = 0; i < n; ++i) {
+                if (sq[i].bodyState & BODY_DEAD) continue;
+                unsigned int owner = ctx.tabOwnerRank
+                                         ? ctx.tabOwnerRank(sq[i].hContainer, sq[i].hContainerSerial)
+                                         : 0xFFFFFFFFu;
+                if (owner < 3) ++baseRank_[owner];
+            }
+            baseReady_ = true;
+            char b[240];
+            _snprintf(b, sizeof(b) - 1,
+                      "SCENARIO RECRUITBASE who=%s rank=%u bodies=%u own=%u r0=%u r1=%u r2=%u",
+                      ctx.isHost ? "host" : "join", ctx.ownRank, baseTotal_, baseOwn_,
+                      baseRank_[0], baseRank_[1], baseRank_[2]);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            return false;
+        }
+        unsigned long slot = GetTickCount() / SLOT_MS;
+        // 轮到自己就招一个：先 baked，没有可招的原版 NPC 再运行时生成
+        if (!recruited_ && slot >= firstSlot_ + GAP_SLOTS * ctx.ownRank) {
+            recruited_ = true;
+            unsigned int hb[5], ha[5];
+            // 近处没有原版 NPC 时放宽到 400u：baked 招募双方都已有这具身体，
+            // 归属立刻就能核对；运行时生成的要等远端铸造（约 10 秒）
+            res_ = engine::probeRecruit(ctx.gw, false, hb, ha, 400.0f);
+            leg_ = 0;
+            if (res_ != 1) {
+                res_ = engine::probeRecruit(ctx.gw, true, hb, ha, 60.0f);
+                leg_ = 1;
+            }
+            recruitOk_ = (res_ == 1);
+            char b[240];
+            _snprintf(b, sizeof(b) - 1,
+                      "SCENARIO RECRUITACT who=%s rank=%u leg=%d res=%d tab=%u,%u tick=%lu",
+                      ctx.isHost ? "host" : "join", ctx.ownRank, leg_, res_,
+                      ha[1], ha[2], (unsigned long)GetTickCount());
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            return false;
+        }
+        // 每轮招募后隔 5 个整点（20 秒）核对一次：留足远端铸造/同步的时间
+        if (check_ < CHECKS && slot >= firstSlot_ + GAP_SLOTS * (check_ + 1) - 1) {
+            EntityState sq[SCN_MAX_BODIES];
+            unsigned int n = engine::captureSquad(ctx.gw, false, sq, SCN_MAX_BODIES);
+            // 按编队归属数每个 rank 名下的活人。不拿 Character* 指针当身份：远端铸造的
+            // 代理体会被重新铸造换掉指针，指针基线会把老身体误判成新人。
+            unsigned int cnt[3] = { 0, 0, 0 };
+            for (unsigned int i = 0; i < n; ++i) {
+                if (sq[i].bodyState & BODY_DEAD) continue;
+                unsigned int owner = ctx.tabOwnerRank
+                                         ? ctx.tabOwnerRank(sq[i].hContainer, sq[i].hContainerSerial)
+                                         : 0xFFFFFFFFu;
+                if (owner < 3) ++cnt[owner];
+            }
+            unsigned int own = countOwnBodies(ctx, sq, n);
+            unsigned int want[3];
+            for (unsigned int r = 0; r < 3; ++r)
+                want[r] = baseRank_[r] + (r <= check_ ? 1u : 0u);
+            bool ok = (cnt[0] == want[0]) && (cnt[1] == want[1]) && (cnt[2] == want[2]) &&
+                      (ctx.ownRank < 3 ? own == want[ctx.ownRank] : true);
+            if (!ok) checksOk_ = false;
+            char b[240];
+            _snprintf(b, sizeof(b) - 1,
+                      "SCENARIO RECRUITCHK who=%s rank=%u step=%u r0=%u r1=%u r2=%u "
+                      "want=%u,%u,%u own=%u ok=%d",
+                      ctx.isHost ? "host" : "join", ctx.ownRank, check_ + 1,
+                      cnt[0], cnt[1], cnt[2], want[0], want[1], want[2], own, ok ? 1 : 0);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            bool last = (check_ + 1 == CHECKS);
+            ++check_;
+            if (!last) return false;
+            // 最后一轮：列全部编队的归属与人数，供离线对照
+            unsigned int tabs[SCN_MAX_TABS][2];
+            unsigned int nt = engine::listPlayerTabs(ctx.gw, tabs, SCN_MAX_TABS);
+            bool tabsOk = (nt > 0);
+            for (unsigned int t = 0; t < nt; ++t) {
+                unsigned int members = 0;
+                for (unsigned int i = 0; i < n; ++i)
+                    if (!(sq[i].bodyState & BODY_DEAD) && sq[i].hContainer == tabs[t][0] &&
+                        sq[i].hContainerSerial == tabs[t][1]) ++members;
+                int mine = ctx.ownTab ? ctx.ownTab(tabs[t][0], tabs[t][1]) : 1;
+                unsigned int owner = ctx.tabOwnerRank
+                                         ? ctx.tabOwnerRank(tabs[t][0], tabs[t][1])
+                                         : 0xFFFFFFFFu;
+                // 归属表里没有的空编队是远端铸造代理体留下的临时容器，只记录不算错；
+                // 有人的未知编队才是真的没归属
+                bool cons = (owner == 0xFFFFFFFFu) ? (members == 0)
+                                                   : ((mine != 0) == (owner == ctx.ownRank));
+                if (!cons) tabsOk = false;
+                char tb[200];
+                _snprintf(tb, sizeof(tb) - 1,
+                          "SCENARIO RECRUITTAB who=%s rank=%u tab=%u,%u own=%d owner=%u members=%u",
+                          ctx.isHost ? "host" : "join", ctx.ownRank, tabs[t][0], tabs[t][1],
+                          mine, owner, members);
+                tb[sizeof(tb) - 1] = '\0'; coop::logLine(tb);
+            }
+            bool finalOk = checksOk_ && recruitOk_ && tabsOk;
+            char fb[240];
+            _snprintf(fb, sizeof(fb) - 1,
+                      "SCENARIO RECRUITFINAL who=%s rank=%u r0=%u r1=%u r2=%u own=%u tabs=%u "
+                      "tabsOk=%d recruit=%d checks=%d ok=%d",
+                      ctx.isHost ? "host" : "join", ctx.ownRank, cnt[0], cnt[1], cnt[2], own,
+                      nt, tabsOk ? 1 : 0, recruitOk_ ? 1 : 0, checksOk_ ? 1 : 0,
+                      finalOk ? 1 : 0);
+            fb[sizeof(fb) - 1] = '\0'; coop::logLine(fb);
+            passed_ = finalOk;
+            return true;
+        }
+        return false;
+    }
+
+private:
+    static const unsigned int  CHECKS    = 3;
+    static const unsigned int  GAP_SLOTS = 6;
+    static const unsigned long SLOT_MS   = 4000;
+    static const unsigned long LEAD_MS   = 8000;
+
+    unsigned long  firstSlot_;
+    bool           baseReady_;
+    bool           recruited_;
+    bool           recruitOk_;
+    int            leg_;
+    int            res_;
+    unsigned int   check_;
+    unsigned int   baseTotal_;
+    unsigned int   baseOwn_;
+    unsigned int   baseRank_[3];
+    bool           checksOk_;
+};
+
+// ===========================================================================
+// offline_lock（第 3 层第 3 项 / 第 4 层第 6 项 / 第 5 层第 2 项）：好友2 中途掉线，
+// 它的编队仍锁在它名下，主机和好友1 继续正常互同步；脚本再启动好友2 跑
+// offline_lock_back 核对重连。
+//   * 布防后先记基线：好友2 的编队标签 + 里面每个身体的 (idx,ser)，自己的编队与人数；
+//   * 好友2 在第 2 个整点打一行 OFFLINEGO 后结束这一段，进程 4 秒后自行退出（造成掉线）；
+//   * 主机和好友1 等到好友2 的 PeerStatus 变 offline，再等 1 个整点核对：好友2 的每个
+//     编队 ownTab 为 0、归属仍是 rank 2，身体一个不少，命令分类仍是对方控制（2）；
+//   * 然后各自移动自己的人，并记录双方队长的位置，证明一人掉线其他人照常同步；
+//   * 等到好友2 重新上线后 20 秒再核对：好友2 的编队仍锁在它名下、自己的编队仍归自己。
+// 好友2 离线期间它的角色在主机上照常被模拟（用户已确认合理，不算问题）。
+// ===========================================================================
+class OfflineLockScenario : public TimedScenario {
+public:
+    OfflineLockScenario()
+        : TimedScenario("offline_lock", /*evidenceMs=*/0),
+          firstSlot_(0), startTick_(0), baseReady_(false), phase_(0), phaseTick_(0),
+          moveAt_(0), baseOwn_(0), nPeerTabs_(0), nPeerBodies_(0), nOwnTabs_(0),
+          ok_(true) {}
+
+    virtual void onStart(const ScenarioContext& ctx) {
+        firstSlot_ = (GetTickCount() + LEAD_MS) / SLOT_MS + 1;
+        startTick_ = GetTickCount();
+        feedOwnLiving(ctx);
+        char b[200];
+        _snprintf(b, sizeof(b) - 1,
+                  "SCENARIO OFFLINESTART who=%s rank=%u firstSlot=%lu",
+                  ctx.isHost ? "host" : "join", ctx.ownRank, firstSlot_);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+
+    virtual bool onTick(const ScenarioContext& ctx) {
+        if (!baseReady_ && !recordBase(ctx)) return false;
+        unsigned long slot = GetTickCount() / SLOT_MS;
+        // 好友2：到点打日志并结束这一段，进程随后自行退出
+        if (ctx.ownRank == 2) {
+            if (slot < firstSlot_ + DROP_SLOT) return false;
+            char b[200];
+            _snprintf(b, sizeof(b) - 1,
+                      "SCENARIO OFFLINEGO who=join rank=2 own=%u tabs=%u tick=%lu",
+                      baseOwn_, nOwnTabs_, (unsigned long)GetTickCount());
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            passed_ = true;
+            return true;
+        }
+        if (phase_ == 0) {
+            if (GetTickCount() - startTick_ > DROP_TIMEOUT_MS) {
+                coop::logLine("SCENARIO OFFLINETIMEOUT waiting for rank 2 to go offline");
+                ok_ = false; passed_ = false; return true;
+            }
+            if (ctx.playerOnline && ctx.playerOnline(2) == 0) {
+                phase_ = 1; phaseTick_ = GetTickCount();
+                char b[200];
+                _snprintf(b, sizeof(b) - 1,
+                          "SCENARIO OFFLINEDROP who=%s rank=%u elapsed=%lu tick=%lu",
+                          ctx.isHost ? "host" : "join", ctx.ownRank,
+                          (unsigned long)(GetTickCount() - startTick_),
+                          (unsigned long)GetTickCount());
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+            return false;
+        }
+        if (phase_ == 1) {
+            if (GetTickCount() - phaseTick_ < SETTLE_MS) return false;
+            bool ok = checkOffline(ctx);
+            if (!ok) ok_ = false;
+            phase_ = 2;
+            moveAt_ = (slot + 1) * SLOT_MS;
+            return false;
+        }
+        if (phase_ == 2) {
+            if (GetTickCount() < moveAt_) return false;
+            moveOwn(ctx);
+            phase_ = 3; phaseTick_ = GetTickCount();
+            return false;
+        }
+        if (phase_ == 3) {
+            if (GetTickCount() - phaseTick_ < POS_DELAY_MS) return false;
+            logPeerPositions(ctx);
+            phase_ = 4; phaseTick_ = GetTickCount();
+            return false;
+        }
+        if (phase_ == 4) {
+            if (ctx.playerOnline && ctx.playerOnline(2) == 1) {
+                char b[160];
+                _snprintf(b, sizeof(b) - 1, "SCENARIO OFFLINEBACK who=%s rank=%u tick=%lu",
+                          ctx.isHost ? "host" : "join", ctx.ownRank,
+                          (unsigned long)GetTickCount());
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                phase_ = 5; phaseTick_ = GetTickCount();
+            } else if (GetTickCount() - phaseTick_ > BACK_TIMEOUT_MS) {
+                coop::logLine("SCENARIO OFFLINETIMEOUT waiting for rank 2 to come back");
+                ok_ = false; passed_ = false; return true;
+            }
+            return false;
+        }
+        if (GetTickCount() - phaseTick_ < BACK_SETTLE_MS) return false;
+        bool ok = checkBack(ctx);
+        if (!ok) ok_ = false;
+        char b[220];
+        _snprintf(b, sizeof(b) - 1,
+                  "SCENARIO OFFLINEFINAL who=%s rank=%u tabs=%u own=%u ok=%d",
+                  ctx.isHost ? "host" : "join", ctx.ownRank, nPeerTabs_, nOwnTabs_, ok ? 1 : 0);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        passed_ = ok_;
+        return true;
+    }
+
+private:
+    static const unsigned int  DROP_SLOT         = 2;
+    static const unsigned long SLOT_MS           = 4000;
+    static const unsigned long LEAD_MS           = 8000;
+    static const unsigned long SETTLE_MS         = 4000;
+    static const unsigned long POS_DELAY_MS      = 8000;
+    static const unsigned long BACK_SETTLE_MS    = 20000;
+    static const unsigned long DROP_TIMEOUT_MS   = 240000;
+    static const unsigned long BACK_TIMEOUT_MS   = 300000;
+    static const float         MOVE_DIST;
+
+    // 归属表接上、并且能看到好友2 的编队后才记基线
+    bool recordBase(const ScenarioContext& ctx) {
+        if (!ctx.ownersReady || !ctx.ownersReady()) return false;
+        EntityState sq[SCN_MAX_BODIES];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, SCN_MAX_BODIES);
+        if (n == 0) return false;
+        nPeerTabs_ = 0; nPeerBodies_ = 0; nOwnTabs_ = 0;
+        for (unsigned int i = 0; i < n; ++i) {
+            unsigned int owner = ctx.tabOwnerRank
+                                     ? ctx.tabOwnerRank(sq[i].hContainer, sq[i].hContainerSerial)
+                                     : 0xFFFFFFFFu;
+            if (owner == 0xFFFFFFFFu) return false; // 归属表还没齐，下一帧再来
+            if (owner == 2) {
+                bool seen = false;
+                for (unsigned int t = 0; t < nPeerTabs_; ++t)
+                    if (peerTabs_[t][0] == sq[i].hContainer &&
+                        peerTabs_[t][1] == sq[i].hContainerSerial) { seen = true; break; }
+                if (!seen && nPeerTabs_ < SCN_MAX_TABS) {
+                    peerTabs_[nPeerTabs_][0] = sq[i].hContainer;
+                    peerTabs_[nPeerTabs_][1] = sq[i].hContainerSerial;
+                    ++nPeerTabs_;
+                }
+                if (nPeerBodies_ < SCN_MAX_BODIES) {
+                    peerBodies_[nPeerBodies_][0] = sq[i].hIndex;
+                    peerBodies_[nPeerBodies_][1] = sq[i].hSerial;
+                    ++nPeerBodies_;
+                }
+            }
+            if (ctx.ownTab && ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial)) {
+                bool seen = false;
+                for (unsigned int t = 0; t < nOwnTabs_; ++t)
+                    if (ownTabs_[t][0] == sq[i].hContainer &&
+                        ownTabs_[t][1] == sq[i].hContainerSerial) { seen = true; break; }
+                if (!seen && nOwnTabs_ < SCN_MAX_TABS) {
+                    ownTabs_[nOwnTabs_][0] = sq[i].hContainer;
+                    ownTabs_[nOwnTabs_][1] = sq[i].hContainerSerial;
+                    ++nOwnTabs_;
+                }
+            }
+        }
+        if (nPeerTabs_ == 0) return false; // 还没看到好友2 的编队
+        baseOwn_ = countOwnBodies(ctx, sq, n);
+        baseReady_ = true;
+        char b[220];
+        _snprintf(b, sizeof(b) - 1,
+                  "SCENARIO OFFLINEBASE who=%s rank=%u peerTabs=%u peerBodies=%u ownTabs=%u own=%u",
+                  ctx.isHost ? "host" : "join", ctx.ownRank, nPeerTabs_, nPeerBodies_,
+                  nOwnTabs_, baseOwn_);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        return true;
+    }
+
+    bool checkOffline(const ScenarioContext& ctx) {
+        EntityState sq[SCN_MAX_BODIES];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, SCN_MAX_BODIES);
+        unsigned int tabBad = 0, bodyBad = 0, clsBad = 0;
+        for (unsigned int t = 0; t < nPeerTabs_; ++t) {
+            if (!ctx.ownTab || ctx.ownTab(peerTabs_[t][0], peerTabs_[t][1]) != 0) ++tabBad;
+            if (!ctx.tabOwnerRank || ctx.tabOwnerRank(peerTabs_[t][0], peerTabs_[t][1]) != 2) ++tabBad;
+        }
+        for (unsigned int k = 0; k < nPeerBodies_; ++k) {
+            bool hit = false;
+            for (unsigned int i = 0; i < n && !hit; ++i) {
+                if (sq[i].hIndex != peerBodies_[k][0] || sq[i].hSerial != peerBodies_[k][1]) continue;
+                hit = true;
+                unsigned int h[5];
+                handFromEntity(sq[i], h);
+                if (!ctx.orderClass || ctx.orderClass(h) != 2) ++clsBad;
+            }
+            if (!hit) ++bodyBad;
+        }
+        unsigned int own = countOwnBodies(ctx, sq, n);
+        bool ok = nPeerTabs_ > 0 && tabBad == 0 && bodyBad == 0 && clsBad == 0 && own == baseOwn_;
+        char b[240];
+        _snprintf(b, sizeof(b) - 1,
+                  "SCENARIO OFFLINECHECK who=%s rank=%u tabs=%u bodies=%u tabBad=%u bodyBad=%u "
+                  "clsBad=%u own=%u ok=%d",
+                  ctx.isHost ? "host" : "join", ctx.ownRank, nPeerTabs_, nPeerBodies_,
+                  tabBad, bodyBad, clsBad, own, ok ? 1 : 0);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        return ok;
+    }
+
+    bool checkBack(const ScenarioContext& ctx) {
+        unsigned int tabBad = 0, ownBad = 0;
+        for (unsigned int t = 0; t < nPeerTabs_; ++t) {
+            if (!ctx.ownTab || ctx.ownTab(peerTabs_[t][0], peerTabs_[t][1]) != 0) ++tabBad;
+            if (!ctx.tabOwnerRank || ctx.tabOwnerRank(peerTabs_[t][0], peerTabs_[t][1]) != 2) ++tabBad;
+        }
+        for (unsigned int t = 0; t < nOwnTabs_; ++t)
+            if (!ctx.ownTab || ctx.ownTab(ownTabs_[t][0], ownTabs_[t][1]) == 0) ++ownBad;
+        EntityState sq[SCN_MAX_BODIES];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, SCN_MAX_BODIES);
+        unsigned int own = countOwnBodies(ctx, sq, n);
+        bool online = !ctx.playerOnline || ctx.playerOnline(2) == 1;
+        bool ok = nPeerTabs_ > 0 && tabBad == 0 && ownBad == 0 && own == baseOwn_ && online;
+        char b[240];
+        _snprintf(b, sizeof(b) - 1,
+                  "SCENARIO OFFLINEBACKCHK who=%s rank=%u tabs=%u tabBad=%u ownBad=%u own=%u "
+                  "online=%d ok=%d",
+                  ctx.isHost ? "host" : "join", ctx.ownRank, nPeerTabs_, tabBad, ownBad, own,
+                  online ? 1 : 0, ok ? 1 : 0);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        return ok;
+    }
+
+    void moveOwn(const ScenarioContext& ctx) {
+        EntityState sq[SCN_MAX_BODIES];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, SCN_MAX_BODIES);
+        int pick = -1;
+        for (unsigned int i = 0; i < n; ++i) {
+            if ((sq[i].bodyState & BODY_DEAD) || !ctx.ownTab ||
+                !ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial)) continue;
+            if (pick < 0 || sq[i].hIndex < sq[pick].hIndex ||
+                (sq[i].hIndex == sq[pick].hIndex && sq[i].hSerial < sq[pick].hSerial))
+                pick = (int)i;
+        }
+        float x0 = 0.0f, y0 = 0.0f, z0 = 0.0f;
+        int moved = 0;
+        if (pick >= 0) {
+            Character* c = engine::resolve(sq[pick]);
+            if (c && engine::readPos(c, &x0, &y0, &z0))
+                moved = engine::orderMoveTo(c, x0 + MOVE_DIST, y0, z0) ? 1 : 0;
+        }
+        char b[220];
+        _snprintf(b, sizeof(b) - 1,
+                  "SCENARIO OFFLINEMOVE who=%s rank=%u idx=%u ser=%u from=%.1f,%.1f,%.1f to=%.1f "
+                  "moved=%d",
+                  ctx.isHost ? "host" : "join", ctx.ownRank,
+                  pick >= 0 ? sq[pick].hIndex : 0, pick >= 0 ? sq[pick].hSerial : 0,
+                  x0, y0, z0, x0 + MOVE_DIST, moved);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+
+    // 双方队长的位置（rank 0 / 1 各一行，取该 rank 里 (idx,ser) 最小的活人，两端选法一致）
+    void logPeerPositions(const ScenarioContext& ctx) {
+        EntityState sq[SCN_MAX_BODIES];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, SCN_MAX_BODIES);
+        for (unsigned int r = 0; r < 2; ++r) {
+            int pick = -1;
+            for (unsigned int i = 0; i < n; ++i) {
+                if (sq[i].bodyState & BODY_DEAD) continue;
+                unsigned int owner = ctx.tabOwnerRank
+                                         ? ctx.tabOwnerRank(sq[i].hContainer, sq[i].hContainerSerial)
+                                         : 0xFFFFFFFFu;
+                if (owner != r) continue;
+                if (pick < 0 || sq[i].hIndex < sq[pick].hIndex ||
+                    (sq[i].hIndex == sq[pick].hIndex && sq[i].hSerial < sq[pick].hSerial))
+                    pick = (int)i;
+            }
+            if (pick < 0) continue;
+            char b[200];
+            _snprintf(b, sizeof(b) - 1,
+                      "SCENARIO OFFLINEPOS who=%s rank=%u role=%u idx=%u ser=%u pos=%.1f,%.1f,%.1f",
+                      ctx.isHost ? "host" : "join", ctx.ownRank, r, sq[pick].hIndex,
+                      sq[pick].hSerial, sq[pick].x, sq[pick].y, sq[pick].z);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+    }
+
+    unsigned long  firstSlot_;
+    unsigned long  startTick_;
+    bool           baseReady_;
+    int            phase_;
+    unsigned long  phaseTick_;
+    unsigned long  moveAt_;
+    unsigned int   baseOwn_;
+    unsigned int   peerTabs_[SCN_MAX_TABS][2];
+    unsigned int   peerBodies_[SCN_MAX_BODIES][2];
+    unsigned int   nPeerTabs_;
+    unsigned int   nPeerBodies_;
+    unsigned int   ownTabs_[SCN_MAX_TABS][2];
+    unsigned int   nOwnTabs_;
+    bool           ok_;
+};
+
+// 掉线期间移动自己人的距离（沿 x 方向，免得走回原来的位置看不出变化）
+const float OfflineLockScenario::MOVE_DIST = 4.0f;
+
+// ===========================================================================
+// offline_lock_back（offline_lock 的第二段，只由脚本重启的好友2 跑）：重连后自己的编队
+// 仍归自己（ownTab 非 0）、自己的人一个不少且读得到，主机和好友1 都在线。
+// ===========================================================================
+class OfflineLockBackScenario : public TimedScenario {
+public:
+    OfflineLockBackScenario()
+        : TimedScenario("offline_lock_back", /*evidenceMs=*/0),
+          startTick_(0), baseReady_(false), baseOwn_(0), nOwnTabs_(0) {}
+
+    virtual void onStart(const ScenarioContext& ctx) {
+        startTick_ = GetTickCount();
+        feedOwnLiving(ctx);
+        coop::logLine("SCENARIO OFFLINEBACKSTART who=join rank=2");
+    }
+
+    virtual bool onTick(const ScenarioContext& ctx) {
+        if (!baseReady_) {
+            if (!ctx.ownersReady || !ctx.ownersReady()) return false;
+            EntityState sq[SCN_MAX_BODIES];
+            unsigned int n = engine::captureSquad(ctx.gw, false, sq, SCN_MAX_BODIES);
+            if (n == 0) return false;
+            nOwnTabs_ = 0;
+            for (unsigned int i = 0; i < n; ++i) {
+                if (!ctx.ownTab || !ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial)) continue;
+                bool seen = false;
+                for (unsigned int t = 0; t < nOwnTabs_; ++t)
+                    if (ownTabs_[t][0] == sq[i].hContainer &&
+                        ownTabs_[t][1] == sq[i].hContainerSerial) { seen = true; break; }
+                if (!seen && nOwnTabs_ < SCN_MAX_TABS) {
+                    ownTabs_[nOwnTabs_][0] = sq[i].hContainer;
+                    ownTabs_[nOwnTabs_][1] = sq[i].hContainerSerial;
+                    ++nOwnTabs_;
+                }
+            }
+            baseOwn_ = countOwnBodies(ctx, sq, n);
+            if (nOwnTabs_ == 0) return false;
+            baseReady_ = true;
+            char b[200];
+            _snprintf(b, sizeof(b) - 1,
+                      "SCENARIO OFFLINEBACKBASE who=join rank=2 tabs=%u own=%u",
+                      nOwnTabs_, baseOwn_);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            return false;
+        }
+        if (GetTickCount() - startTick_ < SETTLE_MS) return false;
+        unsigned int tabBad = 0, readable = 0;
+        for (unsigned int t = 0; t < nOwnTabs_; ++t)
+            if (!ctx.ownTab || ctx.ownTab(ownTabs_[t][0], ownTabs_[t][1]) == 0) ++tabBad;
+        EntityState sq[SCN_MAX_BODIES];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, SCN_MAX_BODIES);
+        for (unsigned int i = 0; i < n; ++i) {
+            if ((sq[i].bodyState & BODY_DEAD) || !ctx.ownTab ||
+                !ctx.ownTab(sq[i].hContainer, sq[i].hContainerSerial)) continue;
+            Character* c = engine::resolve(sq[i]);
+            float x = 0.0f, y = 0.0f, z = 0.0f;
+            if (c && engine::readPos(c, &x, &y, &z)) ++readable;
+        }
+        unsigned int own = countOwnBodies(ctx, sq, n);
+        bool online = !ctx.playerOnline || (ctx.playerOnline(0) == 1 && ctx.playerOnline(1) == 1);
+        bool ok = nOwnTabs_ > 0 && tabBad == 0 && readable == baseOwn_ && own == baseOwn_ && online;
+        char b[220];
+        _snprintf(b, sizeof(b) - 1,
+                  "SCENARIO OFFLINEBACKFINAL who=join rank=2 tabs=%u tabBad=%u own=%u readable=%u "
+                  "online=%d ok=%d",
+                  nOwnTabs_, tabBad, own, readable, online ? 1 : 0, ok ? 1 : 0);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        passed_ = ok;
+        return true;
+    }
+
+private:
+    static const unsigned long SETTLE_MS = 20000;
+
+    unsigned long  startTick_;
+    bool           baseReady_;
+    unsigned int   baseOwn_;
+    unsigned int   ownTabs_[SCN_MAX_TABS][2];
+    unsigned int   nOwnTabs_;
+};
+
+// ===========================================================================
+// auth_isolated（第 5 层第 1 项，顺带覆盖第 4 层第 3 项的“只申请一个编队 / 收回 / 拒绝 /
+// 超时”）：A = 好友1（rank 1）向 B = 主机（rank 0）申请一个编队，C = 好友2（rank 2）
+// 全程不受影响。
+//   * 段 1：A 按标签申请 B 的一个编队 → B 同意 → A 借到 1 个、该编队 ownTab 非 0、自己的
+//     编队 ownTab 变 0；B 已授权 1 个 → B 收回 → 双方恢复；
+//   * 段 2：A 申请 → B 拒绝 → A 没借到；
+//   * 段 3：A 申请 → B 不处理 → 20 秒后两端 [auth] TIMEOUT，状态清空；
+//   * 段 4：A 申请并借到 → A 主动归还。
+// C 每个整点都查一次：四个授权状态始终为 0、自己名下编队集合不变、自己的人一直读得到。
+// 主机只有一个编队时“只申请一个”和“申请全部”分不出来（本存档主机确实只有 1 个编队，
+// 已在汇报里写明）。
+// ===========================================================================
+class AuthIsolatedScenario : public TimedScenario {
+public:
+    AuthIsolatedScenario()
+        : TimedScenario("auth_isolated", /*evidenceMs=*/0),
+          firstSlot_(0), step_(0), baseReady_(false), baseOwn_(0), nOwnTabs_(0),
+          bOwner_(0), ok_(true) {
+        btab_[0] = 0; btab_[1] = 0;
+    }
+
+    virtual void onStart(const ScenarioContext& ctx) {
+        firstSlot_ = (GetTickCount() + LEAD_MS) / SLOT_MS + 1;
+        feedOwnLiving(ctx);
+        char b[200];
+        _snprintf(b, sizeof(b) - 1, "SCENARIO AUTHSTART who=%s rank=%u firstSlot=%lu",
+                  ctx.isHost ? "host" : "join", ctx.ownRank, firstSlot_);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+
+    virtual bool onTick(const ScenarioContext& ctx) {
+        if (!baseReady_) {
+            if (!recordBase(ctx)) return false;
+        }
+        if (step_ >= STEPS) return true;
+        if (GetTickCount() / SLOT_MS < firstSlot_ + OFFSETS[step_]) return false;
+        bool ok = true;
+        switch (step_) {
+        case 0:
+            if (ctx.ownRank == 1) ok = request(ctx, "AUTHREQ");
+            break;
+        case 1:
+            if (ctx.ownRank == 0) ok = grant(ctx, "AUTHGRANT");
+            break;
+        case 2:
+            ok = checkPhase(ctx, 1);
+            break;
+        case 3:
+            if (ctx.ownRank == 0) {
+                if (ctx.authAction) ctx.authAction(ScenarioContext::AUTH_ACT_REVOKE, 0, 0);
+                coop::logLine("SCENARIO AUTHREVOKE who=host rank=0");
+            }
+            break;
+        case 4:
+            ok = checkPhase(ctx, 2);
+            break;
+        case 5:
+            if (ctx.ownRank == 1) ok = request(ctx, "AUTHREQ2");
+            break;
+        case 6:
+            if (ctx.ownRank == 0) {
+                if (ctx.authAction) ctx.authAction(ScenarioContext::AUTH_ACT_DENY, 0, 0);
+                coop::logLine("SCENARIO AUTHDENY who=host rank=0");
+            }
+            break;
+        case 7:
+            ok = checkPhase(ctx, 3);
+            break;
+        case 8:
+            if (ctx.ownRank == 1) ok = request(ctx, "AUTHREQ3");
+            break;
+        case 9:
+            ok = checkPhase(ctx, 4);
+            break;
+        case 10:
+            if (ctx.ownRank == 1) ok = request(ctx, "AUTHREQ4");
+            break;
+        case 11:
+            if (ctx.ownRank == 0) ok = grant(ctx, "AUTHGRANT2");
+            break;
+        case 12:
+            ok = checkPhase(ctx, 5);
+            // A 借到后主动归还
+            if (ctx.ownRank == 1 && ctx.authAction) {
+                ctx.authAction(ScenarioContext::AUTH_ACT_REVOKE, 0, btab_);
+                coop::logLine("SCENARIO AUTHREVOKE2 who=join rank=1");
+            }
+            break;
+        default:
+            ok = checkPhase(ctx, 6);
+            break;
+        }
+        if (!ok) ok_ = false;
+        ++step_;
+        if (step_ == STEPS) {
+            char b[200];
+            _snprintf(b, sizeof(b) - 1, "SCENARIO AUTHFINAL who=%s rank=%u ok=%d",
+                      ctx.isHost ? "host" : "join", ctx.ownRank, ok_ ? 1 : 0);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            passed_ = ok_;
+            return true;
+        }
+        return false;
+    }
+
+private:
+    static const unsigned int  STEPS = 14;
+    static const unsigned long SLOT_MS = 4000;
+    static const unsigned long LEAD_MS = 8000;
+    static const unsigned int  OFFSETS[STEPS];
+
+    // 归属表接上后记基线：自己名下编队、人数；A 另外挑一个 B 的编队
+    bool recordBase(const ScenarioContext& ctx) {
+        if (!ctx.ownersReady || !ctx.ownersReady()) return false;
+        unsigned int tabs[SCN_MAX_TABS][2];
+        unsigned int nt = engine::listPlayerTabs(ctx.gw, tabs, SCN_MAX_TABS);
+        if (nt == 0) return false;
+        nOwnTabs_ = 0;
+        for (unsigned int t = 0; t < nt; ++t) {
+            unsigned int owner = ctx.tabOwnerRank ? ctx.tabOwnerRank(tabs[t][0], tabs[t][1])
+                                                  : 0xFFFFFFFFu;
+            if (owner == 0xFFFFFFFFu) return false;
+            if (ctx.ownTab && ctx.ownTab(tabs[t][0], tabs[t][1]) && nOwnTabs_ < SCN_MAX_TABS) {
+                ownTabs_[nOwnTabs_][0] = tabs[t][0];
+                ownTabs_[nOwnTabs_][1] = tabs[t][1];
+                ++nOwnTabs_;
+            }
+            if (ctx.ownRank == 1 && owner == 0 && (btab_[0] | btab_[1]) == 0) {
+                btab_[0] = tabs[t][0];
+                btab_[1] = tabs[t][1];
+                bOwner_ = ctx.tabOwner ? ctx.tabOwner(tabs[t][0], tabs[t][1]) : 0;
+            }
+        }
+        EntityState sq[SCN_MAX_BODIES];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, SCN_MAX_BODIES);
+        baseOwn_ = countOwnBodies(ctx, sq, n);
+        baseReady_ = true;
+        char b[240];
+        _snprintf(b, sizeof(b) - 1,
+                  "SCENARIO AUTHBASE who=%s rank=%u tabs=%u own=%u btab=%u,%u bowner=%I64u",
+                  ctx.isHost ? "host" : "join", ctx.ownRank, nOwnTabs_, baseOwn_,
+                  btab_[0], btab_[1], bOwner_);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        return true;
+    }
+
+    bool request(const ScenarioContext& ctx, const char* tag) {
+        if (!ctx.authAction || (btab_[0] | btab_[1]) == 0) return false;
+        ctx.authAction(ScenarioContext::AUTH_ACT_REQUEST, bOwner_, btab_);
+        char b[220];
+        _snprintf(b, sizeof(b) - 1, "SCENARIO %s who=join rank=1 tab=%u,%u target=%I64u",
+                  tag, btab_[0], btab_[1], bOwner_);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        return true;
+    }
+
+    bool grant(const ScenarioContext& ctx, const char* tag) {
+        int pend = ctx.authState ? ctx.authState(ScenarioContext::AUTH_PENDING_PEER) : -1;
+        if (ctx.authAction) ctx.authAction(ScenarioContext::AUTH_ACT_GRANT, 0, 0);
+        char b[200];
+        _snprintf(b, sizeof(b) - 1, "SCENARIO %s who=host rank=0 pending=%d", tag, pend);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        return pend == 1;
+    }
+
+    bool checkBorrowed(const ScenarioContext& ctx, bool want) {
+        if (!ctx.ownTab) return false;
+        bool visible = ctx.ownTab(btab_[0], btab_[1]) != 0;
+        if (visible != want) return false;
+        for (unsigned int k = 0; k < nOwnTabs_; ++k) {
+            bool v = ctx.ownTab(ownTabs_[k][0], ownTabs_[k][1]) != 0;
+            if (v == want) return false; // 借到期间自己的编队隐藏，归还后恢复
+        }
+        return true;
+    }
+
+    bool checkIsolated(const ScenarioContext& ctx) {
+        bool ok = ctx.authState &&
+                  ctx.authState(ScenarioContext::AUTH_PENDING_PEER) == 0 &&
+                  ctx.authState(ScenarioContext::AUTH_GRANTED_MINE) == 0 &&
+                  ctx.authState(ScenarioContext::AUTH_BORROWED) == 0 &&
+                  ctx.authState(ScenarioContext::AUTH_REQUESTING) == 0;
+        unsigned int tabs[SCN_MAX_TABS][2];
+        unsigned int nt = engine::listPlayerTabs(ctx.gw, tabs, SCN_MAX_TABS);
+        unsigned int own = 0;
+        for (unsigned int t = 0; t < nt; ++t)
+            if (ctx.ownTab && ctx.ownTab(tabs[t][0], tabs[t][1])) ++own;
+        if (own != nOwnTabs_) ok = false;
+        for (unsigned int k = 0; k < nOwnTabs_; ++k) {
+            bool hit = false;
+            for (unsigned int t = 0; t < nt; ++t)
+                if (tabs[t][0] == ownTabs_[k][0] && tabs[t][1] == ownTabs_[k][1] &&
+                    ctx.ownTab && ctx.ownTab(tabs[t][0], tabs[t][1])) { hit = true; break; }
+            if (!hit) ok = false;
+        }
+        EntityState sq[SCN_MAX_BODIES];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, SCN_MAX_BODIES);
+        if (countOwnBodies(ctx, sq, n) != baseOwn_) ok = false;
+        return ok;
+    }
+
+    bool checkPhase(const ScenarioContext& ctx, int phase) {
+        int pend   = ctx.authState ? ctx.authState(ScenarioContext::AUTH_PENDING_PEER) : -1;
+        int grant  = ctx.authState ? ctx.authState(ScenarioContext::AUTH_GRANTED_MINE) : -1;
+        int borrow = ctx.authState ? ctx.authState(ScenarioContext::AUTH_BORROWED) : -1;
+        int req    = ctx.authState ? ctx.authState(ScenarioContext::AUTH_REQUESTING) : -1;
+        bool ok = true;
+        if (ctx.ownRank == 0) {
+            bool want = (phase == 1 || phase == 5);
+            ok = (grant == (want ? 1 : 0)) && (pend == 0);
+        } else if (ctx.ownRank == 1) {
+            if (phase == 1 || phase == 5) ok = checkBorrowed(ctx, true);
+            else if (phase == 2 || phase == 6) ok = checkBorrowed(ctx, false);
+            else ok = (borrow == 0);
+            ok = ok && (req == 0);
+        } else {
+            ok = checkIsolated(ctx);
+        }
+        char b[240];
+        _snprintf(b, sizeof(b) - 1,
+                  "SCENARIO AUTHCHK who=%s rank=%u phase=%d pend=%d grant=%d borrow=%d req=%d ok=%d",
+                  ctx.isHost ? "host" : "join", ctx.ownRank, phase, pend, grant, borrow, req,
+                  ok ? 1 : 0);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        return ok;
+    }
+
+    unsigned long  firstSlot_;
+    unsigned int   step_;
+    bool           baseReady_;
+    unsigned int   baseOwn_;
+    unsigned int   ownTabs_[SCN_MAX_TABS][2];
+    unsigned int   nOwnTabs_;
+    unsigned int   btab_[2];
+    coop::u64      bOwner_;
+    bool           ok_;
+};
+
+// 第 0～13 步所在的整点（相对 firstSlot_）。第 9 步距第 8 步的申请 24 秒，越过 20 秒超时。
+const unsigned int AuthIsolatedScenario::OFFSETS[AuthIsolatedScenario::STEPS] =
+    { 2, 3, 4, 5, 6, 7, 8, 9, 11, 17, 18, 19, 20, 21 };
+
 Scenario* makeProbeScenario(const std::string& name) {
     if (name == "spike")        return new SpikeScenario();
     if (name == "cell_probe")   return new CellProbeScenario();
@@ -2526,6 +3349,10 @@ Scenario* makeProbeScenario(const std::string& name) {
     if (name == "hunger_probe")  return new HungerProbeScenario(true);
     if (name == "hunger_sync")   return new HungerProbeScenario(false);
     if (name == "wallet_race")   return new WalletRaceScenario();
+    if (name == "recruit_owner") return new RecruitOwnerScenario();
+    if (name == "offline_lock")  return new OfflineLockScenario();
+    if (name == "offline_lock_back") return new OfflineLockBackScenario();
+    if (name == "auth_isolated") return new AuthIsolatedScenario();
     return 0;
 }
 

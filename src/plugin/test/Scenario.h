@@ -47,6 +47,36 @@ struct ScenarioContext {
     // 编队期间只认借来的）。Plugin.cpp 用编队栏的判定填入；会话没开始或归属表没到时
     // 一律返回非 0。
     int         (*ownTab)(unsigned int container, unsigned int containerSerial);
+    // 编队标签的永久主人身份（0 = 归属表里没有这一行）。授权申请要按对方的稳定身份指定目标。
+    u64         (*tabOwner)(unsigned int container, unsigned int containerSerial);
+    // 编队标签的主人在本机的 rank（0xFFFFFFFF = 未知 / 归属表没到）。主人掉线后仍能查到，
+    // 因为归属表是永久的。
+    unsigned int (*tabOwnerRank)(unsigned int container, unsigned int containerSerial);
+    // 某 rank 的玩家此刻是否在线（1/0，含本机）。主人掉线时其 PeerStatus 的 present 变 0。
+    int         (*playerOnline)(unsigned int rank);
+    // 归属表是否已接上（1/0）。没接上时 ownTab 对任何编队都返回非 0，不能拿来做基线。
+    int         (*ownersReady)();
+    // 命令分类（Replicator::orderClassForHand）：1 = 本机可控，2 = 对方控制，0 = 中立。
+    // 参数是 readObjectHand 布局的 5 元手把。
+    int         (*orderClass)(const unsigned int hand[5]);
+    // 小队控制授权状态查询（authState 的 which 参数）。
+    enum {
+        AUTH_PENDING_PEER = 0,  // 1 = 有对方申请待处理
+        AUTH_GRANTED_MINE = 1,  // 已授权出去的编队数
+        AUTH_BORROWED     = 2,  // 借到的编队数
+        AUTH_REQUESTING   = 3   // 1 = 本端申请中 / 正在收回
+    };
+    // 小队控制授权动作（authAction 的 action 参数）。
+    enum {
+        AUTH_ACT_REQUEST = 0,
+        AUTH_ACT_GRANT   = 1,
+        AUTH_ACT_DENY    = 2,
+        AUTH_ACT_REVOKE  = 3    // 授权出去的收回 / 借到的归还
+    };
+    int         (*authState)(int which);
+    // targetPlayer 为对方的稳定身份（0 = 不按人筛选）；singleTab 为 {container,
+    // containerSerial}，0 = 全部可申请 / 挂起的编队。
+    void        (*authAction)(int action, u64 targetPlayer, const unsigned int singleTab[2]);
 };
 
 class Scenario {

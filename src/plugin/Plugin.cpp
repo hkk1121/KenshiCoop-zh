@@ -1869,6 +1869,69 @@ static unsigned int scenarioOwnRank() {
     if (!g_cfg.ownRanks.empty()) return *g_cfg.ownRanks.begin();
     return g_cfg.isHost ? 0u : 1u;
 }
+
+// ---- 场景用的归属 / 授权适配器（ScenarioContext） ----------------------------
+// 场景层不碰 Replicator，需要它的信息时统一从这里转一手。
+static coop::u64 coopScenarioTabOwner(unsigned int container, unsigned int containerSerial) {
+    return g_repl.tabOwnerIdentity(
+        std::make_pair((coop::u32)container, (coop::u32)containerSerial));
+}
+
+static unsigned int coopScenarioTabOwnerRank(unsigned int container, unsigned int containerSerial) {
+    coop::u64 id = coopScenarioTabOwner(container, containerSerial);
+    if (!id) return 0xFFFFFFFFu;
+    const std::map<coop::u64, coop::PeerStatusPacket>& ps = g_repl.players();
+    std::map<coop::u64, coop::PeerStatusPacket>::const_iterator it = ps.find(id);
+    if (it == ps.end()) return 0xFFFFFFFFu;
+    return it->second.ownRank;
+}
+
+static int coopScenarioPlayerOnline(unsigned int rank) {
+    if (rank == scenarioOwnRank()) return 1; // 本机总是在线
+    const std::map<coop::u64, coop::PeerStatusPacket>& ps = g_repl.players();
+    for (std::map<coop::u64, coop::PeerStatusPacket>::const_iterator it = ps.begin();
+         it != ps.end(); ++it)
+        if (it->second.ownRank == rank && it->second.present) return 1;
+    return 0;
+}
+
+static int coopScenarioOrderClass(const unsigned int hand[5]) {
+    return g_repl.orderClassForHand(hand);
+}
+
+static int coopScenarioOwnersReady() {
+    return g_repl.ownershipWorld() != 0 ? 1 : 0;
+}
+
+static int coopScenarioAuthState(int which) {
+    switch (which) {
+    case coop::ScenarioContext::AUTH_PENDING_PEER: return g_repl.squadAuthPendingPeer();
+    case coop::ScenarioContext::AUTH_GRANTED_MINE: return g_repl.squadAuthGrantedMine();
+    case coop::ScenarioContext::AUTH_BORROWED:     return g_repl.squadAuthBorrowed();
+    default:                                       return g_repl.squadAuthRequesting();
+    }
+}
+
+static void coopScenarioAuthAction(int action, coop::u64 targetPlayer,
+                                   const unsigned int singleTab[2]) {
+    std::pair<coop::u32, coop::u32> tab(0, 0);
+    if (singleTab) tab = std::make_pair((coop::u32)singleTab[0], (coop::u32)singleTab[1]);
+    const std::pair<coop::u32, coop::u32>* one = singleTab ? &tab : 0;
+    switch (action) {
+    case coop::ScenarioContext::AUTH_ACT_REQUEST:
+        g_repl.requestSquadAuth(g_net, g_net.localId(), targetPlayer, one);
+        break;
+    case coop::ScenarioContext::AUTH_ACT_GRANT:
+        g_repl.grantSquadAuth(g_lastGw, g_net, g_net.localId(), targetPlayer, one);
+        break;
+    case coop::ScenarioContext::AUTH_ACT_DENY:
+        g_repl.denySquadAuth(g_net, g_net.localId(), targetPlayer, one);
+        break;
+    default:
+        g_repl.revokeSquadAuth(g_lastGw, g_net, g_net.localId(), targetPlayer, one);
+        break;
+    }
+}
 #endif // KENSHICOOP_HARNESS
 
 // Scenario onStart (harness) fires once, BEFORE the engine tick, so a host-issued
@@ -1908,6 +1971,13 @@ void tickScenarioStart(GameWorld* gw) {
             pctx.pickMintedProxy = &coopScenarioPickMintedProxy;
             pctx.ownRank = scenarioOwnRank();
             pctx.ownTab = &coopSquadBarVisible;
+            pctx.tabOwner = &coopScenarioTabOwner;
+            pctx.tabOwnerRank = &coopScenarioTabOwnerRank;
+            pctx.playerOnline = &coopScenarioPlayerOnline;
+            pctx.ownersReady = &coopScenarioOwnersReady;
+            pctx.orderClass = &coopScenarioOrderClass;
+            pctx.authState = &coopScenarioAuthState;
+            pctx.authAction = &coopScenarioAuthAction;
             g_scenario->onGameplay(pctx);
         }
         if (peerReady || fallback) {
@@ -1920,6 +1990,13 @@ void tickScenarioStart(GameWorld* gw) {
             ctx.pickMintedProxy = &coopScenarioPickMintedProxy;
             ctx.ownRank = scenarioOwnRank();
             ctx.ownTab = &coopSquadBarVisible;
+            ctx.tabOwner = &coopScenarioTabOwner;
+            ctx.tabOwnerRank = &coopScenarioTabOwnerRank;
+            ctx.playerOnline = &coopScenarioPlayerOnline;
+            ctx.ownersReady = &coopScenarioOwnersReady;
+            ctx.orderClass = &coopScenarioOrderClass;
+            ctx.authState = &coopScenarioAuthState;
+            ctx.authAction = &coopScenarioAuthAction;
             char m[200];
             _snprintf(m, sizeof(m) - 1, "SCENARIO arm trigger=%s waitedMs=%lu",
                       peerReady ? "peer-ready" : "timeout", (unsigned long)waitedMs);
@@ -2109,6 +2186,13 @@ void tickScenarioTick(GameWorld* gw) {
         ctx.pickMintedProxy = &coopScenarioPickMintedProxy;
         ctx.ownRank = scenarioOwnRank();
         ctx.ownTab = &coopSquadBarVisible;
+        ctx.tabOwner = &coopScenarioTabOwner;
+        ctx.tabOwnerRank = &coopScenarioTabOwnerRank;
+        ctx.playerOnline = &coopScenarioPlayerOnline;
+        ctx.ownersReady = &coopScenarioOwnersReady;
+        ctx.orderClass = &coopScenarioOrderClass;
+        ctx.authState = &coopScenarioAuthState;
+        ctx.authAction = &coopScenarioAuthAction;
         if (g_scenario->onTick(ctx)) {
             // Stage 2: the receiver emits its interpolation smoothness summary
             // alongside the verdict so the runner can assert per-frame gliding.
