@@ -3307,10 +3307,12 @@ private:
             bool want = (phase == 1 || phase == 5);
             ok = (grant == (want ? 1 : 0)) && (pend == 0);
         } else if (ctx.ownRank == 1) {
-            if (phase == 1 || phase == 5) ok = checkBorrowed(ctx, true);
+            bool want = (phase == 1 || phase == 5);
+            if (want) ok = checkBorrowed(ctx, true);
             else if (phase == 2 || phase == 6) ok = checkBorrowed(ctx, false);
             else ok = (borrow == 0);
-            ok = ok && (req == 0);
+            // 编队栏状态和授权状态要对得上：借到时只有借来的那一个，归还后归零
+            ok = ok && (borrow == (want ? 1 : 0)) && (req == 0);
         } else {
             ok = checkIsolated(ctx);
         }
