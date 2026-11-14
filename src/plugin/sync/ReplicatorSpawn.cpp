@@ -583,6 +583,19 @@ void Replicator::syncSpawns(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerI
         }
         proxyByKey_[k] = proxy;
         mintedBodies_.insert(proxy);
+#ifdef KENSHICOOP_HARNESS
+        // 诊断：刚铸造的身体在并入编队前落在哪个容器。招募代理是玩家阵营，引擎可能
+        // 为它单开一个玩家编队，随后被 insertPeerMember 搬走而留下空队（只打日志）。
+        {
+            unsigned int mh[5] = { 0, 0, 0, 0, 0 };
+            if (engine::readObjectHand(reinterpret_cast<RootObject*>(proxy), mh)) {
+                char mb[176]; _snprintf(mb, sizeof(mb) - 1,
+                    "[spawn] proxy MINT hand=%u,%u,%u,%u,%u localc=%u,%u",
+                    k.t, k.c, k.cs, k.i, k.s, mh[1], mh[2]);
+                mb[sizeof(mb) - 1] = '\0'; coop::logLine(mb);
+            }
+        }
+#endif
         ++mintedThisTick;
         lifeSet(k, LIFE_RESOLVED, "mint");
         // Dead on arrival: latch the down state now (the same reliable-latch
@@ -1219,7 +1232,24 @@ void Replicator::insertPeerMember(GameWorld* gw, u32 authorId, Character* c,
         unsigned int created[2] = { 0, 0 };
         if (!engine::createPlayerSquad(gw, created)) { pendingPeerMembers_[newK] = authorId; return; }
         local = Tab(created[0], created[1]); tabAliases_[local] = target;
+#ifdef KENSHICOOP_HARNESS
+        // 诊断：目标编队本机没有，临时建了一个玩家编队（只打日志）。
+        char sb[176]; _snprintf(sb, sizeof(sb) - 1,
+            "[recruit] MEMBER-SQUAD created tab=%u,%u target=%u,%u",
+            created[0], created[1], target.first, target.second);
+        sb[sizeof(sb) - 1] = '\0'; coop::logLine(sb);
+#endif
     }
+#ifdef KENSHICOOP_HARNESS
+    // 诊断：并入时本机是否已经认识目标编队（只打日志）。
+    {
+        char tb[208]; _snprintf(tb, sizeof(tb) - 1,
+            "[recruit] MEMBER-TAB new=%u,%u,%u,%u,%u target=%u,%u local=%u,%u tabs=%u",
+            newK.t, newK.c, newK.cs, newK.i, newK.s, target.first, target.second,
+            local.first, local.second, n);
+        tb[sizeof(tb) - 1] = '\0'; coop::logLine(tb);
+    }
+#endif
     ownIt = ownsTabEffective(target, 0xFFFFFFFFu);
     unsigned int nh[5] = { newK.t, local.first, local.second, newK.i, newK.s };
     bool ok = engine::joinPlayerSquadAt(gw, c, nh);

@@ -2554,19 +2554,37 @@ public:
         : TimedScenario("recruit_owner", /*evidenceMs=*/0),
           firstSlot_(0), baseReady_(false), recruited_(false), recruitOk_(false),
           leg_(-1), res_(-9), check_(0), baseTotal_(0), baseOwn_(0),
-          checksOk_(true) {
+          checksOk_(true), checks_(CHECKS) {
         baseRank_[0] = baseRank_[1] = baseRank_[2] = 0;
+        allowRank_[0] = allowRank_[1] = allowRank_[2] = true;
     }
 
     virtual void onStart(const ScenarioContext& ctx) {
         // 第一个整点放在布防后至少 LEAD_MS，留时间给归属表接上
         firstSlot_ = (GetTickCount() + LEAD_MS) / SLOT_MS + 1;
+        // 诊断开关：KENSHICOOP_RECRUIT_ONLY 只让指定 rank 招募（逗号分隔，默认三方都招），
+        // KENSHICOOP_RECRUIT_CHECKS 加长核对轮数，用来看招募后重推存档/本机重载之后的状态
+        const char* only = std::getenv("KENSHICOOP_RECRUIT_ONLY");
+        if (only) {
+            allowRank_[0] = allowRank_[1] = allowRank_[2] = false;
+            for (const char* p = only; *p; ++p)
+                if (*p >= '0' && *p <= '2') allowRank_[*p - '0'] = true;
+        }
+        const char* extra = std::getenv("KENSHICOOP_RECRUIT_CHECKS");
+        if (extra && std::atoi(extra) > 0) checks_ = (unsigned int)std::atoi(extra);
         feedOwnLiving(ctx);
         char b[200];
         _snprintf(b, sizeof(b) - 1,
                   "SCENARIO RECRUITSTART who=%s rank=%u firstSlot=%lu",
                   ctx.isHost ? "host" : "join", ctx.ownRank, firstSlot_);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        char lb[200];
+        _snprintf(lb, sizeof(lb) - 1,
+                  "SCENARIO RECRUITLIMIT who=%s rank=%u allow=%d,%d,%d checks=%u",
+                  ctx.isHost ? "host" : "join", ctx.ownRank,
+                  allowRank_[0] ? 1 : 0, allowRank_[1] ? 1 : 0, allowRank_[2] ? 1 : 0,
+                  checks_);
+        lb[sizeof(lb) - 1] = '\0'; coop::logLine(lb);
     }
 
     virtual bool onTick(const ScenarioContext& ctx) {
@@ -2597,7 +2615,8 @@ public:
         }
         unsigned long slot = GetTickCount() / SLOT_MS;
         // 轮到自己就招一个：先 baked，没有可招的原版 NPC 再运行时生成
-        if (!recruited_ && slot >= firstSlot_ + GAP_SLOTS * ctx.ownRank) {
+        bool mayRecruit = ctx.ownRank >= 3 || allowRank_[ctx.ownRank];
+        if (!recruited_ && mayRecruit && slot >= firstSlot_ + GAP_SLOTS * ctx.ownRank) {
             recruited_ = true;
             unsigned int hb[5] = { 0 }, ha[5] = { 0 };
             // 近处没有原版 NPC 时放宽到 400u：baked 招募双方都已有这具身体，
@@ -2620,7 +2639,7 @@ public:
             return false;
         }
         // 每轮招募后隔 5 个整点（20 秒）核对一次：留足远端铸造/同步的时间
-        if (check_ < CHECKS && slot >= firstSlot_ + GAP_SLOTS * (check_ + 1) - 1) {
+        if (check_ < checks_ && slot >= firstSlot_ + GAP_SLOTS * (check_ + 1) - 1) {
             EntityState sq[SCN_MAX_BODIES];
             unsigned int n = engine::captureSquad(ctx.gw, false, sq, SCN_MAX_BODIES);
             // 按编队归属数每个 rank 名下的活人。不拿 Character* 指针当身份：远端铸造的
@@ -2636,7 +2655,7 @@ public:
             unsigned int own = countOwnBodies(ctx, sq, n);
             unsigned int want[3];
             for (unsigned int r = 0; r < 3; ++r)
-                want[r] = baseRank_[r] + (r <= check_ ? 1u : 0u);
+                want[r] = baseRank_[r] + ((check_ >= r && allowRank_[r]) ? 1u : 0u);
             bool ok = (cnt[0] == want[0]) && (cnt[1] == want[1]) && (cnt[2] == want[2]) &&
                       (ctx.ownRank < 3 ? own == want[ctx.ownRank] : true);
             if (!ok) checksOk_ = false;
@@ -2647,7 +2666,7 @@ public:
                       ctx.isHost ? "host" : "join", ctx.ownRank, check_ + 1,
                       cnt[0], cnt[1], cnt[2], want[0], want[1], want[2], own, ok ? 1 : 0);
             b[sizeof(b) - 1] = '\0'; coop::logLine(b);
-            bool last = (check_ + 1 == CHECKS);
+            bool last = (check_ + 1 == checks_);
             ++check_;
             if (!last) return false;
             // 最后一轮：列全部编队的归属与人数，供离线对照
@@ -2705,6 +2724,8 @@ private:
     unsigned int   baseOwn_;
     unsigned int   baseRank_[3];
     bool           checksOk_;
+    unsigned int   checks_;
+    bool           allowRank_[3];
 };
 
 // ===========================================================================
