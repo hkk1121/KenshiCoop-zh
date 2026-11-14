@@ -1547,6 +1547,8 @@ void Replicator::syncOwners(GameWorld* gw, NetLink& net, Inbound& in, bool host)
         }
         ownersWorld_ = it->header.worldId; ownersRevision_ = it->header.revision;
         ownersAuthEpoch_ = it->header.authEpoch;
+        // 加入方的开局请求下限跟随主机纪元；本进程之前当过主机时留下的旧值会比主机纪元大，请求会被自己拦下
+        characterWorldEpoch_ = ownersAuthEpoch_;
         owners_.swap(rows); ownersHaveSnapshot_ = true;
         bool attached = ownersFileWorld_ != 0 && ownersFileWorld_ == ownersWorld_;
         if (attached && !ownersAttached_) tabOwned_.clear();
