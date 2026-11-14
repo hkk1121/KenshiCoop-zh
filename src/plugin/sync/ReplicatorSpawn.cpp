@@ -38,10 +38,13 @@ bool Replicator::destroyIfMinted(GameWorld* gw, Character* c) {
         Tab tab(mh[1], mh[2]);
         if (mintTabs_.count(tab) && !owners_.count(canonicalTab(tab))) {
             int result = engine::destroyEmptyPlayerSquad(gw, tab.first, tab.second);
-            char b[144];
-            _snprintf(b, sizeof(b) - 1, "[owners] minted tab=%u,%u cleanup=dupe result=%d",
-                      tab.first, tab.second, result);
-            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            // result=0 是世界 NPC 代理落在 NPC 自己的编队上，数量多，不打日志
+            if (result) {
+                char b[144];
+                _snprintf(b, sizeof(b) - 1, "[owners] minted tab=%u,%u cleanup=dupe result=%d",
+                          tab.first, tab.second, result);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
             if (result != 2) mintTabs_.erase(tab);
         }
     }
