@@ -3427,6 +3427,12 @@ void driveCharacterCreation(GameWorld* gw, bool worldLive) {
                 }
                 char b[200]; _snprintf(b, sizeof(b) - 1, "[chargen] game start request '%s' submitted to authoritative creation queue", start.c_str());
                 b[sizeof(b) - 1] = '\0'; coopLog(b);
+            } else if (!request.data.empty()) {
+                // 本机自检拦下（世界/纪元/身份/连接不匹配）时原来没有任何输出，F2 看起来就是没反应
+                char b[224]; _snprintf(b, sizeof(b) - 1,
+                    "[chargen] game start request not current world=%llu epoch=%u player=%llu conn=%u; not sent",
+                    h.worldId, (unsigned)h.authEpoch, h.playerId, (unsigned)h.connectionId);
+                b[sizeof(b) - 1] = '\0'; coopLog(b);
             }
         }
     }

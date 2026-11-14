@@ -1518,6 +1518,10 @@ void Replicator::resetOwnersForWorld() {
             owners_.clear(); ownersWorld_ = 0; ownersHaveSnapshot_ = false;
         }
         ++ownersAuthEpoch_; characterWorldEpoch_ = ownersAuthEpoch_; ownersDirty_ = true;
+    } else {
+        // 加入方没有自己的纪元：新会话可能连到纪元更低的主机（同一存档重开主机），
+        // 旧纪元/版本号会让新快照一直被当成过期丢掉，这里回到初始值让首份快照必定被接受
+        ownersAuthEpoch_ = 1; ownersRevision_ = 0; characterWorldEpoch_ = 1;
     }
 }
 
@@ -1560,8 +1564,8 @@ void Replicator::syncOwners(GameWorld* gw, NetLink& net, Inbound& in, bool host)
             } else ++p;
         }
         char b[144];
-        _snprintf(b, sizeof(b) - 1, "[owners] snapshot world=%llu revision=%u rows=%u attached=%d",
-                  ownersWorld_, ownersRevision_, (unsigned)owners_.size(), ownersAttached_ ? 1 : 0);
+        _snprintf(b, sizeof(b) - 1, "[owners] snapshot world=%llu revision=%u epoch=%u rows=%u attached=%d",
+                  ownersWorld_, ownersRevision_, ownersAuthEpoch_, (unsigned)owners_.size(), ownersAttached_ ? 1 : 0);
         b[sizeof(b) - 1] = 0; coop::logLine(b);
     }
     if (!ownersLoaded_) {
