@@ -198,6 +198,7 @@ void Replicator::resetSession(bool keepWalletSequence, bool keepWallets) {
     jailObs_.clear();          // jail-observe spike per-captive last sample
     proxyByKey_.clear(); createdAppearanceApplied_.clear();
     mintedBodies_.clear();     // 与 proxyByKey_ 同为旧世界指针，读档后失效
+    mintTabs_.clear();
     suppressed_.clear();
     midBand_.clear();          // host mid-band round-robin (rebuilt by next census)
     midCursor_ = 0; midSliceMs_ = 0;
@@ -390,6 +391,7 @@ void Replicator::clearPeerReplicationState(GameWorld* gw, bool keepWallets) {
         if (destroyIfMinted(gw, it->second)) ++cleared; else ++released;
     }
     mintedBodies_.clear();
+    mintTabs_.clear();
     char b[128];
     _snprintf(b, sizeof(b) - 1, "[leave] cleared proxies=%u released=%u",
               cleared, released);
@@ -1658,6 +1660,17 @@ void Replicator::syncOwners(GameWorld* gw, NetLink& net, Inbound& in, bool host)
         for (unsigned int i = 0; i < n; ++i) {
             Tab tab(tabs[i][0], tabs[i][1]);
             if (owners_.count(tab) || owners_.size() >= OWNERS_MAX) continue;
+            // 铸造代理留下的空编队直接销毁，不登记给主机
+            if (mintTabs_.count(tab)) {
+                int result = engine::destroyEmptyPlayerSquad(gw, tab.first, tab.second);
+                mintTabs_.erase(tab);
+                if (result == 1) {
+                    char b[144];
+                    _snprintf(b, sizeof(b) - 1, "[owners] minted tab=%u,%u cleanup=fallback result=1", tab.first, tab.second);
+                    b[sizeof(b) - 1] = 0; coop::logLine(b);
+                    continue;
+                }
+            }
             claimLocalTab(tab);
             char b[144];
             _snprintf(b, sizeof(b) - 1, "[owners] unknown tab=%u,%u -> host fallback", tab.first, tab.second);

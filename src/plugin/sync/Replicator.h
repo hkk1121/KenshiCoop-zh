@@ -2851,6 +2851,8 @@ private:
     std::map<u64, Wallet> wallets_;
     bool walletsLoaded_;
     bool readPlayers(const std::string& name);
+    // 铸造代理时引擎自动建的玩家编队（搬走/销毁代理后会空出来），用于清理
+    std::set<Tab> mintTabs_;
 
 };
 

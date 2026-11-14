@@ -27,7 +27,25 @@ bool Replicator::destroyIfMinted(GameWorld* gw, Character* c) {
     std::set<Character*>::iterator m = mintedBodies_.find(c);
     if (m == mintedBodies_.end()) return false; // adopted / not ours to destroy
     mintedBodies_.erase(m);
-    return engine::despawnProxyNpc(gw, c);
+    // 销毁前记下身体所在容器：代理没了，铸造时引擎自动建的玩家编队会空出来
+    unsigned int mh[5] = { 0, 0, 0, 0, 0 };
+    bool haveMh = false;
+    __try {
+        haveMh = engine::readObjectHand(reinterpret_cast<RootObject*>(c), mh);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { haveMh = false; }
+    bool destroyed = engine::despawnProxyNpc(gw, c);
+    if (destroyed && haveMh) {
+        Tab tab(mh[1], mh[2]);
+        if (mintTabs_.count(tab) && !owners_.count(canonicalTab(tab))) {
+            int result = engine::destroyEmptyPlayerSquad(gw, tab.first, tab.second);
+            char b[144];
+            _snprintf(b, sizeof(b) - 1, "[owners] minted tab=%u,%u cleanup=dupe result=%d",
+                      tab.first, tab.second, result);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            if (result != 2) mintTabs_.erase(tab);
+        }
+    }
+    return destroyed;
 }
 
 void Replicator::syncSpawns(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerId,
@@ -583,19 +601,22 @@ void Replicator::syncSpawns(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerI
         }
         proxyByKey_[k] = proxy;
         mintedBodies_.insert(proxy);
-#ifdef KENSHICOOP_HARNESS
-        // 诊断：刚铸造的身体在并入编队前落在哪个容器。招募代理是玩家阵营，引擎可能
-        // 为它单开一个玩家编队，随后被 insertPeerMember 搬走而留下空队（只打日志）。
+        // 铸造代理是玩家阵营时，引擎建角会自动给它开一个玩家编队；记下来供三处清理
         {
             unsigned int mh[5] = { 0, 0, 0, 0, 0 };
             if (engine::readObjectHand(reinterpret_cast<RootObject*>(proxy), mh)) {
+                Tab minted(mh[1], mh[2]);
+                if (!owners_.count(canonicalTab(minted)) && !pendingOwnerTabs_.count(minted))
+                    mintTabs_.insert(minted);
+#ifdef KENSHICOOP_HARNESS
+                // 诊断：刚铸造的身体在并入编队前落在哪个容器（只打日志）。
                 char mb[176]; _snprintf(mb, sizeof(mb) - 1,
                     "[spawn] proxy MINT hand=%u,%u,%u,%u,%u localc=%u,%u",
                     k.t, k.c, k.cs, k.i, k.s, mh[1], mh[2]);
                 mb[sizeof(mb) - 1] = '\0'; coop::logLine(mb);
+#endif
             }
         }
-#endif
         ++mintedThisTick;
         lifeSet(k, LIFE_RESOLVED, "mint");
         // Dead on arrival: latch the down state now (the same reliable-latch
@@ -1252,6 +1273,15 @@ void Replicator::insertPeerMember(GameWorld* gw, u32 authorId, Character* c,
 #endif
     ownIt = ownsTabEffective(target, 0xFFFFFFFFu);
     unsigned int nh[5] = { newK.t, local.first, local.second, newK.i, newK.s };
+    // 铸造代理被搬进目标编队后，铸造时引擎自动建的玩家编队会空出来
+    bool wasMinted = mintedBodies_.count(c) != 0;
+    Tab mintedTab(0, 0);
+    if (wasMinted) {
+        unsigned int bh[5] = { 0, 0, 0, 0, 0 };
+        __try {
+            if (engine::readObjectHand(reinterpret_cast<RootObject*>(c), bh)) mintedTab = Tab(bh[1], bh[2]);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { mintedTab = Tab(0, 0); }
+    }
     bool ok = engine::joinPlayerSquadAt(gw, c, nh);
     // Pin the body's ACTUAL local hand. setFaction assigns a local platoon index
     // that usually DIFFERS from the owner's streamed hand (each engine numbers
@@ -1271,6 +1301,15 @@ void Replicator::insertPeerMember(GameWorld* gw, u32 authorId, Character* c,
     // the next poll. Claim it as ours-to-ignore before publishSquadMoves can
     // read it as a user action and publish it (see moveEcho_).
     if (ok) moveEcho_[newK.s] = nowMs();
+    if (ok && wasMinted && mintedTab != local && mintTabs_.count(mintedTab) &&
+        !owners_.count(canonicalTab(mintedTab))) {
+        int result = engine::destroyEmptyPlayerSquad(gw, mintedTab.first, mintedTab.second);
+        char b[144];
+        _snprintf(b, sizeof(b) - 1, "[owners] minted tab=%u,%u cleanup=member result=%d",
+                  mintedTab.first, mintedTab.second, result);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        if (result != 2) mintTabs_.erase(mintedTab);
+    }
     unsigned int lh[5] = { 0, 0, 0, 0, 0 };
     bool haveLh = false;
     __try {
