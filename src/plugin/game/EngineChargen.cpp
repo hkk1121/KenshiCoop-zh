@@ -291,10 +291,13 @@ bool beginStartEditing(GameWorld* gw, const std::vector<std::pair<unsigned int, 
     midgameSavedCount = 0;
     std::vector<Character*> chars;
     const lektor<Character*>& all = gw->player->playerCharacters;
-    for (unsigned int i = 0; i < all.size() && chars.size() < EDIT_MAX; ++i) {
+    // 中途编辑与原版整容（activateCharacterEditMode）一样一次只改一个选中的角色：
+    // 原生界面会把没在显示的角色藏到世界原点，活世界里不能把整队交给它
+    for (unsigned int i = 0; i < all.size() && chars.size() < (midgame ? 1u : (unsigned int)EDIT_MAX); ++i) {
         unsigned int h[5];
         if (!all[i] || !readObjectHand(static_cast<RootObject*>(all[i]), h)) continue;
         if (std::find(tabs.begin(), tabs.end(), std::make_pair(h[1], h[2])) == tabs.end()) continue;
+        if (midgame && !gw->player->isObjectSelected(static_cast<RootObject*>(all[i]))) continue;
         if (!playableRace(raceDataOf(all[i]))) continue;
         memcpy(editHands[chars.size()], h, sizeof(h));
         chars.push_back(all[i]);
