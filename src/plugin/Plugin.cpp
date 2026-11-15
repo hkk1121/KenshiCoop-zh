@@ -1414,7 +1414,11 @@ void coopPanelDrive(GameWorld* gw) {
 
     coop::engine::coopPanelTick(&ps, &coopUiConnect, &coopUiDisconnect, &coopUiScan,
                                 &coopUiMenuAction, &coopUiAuth, &coopUiCharacter);
-    coop::engine::coopOverlayTick(detail.c_str(), ostate, g_net.isRunning());
+    // 原生角色编辑器（开局捏人 / F2 修改已有角色）左上角就是名字框（layout 的
+    // NamePanel 在 10,10 到 300,46），会被状态条整个盖住，输入的名字看不见。
+    // 编辑期间先收起状态条，关掉编辑器后自动重建。
+    coop::engine::coopOverlayTick(detail.c_str(), ostate,
+                                  g_net.isRunning() && !coop::engine::characterEditing());
     coopPlayerBoxesDrive(gw);
 }
 
@@ -3630,7 +3634,7 @@ void driveCharacterCreation(GameWorld* gw, bool worldLive) {
         if (!editable) {
             coop::engine::restoreCharacterEdit(gw);
             result = -1; discarded = true;
-            coopErr("[chargen] midgame edit discarded: squad ownership or borrow state changed");
+            coopLog("[chargen] midgame edit discarded: squad ownership or borrow state changed");
         }
     } else if (midgame && result < -1) {
         // 改后的外观读不出来就发不出去，本机也别留着，免得和别人不一致

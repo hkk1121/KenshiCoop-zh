@@ -32,6 +32,8 @@ bool previousPause = false;
 // 打开后还要轮流显示几次角色（见 stepEditorCycle）
 unsigned int cycleLeft = 0;
 unsigned long cycleTick = 0;
+// 打开编辑器后先不暂停，等这些帧过去再暂停（原因见 showEditor）
+unsigned int pauseDelay = 0;
 typedef void (__fastcall* ConfirmFn)(CharacterEditWindow*, MyGUI::Widget*);
 typedef void (__fastcall* CloseFn)(ForgottenGUI*);
 ConfirmFn confirmOriginal = 0;
@@ -70,7 +72,15 @@ bool showEditor(GameWorld* gw, const lektor<Character*>* chars, const Ogre::vect
         if (!show) return false;
         show(::gui, chars, mode, races);
         editor = ::gui->characterEditor;
-        gw->userPause(true);
+        // 原生编辑器新建的窗口要在一个“未暂停”的帧里才会被画出来：暂停会通过
+        // GameWorld::togglePause 把世界线程停住（ThreadWannabe::setPaused），
+        // 新窗口就一直是空白的，直到玩家自己按一次空格恢复（2026-11-16 实测，
+        // 窗口有焦点也一样）。所以打开这一帧不暂停——本来就暂停的先恢复——
+        // 让引擎跑过 pauseDelay 帧（GUI 线程把窗口建出来），下一帧再暂停。
+        pauseDelay = 2;
+        float mult = 0.0f; bool paused = false;
+        if (readGameSpeed(gw, &mult, &paused) && paused)
+            writeGameSpeedQuiet(gw, previousSpeed > 0.0f ? previousSpeed : 1.0f, false);
         return editor != 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
@@ -344,7 +354,11 @@ int pollCharacterCreation(GameWorld* gw, std::vector<StartAppearance>& out) {
     out.clear();
     if (editCount && gw != editWorld) { cancelCharacterCreation(false); return -1; }
     if (editCount && editor && (!::gui || ::gui->characterEditor != editor)) { editor = 0; editResult = -1; }
-    if (editCount && editor) writeGameSpeed(editWorld, previousSpeed, true);
+    if (editCount && editor) {
+        // 打开后的前几帧不暂停：新窗口要先在未暂停的帧里被建出来（见 showEditor）
+        if (pauseDelay) --pauseDelay;
+        else writeGameSpeed(editWorld, previousSpeed, true);
+    }
     if (editCount && editor && cycleLeft) stepEditorCycle();
     if (!editCount || editor || !editResult) return 0;
     int result = editResult;
@@ -381,7 +395,7 @@ bool cancelCharacterCreation(bool worldAlive) {
     }
     // 世界已销毁或这次编辑已放弃时快照没用了；中途编辑确认过的先留着给调用方复检
     if (!worldAlive || editResult <= 0) midgameSavedCount = 0;
-    editor = 0; editWorld = 0; editResult = 0; confirming = false; editCount = 0; editStart.clear(); cycleLeft = 0;
+    editor = 0; editWorld = 0; editResult = 0; confirming = false; editCount = 0; editStart.clear(); cycleLeft = 0; pauseDelay = 0;
     return true;
 }
 
