@@ -3200,19 +3200,40 @@ private:
 // C 每个整点都查一次：四个授权状态始终为 0、自己名下编队集合不变、自己的人一直读得到。
 // 主机只有一个编队时“只申请一个”和“申请全部”分不出来（本存档主机确实只有 1 个编队，
 // 已在汇报里写明）。
+//
+// auth_single 模式（构造参数 single）：换角色，出借方 B = 好友1（rank 1），申请方 A = 主机
+// （rank 0），旁观 C = 好友2（rank 2）。第 4 层第 3 项第一条要区分“只申请一个编队”和
+// “申请全部”，B 名下有三个编队（54、55、90），其中两个有活人，取标签最小的两个当 X、Y。
+//   * 段 1：A 带 singleTab 只申请 X → B 同意 → A 上 X 的命令分类为 1、Y 仍为 2；B 上 X 为 2、
+//     Y 仍为 1 → B 收回 → 双方恢复；
+//   * 段 2：A 不带 singleTab 申请 B 的全部编队 → B 同意 → A 上 X、Y 都是 1，B 上都是 2 →
+//     A 归还 → B 上 X、Y 回到 1。
+// 控制权一律用命令分类核对：借出去的编队在出借方仍可见，ownTab 不能用来判断控制权。
 // ===========================================================================
 class AuthIsolatedScenario : public TimedScenario {
 public:
-    AuthIsolatedScenario()
-        : TimedScenario("auth_isolated", /*evidenceMs=*/0),
+    explicit AuthIsolatedScenario(bool single = false)
+        : TimedScenario(single ? "auth_single" : "auth_isolated", /*evidenceMs=*/0),
           firstSlot_(0), step_(0), baseReady_(false), baseOwn_(0), nOwnTabs_(0),
-          bOwner_(0), ok_(true), lastIsolatedSlot_(0) {
+          bOwner_(0), ok_(true), lastIsolatedSlot_(0), single_(single), startTick_(0),
+          prepDone_(false), prepRecruited_(false), prepTries_(0), prepMoves_(0) {
         btab_[0] = 0; btab_[1] = 0;
+        xTab_[0] = 0; xTab_[1] = 0;
+        yTab_[0] = 0; yTab_[1] = 0;
+        prepH_[0] = prepH_[1] = prepH_[2] = prepH_[3] = prepH_[4] = 0;
     }
 
     virtual void onStart(const ScenarioContext& ctx) {
         firstSlot_ = (GetTickCount() + LEAD_MS) / SLOT_MS + 1;
+        startTick_ = GetTickCount();
         feedOwnLiving(ctx);
+        if (single_) {
+            char s[200];
+            _snprintf(s, sizeof(s) - 1, "SCENARIO AUTHSINGLESTART who=%s rank=%u firstSlot=%lu",
+                      ctx.isHost ? "host" : "join", ctx.ownRank, firstSlot_);
+            s[sizeof(s) - 1] = '\0'; coop::logLine(s);
+            return;
+        }
         char b[200];
         _snprintf(b, sizeof(b) - 1, "SCENARIO AUTHSTART who=%s rank=%u firstSlot=%lu",
                   ctx.isHost ? "host" : "join", ctx.ownRank, firstSlot_);
@@ -3220,6 +3241,7 @@ public:
     }
 
     virtual bool onTick(const ScenarioContext& ctx) {
+        if (single_) return onTickSingle(ctx);
         if (!baseReady_) {
             if (!recordBase(ctx)) return false;
         }
@@ -3309,6 +3331,10 @@ private:
     static const unsigned long SLOT_MS = 4000;
     static const unsigned long LEAD_MS = 8000;
     static const unsigned int  OFFSETS[STEPS];
+    static const unsigned int  SINGLE_STEPS = 10;
+    static const unsigned int  OFFSETS_SINGLE[SINGLE_STEPS];
+    // 出借方补人 + 归属同步的等待上限
+    static const unsigned long BASE_TIMEOUT_MS = 120000;
 
     // 归属表接上后记基线：自己名下编队、人数；A 另外挑一个 B 的编队
     bool recordBase(const ScenarioContext& ctx) {
@@ -3471,6 +3497,294 @@ private:
         return ok;
     }
 
+    // auth_single 的基线：自己名下的编队、出借方（rank 1）每个编队里的活人数，取标签最小的
+    // 两个有活人的编队当 X、Y。三方都按同一规则挑，跨机日志才能对得上。
+    bool recordBaseSingle(const ScenarioContext& ctx) {
+        if (!ctx.ownersReady || !ctx.ownersReady()) return false;
+        unsigned int tabs[SCN_MAX_TABS][2];
+        unsigned int nt = engine::listPlayerTabs(ctx.gw, tabs, SCN_MAX_TABS);
+        if (nt == 0) return false;
+        EntityState sq[SCN_MAX_BODIES];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, SCN_MAX_BODIES);
+        if (n == 0) return false;
+        // 出借方名下每个编队里的活人数（空编队也要列出来，汇报里要写基线人数）
+        unsigned int lt[SCN_MAX_TABS][2];
+        unsigned int lb[SCN_MAX_TABS];
+        unsigned int nl = 0, known = 0;
+        nOwnTabs_ = 0;
+        for (unsigned int t = 0; t < nt; ++t) {
+            unsigned int owner = ctx.tabOwnerRank ? ctx.tabOwnerRank(tabs[t][0], tabs[t][1])
+                                                  : 0xFFFFFFFFu;
+            if (owner != 0xFFFFFFFFu) ++known;
+            if (ctx.ownTab && ctx.ownTab(tabs[t][0], tabs[t][1]) && nOwnTabs_ < SCN_MAX_TABS) {
+                ownTabs_[nOwnTabs_][0] = tabs[t][0];
+                ownTabs_[nOwnTabs_][1] = tabs[t][1];
+                ++nOwnTabs_;
+            }
+            if (owner != 1 || nl >= SCN_MAX_TABS) continue;
+            unsigned int bodies = 0;
+            for (unsigned int i = 0; i < n; ++i)
+                if (!(sq[i].bodyState & BODY_DEAD) && sq[i].hContainer == tabs[t][0] &&
+                    sq[i].hContainerSerial == tabs[t][1]) ++bodies;
+            lt[nl][0] = tabs[t][0]; lt[nl][1] = tabs[t][1]; lb[nl] = bodies; ++nl;
+        }
+        if (known == 0) return false; // 归属表还没接上
+        unsigned int nb = 0;
+        for (unsigned int k = 0; k < nl; ++k) if (lb[k] > 0) ++nb;
+        if (nb < 2) return false;     // 出借方还没补够两个有活人的编队
+        for (unsigned int k = 0; k < nl; ++k) {
+            char tb[200];
+            _snprintf(tb, sizeof(tb) - 1,
+                      "SCENARIO AUTHSINGLETAB who=%s rank=%u tab=%u,%u bodies=%u",
+                      ctx.isHost ? "host" : "join", ctx.ownRank, lt[k][0], lt[k][1], lb[k]);
+            tb[sizeof(tb) - 1] = '\0'; coop::logLine(tb);
+        }
+        // 取标签最小的两个（不排序，两轮挑最小值），三方挑法一致
+        xTab_[0] = 0; xTab_[1] = 0;
+        yTab_[0] = 0; yTab_[1] = 0;
+        for (unsigned int k = 0; k < nl; ++k) {
+            if (lb[k] == 0) continue;
+            if ((xTab_[0] | xTab_[1]) == 0 || lt[k][0] < xTab_[0] ||
+                (lt[k][0] == xTab_[0] && lt[k][1] < xTab_[1])) {
+                yTab_[0] = xTab_[0]; yTab_[1] = xTab_[1];
+                xTab_[0] = lt[k][0]; xTab_[1] = lt[k][1];
+            } else if ((yTab_[0] | yTab_[1]) == 0 || lt[k][0] < yTab_[0] ||
+                       (lt[k][0] == yTab_[0] && lt[k][1] < yTab_[1])) {
+                yTab_[0] = lt[k][0]; yTab_[1] = lt[k][1];
+            }
+        }
+        bOwner_ = (ctx.tabOwner && (xTab_[0] | xTab_[1]) != 0)
+                      ? ctx.tabOwner(xTab_[0], xTab_[1]) : 0;
+        if (!bOwner_) return false;
+        baseOwn_ = countOwnBodies(ctx, sq, n);
+        baseReady_ = true;
+        char b[260];
+        _snprintf(b, sizeof(b) - 1,
+                  "SCENARIO AUTHSINGLEBASE who=%s rank=%u own=%u lenderTabs=%u x=%u,%u "
+                  "y=%u,%u bowner=%I64u ok=1",
+                  ctx.isHost ? "host" : "join", ctx.ownRank, nOwnTabs_, nb,
+                  xTab_[0], xTab_[1], yTab_[0], yTab_[1], bOwner_);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        return true;
+    }
+
+    // auth_single 的时间表：只申请 X、同意、核对、收回、核对；申请全部、同意、核对、归还、核对。
+    bool onTickSingle(const ScenarioContext& ctx) {
+        if (!baseReady_) {
+            if (GetTickCount() - startTick_ > BASE_TIMEOUT_MS) {
+                coop::logLine("SCENARIO AUTHSINGLEFINAL who=all rank=0 ok=0 baseline timeout");
+                passed_ = false;
+                return true;
+            }
+            // 出借方补人：名下至少两个编队有活人，才能区分“申请一个”和“申请全部”
+            if (ctx.ownRank == 1 && !prepDone_ && prepSingle(ctx)) prepDone_ = true;
+            if (!recordBaseSingle(ctx)) return false;
+            if (step_ >= SINGLE_STEPS) {
+                coop::logLine("SCENARIO AUTHSINGLEFINAL who=all rank=0 ok=0 "
+                              "lender has fewer than two populated squads");
+                passed_ = false;
+                return true;
+            }
+        }
+        unsigned long slot = GetTickCount() / SLOT_MS;
+        if (ctx.ownRank == 2 && slot != lastIsolatedSlot_) {
+            bool isolated = checkIsolated(ctx);
+            if (!isolated) ok_ = false;
+            char b[160];
+            _snprintf(b, sizeof(b) - 1, "SCENARIO AUTHISOLATED rank=2 slot=%lu ok=%d",
+                      slot, isolated ? 1 : 0);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            lastIsolatedSlot_ = slot;
+        }
+        if (GetTickCount() / SLOT_MS < firstSlot_ + OFFSETS_SINGLE[step_]) return false;
+        bool ok = true;
+        switch (step_) {
+        case 0:
+            if (ctx.ownRank == 0) ok = requestSingle(ctx, xTab_, "AUTHSINGLEREQ");
+            break;
+        case 1:
+            if (ctx.ownRank == 1) ok = grantSingle(ctx, "AUTHSINGLEGRANT");
+            break;
+        case 2:
+            ok = checkSingle(ctx, 1);
+            break;
+        case 3:
+            if (ctx.ownRank == 1) {
+                if (ctx.authAction) ctx.authAction(ScenarioContext::AUTH_ACT_REVOKE, 0, 0);
+                coop::logLine("SCENARIO AUTHSINGLEREVOKE who=join rank=1");
+            }
+            break;
+        case 4:
+            ok = checkSingle(ctx, 2);
+            break;
+        case 5:
+            if (ctx.ownRank == 0) ok = requestSingle(ctx, 0, "AUTHSINGLEREQALL");
+            break;
+        case 6:
+            if (ctx.ownRank == 1) ok = grantSingle(ctx, "AUTHSINGLEGRANTALL");
+            break;
+        case 7:
+            ok = checkSingle(ctx, 5);
+            break;
+        case 8:
+            if (ctx.ownRank == 0) {
+                if (ctx.authAction) ctx.authAction(ScenarioContext::AUTH_ACT_REVOKE, 0, 0);
+                coop::logLine("SCENARIO AUTHSINGLERETURN who=host rank=0");
+            }
+            break;
+        default:
+            ok = checkSingle(ctx, 6);
+            break;
+        }
+        if (!ok) ok_ = false;
+        ++step_;
+        if (step_ == SINGLE_STEPS) {
+            char b[200];
+            _snprintf(b, sizeof(b) - 1, "SCENARIO AUTHSINGLEFINAL who=%s rank=%u ok=%d",
+                      ctx.isHost ? "host" : "join", ctx.ownRank, ok_ ? 1 : 0);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            passed_ = ok_;
+            return true;
+        }
+        return false;
+    }
+
+    // tab 为空表示不带 singleTab（申请/归还可申请的全部编队）。
+    bool requestSingle(const ScenarioContext& ctx, const unsigned int* tab, const char* tag) {
+        if (!ctx.authAction || !bOwner_ || (tab && (tab[0] | tab[1]) == 0)) return false;
+        ctx.authAction(ScenarioContext::AUTH_ACT_REQUEST, bOwner_, tab);
+        char b[220];
+        _snprintf(b, sizeof(b) - 1, "SCENARIO %s who=host rank=0 tab=%u,%u target=%I64u",
+                  tag, tab ? tab[0] : 0, tab ? tab[1] : 0, bOwner_);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        return true;
+    }
+
+    bool grantSingle(const ScenarioContext& ctx, const char* tag) {
+        int pend = ctx.authState ? ctx.authState(ScenarioContext::AUTH_PENDING_PEER) : -1;
+        if (ctx.authAction) ctx.authAction(ScenarioContext::AUTH_ACT_GRANT, 0, 0);
+        char b[200];
+        _snprintf(b, sizeof(b) - 1, "SCENARIO %s who=join rank=1 pending=%d", tag, pend);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        return pend == 1;
+    }
+
+    // 只按命令分类核对控制权：X、Y 里每个活人的分类要和本端在该阶段的期望一致。
+    bool checkSingle(const ScenarioContext& ctx, int phase) {
+        int pend   = ctx.authState ? ctx.authState(ScenarioContext::AUTH_PENDING_PEER) : -1;
+        int grant  = ctx.authState ? ctx.authState(ScenarioContext::AUTH_GRANTED_MINE) : -1;
+        int borrow = ctx.authState ? ctx.authState(ScenarioContext::AUTH_BORROWED) : -1;
+        int req    = ctx.authState ? ctx.authState(ScenarioContext::AUTH_REQUESTING) : -1;
+        bool ok = true;
+        if (ctx.ownRank == 0) {
+            ok = grant == 0 && pend == 0 && req == 0;
+            if (phase == 1) ok = ok && borrow == 1;
+            else if (phase == 5) ok = ok && borrow >= 2;
+            else ok = ok && borrow == 0;
+        } else if (ctx.ownRank == 1) {
+            ok = borrow == 0 && pend == 0 && req == 0;
+            if (phase == 1) ok = ok && grant == 1;
+            else if (phase == 5) ok = ok && grant >= 2;
+            else ok = ok && grant == 0;
+        } else {
+            ok = checkIsolated(ctx);
+        }
+        unsigned int xBad = 0, yBad = 0, xBodies = 0, yBodies = 0;
+        int xCls = -1, yCls = -1, xWant = -1, yWant = -1;
+        if (ctx.ownRank <= 1) {
+            int wantX = 2, wantY = 2;
+            if (ctx.ownRank == 0) {
+                if (phase == 1 || phase == 5) wantX = 1;
+                if (phase == 5) wantY = 1;
+            } else {
+                if (phase == 2 || phase == 6) wantX = 1;
+                if (phase == 1 || phase == 2 || phase == 6) wantY = 1;
+            }
+            xWant = wantX; yWant = wantY;
+            EntityState sq[SCN_MAX_BODIES];
+            unsigned int n = engine::captureSquad(ctx.gw, false, sq, SCN_MAX_BODIES);
+            for (unsigned int i = 0; i < n; ++i) {
+                if (sq[i].bodyState & BODY_DEAD) continue;
+                bool isX = sq[i].hContainer == xTab_[0] && sq[i].hContainerSerial == xTab_[1];
+                bool isY = sq[i].hContainer == yTab_[0] && sq[i].hContainerSerial == yTab_[1];
+                if (!isX && !isY) continue;
+                unsigned int h[5];
+                handFromEntity(sq[i], h);
+                int cls = ctx.orderClass ? ctx.orderClass(h) : -1;
+                if (isX) { ++xBodies; if (xCls < 0) xCls = cls; if (cls != wantX) ++xBad; }
+                if (isY) { ++yBodies; if (yCls < 0) yCls = cls; if (cls != wantY) ++yBad; }
+            }
+            if (xBodies == 0) ++xBad;
+            if (yBodies == 0) ++yBad;
+            ok = ok && xBad == 0 && yBad == 0;
+        }
+        char b[320];
+        _snprintf(b, sizeof(b) - 1,
+                  "SCENARIO AUTHSINGLECHK who=%s rank=%u phase=%d pend=%d grant=%d borrow=%d "
+                  "req=%d x=%u,%u xBodies=%u xCls=%d xWant=%d xBad=%u "
+                  "y=%u,%u yBodies=%u yCls=%d yWant=%d yBad=%u ok=%d",
+                  ctx.isHost ? "host" : "join", ctx.ownRank, phase, pend, grant, borrow, req,
+                  xTab_[0], xTab_[1], xBodies, xCls, xWant, xBad,
+                  yTab_[0], yTab_[1], yBodies, yCls, yWant, yBad, ok ? 1 : 0);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        return ok;
+    }
+
+    // 出借方补人：名下不足两个有活人的编队时，先招附近的原版 NPC（没有就运行时生成），
+    // 新人落在同一个编队或未登记的临时编队时，再把它移进另一个空的出借方编队。
+    bool prepSingle(const ScenarioContext& ctx) {
+        EntityState sq[SCN_MAX_BODIES];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, SCN_MAX_BODIES);
+        unsigned int tabs[SCN_MAX_TABS][2];
+        unsigned int nt = engine::listPlayerTabs(ctx.gw, tabs, SCN_MAX_TABS);
+        unsigned int populated = 0;
+        unsigned int empty[2] = { 0, 0 };
+        for (unsigned int t = 0; t < nt; ++t) {
+            if (!ctx.tabOwnerRank || ctx.tabOwnerRank(tabs[t][0], tabs[t][1]) != 1) continue;
+            unsigned int bodies = 0;
+            for (unsigned int i = 0; i < n; ++i)
+                if (!(sq[i].bodyState & BODY_DEAD) && sq[i].hContainer == tabs[t][0] &&
+                    sq[i].hContainerSerial == tabs[t][1]) ++bodies;
+            if (bodies > 0) ++populated;
+            else if ((empty[0] | empty[1]) == 0) { empty[0] = tabs[t][0]; empty[1] = tabs[t][1]; }
+        }
+        if (populated >= 2) return true;
+        if (!prepRecruited_) {
+            if (prepTries_ >= 3) return false;
+            ++prepTries_;
+            unsigned int hb[5] = { 0 }, ha[5] = { 0 };
+            int res = engine::probeRecruit(ctx.gw, false, hb, ha, 400.0f);
+            int leg = 0;
+            if (res != 1) {
+                res = engine::probeRecruit(ctx.gw, true, hb, ha, 60.0f);
+                leg = 1;
+            }
+            char b[240];
+            _snprintf(b, sizeof(b) - 1,
+                      "SCENARIO AUTHSINGLEPREP who=join rank=1 step=recruit leg=%d res=%d "
+                      "after=%u,%u,%u,%u,%u",
+                      leg, res, ha[0], ha[1], ha[2], ha[3], ha[4]);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            if (res != 1) return false;
+            prepRecruited_ = true;
+            for (unsigned int k = 0; k < 5; ++k) prepH_[k] = ha[k];
+            return false;
+        }
+        if ((empty[0] | empty[1]) == 0 || prepMoves_ >= 3) return false;
+        Character* c = engine::resolveCharByHand(prepH_[3], prepH_[4], prepH_[0],
+                                                 prepH_[1], prepH_[2]);
+        if (!c) return false;
+        ++prepMoves_;
+        unsigned int target[5] = { 0, empty[0], empty[1], 0, 0 };
+        bool moved = engine::joinPlayerSquadAt(ctx.gw, c, target);
+        char b[200];
+        _snprintf(b, sizeof(b) - 1,
+                  "SCENARIO AUTHSINGLEPREP who=join rank=1 step=move tab=%u,%u moved=%d",
+                  empty[0], empty[1], moved ? 1 : 0);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        return false;
+    }
+
     unsigned long  firstSlot_;
     unsigned int   step_;
     bool           baseReady_;
@@ -3481,11 +3795,24 @@ private:
     coop::u64      bOwner_;
     bool           ok_;
     unsigned long  lastIsolatedSlot_;
+    bool           single_;
+    unsigned int   xTab_[2];
+    unsigned int   yTab_[2];
+    unsigned long  startTick_;
+    bool           prepDone_;
+    bool           prepRecruited_;
+    unsigned int   prepTries_;
+    unsigned int   prepMoves_;
+    unsigned int   prepH_[5];
 };
 
 // 第 0～13 步所在的整点（相对 firstSlot_）。第 9 步距第 8 步的申请 24 秒，越过 20 秒超时。
 const unsigned int AuthIsolatedScenario::OFFSETS[AuthIsolatedScenario::STEPS] =
     { 2, 3, 4, 5, 6, 7, 8, 9, 11, 17, 18, 19, 20, 21 };
+
+// auth_single 的 10 步：申请 X / 同意 / 核对 / 收回 / 核对 / 申请全部 / 同意 / 核对 / 归还 / 核对。
+const unsigned int AuthIsolatedScenario::OFFSETS_SINGLE[AuthIsolatedScenario::SINGLE_STEPS] =
+    { 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
 
 Scenario* makeProbeScenario(const std::string& name) {
     if (name == "spike")        return new SpikeScenario();
@@ -3511,6 +3838,7 @@ Scenario* makeProbeScenario(const std::string& name) {
     if (name == "offline_lock")  return new OfflineLockScenario();
     if (name == "offline_lock_back") return new OfflineLockBackScenario();
     if (name == "auth_isolated") return new AuthIsolatedScenario();
+    if (name == "auth_single")   return new AuthIsolatedScenario(/*single=*/true);
     return 0;
 }
 

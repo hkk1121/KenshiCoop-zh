@@ -6,7 +6,7 @@ import re
 import sys
 
 scenario, directory = sys.argv[1:]
-if scenario not in ("recruit_owner", "offline_lock", "auth_isolated"):
+if scenario not in ("recruit_owner", "offline_lock", "auth_isolated", "auth_single"):
     sys.exit("Unknown scenario: " + scenario)
 names = ("test1_host.log", "test2_join.log", "test3_join.log")
 if scenario == "offline_lock":
@@ -100,6 +100,32 @@ if scenario == "auth_isolated":
     controls = re.findall(r"SCENARIO AUTHCONTROL who=host phase=(\d+) .*?classBad=(\d+) ok=(\d)", logs[names[0]])
     if controls != [(str(phase), "0", "1") for phase in range(1, 7)]:
         errors.append("host command permissions were not verified for all authorization phases")
+    print("third-party isolation samples=" + str(len(samples)))
+
+if scenario == "auth_single":
+    samples = re.findall(r"SCENARIO AUTHISOLATED rank=2 slot=(\d+) ok=(\d)", logs[names[2]])
+    slots = [int(slot) for slot, _ in samples]
+    starts = re.findall(r"SCENARIO AUTHSINGLESTART who=join rank=2 firstSlot=(\d+)", logs[names[2]])
+    if (len(slots) < 2 or any(ok != "1" for _, ok in samples)
+            or any(b != a + 1 for a, b in zip(slots, slots[1:]))):
+        errors.append("third-party isolation samples failed or skipped clock slots")
+    if len(starts) != 1 or not set(range(int(starts[0]), int(starts[0]) + 12)).issubset(slots):
+        errors.append("third-party isolation samples do not cover the complete authorization timeline")
+    # 三方必须挑到同一对出借方编队 X、Y
+    bases = {}
+    for name, log in logs.items():
+        found = re.findall(r"SCENARIO AUTHSINGLEBASE .*?x=(\d+,\d+) y=(\d+,\d+) bowner=(\d+) ok=(\d)", log)
+        if len(found) != 1 or found[0][3] != "1":
+            errors.append(name + ": missing lender squad baseline")
+        else:
+            bases[name] = found[0][:3]
+    if len(bases) != 3 or len(set(bases.values())) != 1:
+        errors.append("lender squad selection differs between clients")
+    for name in names:
+        checks = re.findall(r"SCENARIO AUTHSINGLECHK .*?phase=(\d+) .*?xBad=(\d+) .*?yBad=(\d+) "
+                            r"ok=(\d)", logs[name])
+        if checks != [(str(phase), "0", "0", "1") for phase in (1, 2, 5, 6)]:
+            errors.append(name + ": authorization control checks failed")
     print("third-party isolation samples=" + str(len(samples)))
 
 for error in errors:
