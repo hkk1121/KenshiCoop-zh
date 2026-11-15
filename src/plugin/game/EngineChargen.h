@@ -20,11 +20,13 @@ bool startPosition(GameWorld* gw, const std::string& startSid, float out[3]);
 // 主机：生成开局全部编队并完成开局科技；返回新编队标签、第一个角色的句柄和开局资金
 bool createStartSquads(GameWorld* gw, const std::string& startSid, const float pos[3],
                        std::vector<std::pair<unsigned int, unsigned int> >& tabs, unsigned int first[5], int* money);
-// 申请人：把这些编队里可捏的角色交给原版捏人界面
+// 申请人：把这些编队里可捏的角色交给原版捏人界面；startSid 为空表示中途修改已有角色
 bool beginStartEditing(GameWorld* gw, const std::vector<std::pair<unsigned int, unsigned int> >& tabs, const std::string& startSid);
 int pollCharacterCreation(GameWorld* gw, std::vector<StartAppearance>& out);
 bool cancelCharacterCreation(bool worldAlive);
 bool characterEditing();
+// 中途编辑确认后由调用方做归属/借用复检；不接受时用它把角色恢复成打开前的样子
+bool restoreCharacterEdit(GameWorld* gw);
 unsigned int playerTabSize(GameWorld* gw, unsigned int container, unsigned int serial);
 bool applyCharacterDraft(GameWorld* gw, Character* c, const CharacterDraft& draft);
 } }

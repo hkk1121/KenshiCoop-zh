@@ -24,6 +24,9 @@ unsigned int editCount = 0;
 std::string editStart;
 bool confirming = false;
 int editResult = 0;
+// 中途编辑打开前各角色的外观草稿，放弃/复检失败时用来恢复
+CharacterDraft midgameSaved[EDIT_MAX];
+unsigned int midgameSavedCount = 0;
 float previousSpeed = 1.0f;
 bool previousPause = false;
 // 打开后还要轮流显示几次角色（见 stepEditorCycle）
@@ -33,6 +36,7 @@ typedef void (__fastcall* ConfirmFn)(CharacterEditWindow*, MyGUI::Widget*);
 typedef void (__fastcall* CloseFn)(ForgottenGUI*);
 ConfirmFn confirmOriginal = 0;
 CloseFn closeOriginal = 0;
+bool captureCharacterDraft(Character* c, const std::string& startSid, CharacterDraft& out);
 
 void __fastcall confirmHook(CharacterEditWindow* self, MyGUI::Widget* sender) {
     bool ours = self == editor && editCount != 0;
@@ -58,13 +62,13 @@ Character* createBody(GameWorld* gw, GameData* data, const float* at) {
         return body ? static_cast<Character*>(body) : 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
-bool showEditor(GameWorld* gw, const lektor<Character*>* chars, const Ogre::vector<GameDataReference>::type* races) {
+bool showEditor(GameWorld* gw, const lektor<Character*>* chars, const Ogre::vector<GameDataReference>::type* races, CharacterEditMode mode) {
     __try {
         if (!::gui || ::gui->characterEditor) return false;
         typedef void (__fastcall* ShowFn)(ForgottenGUI*, const lektor<Character*>*, CharacterEditMode, const Ogre::vector<GameDataReference>::type*);
         ShowFn show = (ShowFn)KenshiLib::GetRealAddress(&ForgottenGUI::showCharacterEditor);
         if (!show) return false;
-        show(::gui, chars, EDIT_NEWGAME, races);
+        show(::gui, chars, mode, races);
         editor = ::gui->characterEditor;
         gw->userPause(true);
         return editor != 0;
@@ -281,8 +285,10 @@ bool createStartSquads(GameWorld* gw, const std::string& startSid, const float a
 
 bool beginStartEditing(GameWorld* gw, const std::vector<std::pair<unsigned int, unsigned int> >& tabs, const std::string& startSid) {
     if (editCount || !gw || !gw->player || tabs.empty() || !characterCreationHooks() || !::gui || ::gui->characterEditor) return false;
-    GameData* start = findItemTemplateImpl(gw, startSid.c_str(), NEW_GAME_STARTOFF);
-    if (!start) return false;
+    bool midgame = startSid.empty();
+    GameData* start = midgame ? 0 : findItemTemplateImpl(gw, startSid.c_str(), NEW_GAME_STARTOFF);
+    if (!midgame && !start) return false;
+    midgameSavedCount = 0;
     std::vector<Character*> chars;
     const lektor<Character*>& all = gw->player->playerCharacters;
     for (unsigned int i = 0; i < all.size() && chars.size() < EDIT_MAX; ++i) {
@@ -294,6 +300,15 @@ bool beginStartEditing(GameWorld* gw, const std::vector<std::pair<unsigned int, 
         chars.push_back(all[i]);
     }
     if (chars.empty()) return false;
+    // 中途编辑会直接改活角色：先记下打开前的外观，放弃时原样套回去
+    if (midgame) for (size_t i = 0; i < chars.size(); ++i) {
+        if (!captureCharacterDraft(chars[i], coop::CHARACTER_DRAFT_MIDGAME, midgameSaved[i])) {
+            midgameSavedCount = 0;
+            coop::logErrLine("[chargen] midgame edit could not snapshot character appearance");
+            return false;
+        }
+        ++midgameSavedCount;
+    }
     previousSpeed = g_speedIntentSeeded ? g_speedIntentMult : 1.0f;
     previousPause = g_speedIntentSeeded ? g_speedIntentPaused : false;
     // showCharacterEditor 按值接收 lektor，返回前会释放 stuff（MSVCR100 free），所以必须放在 CRT 堆上交给它
@@ -309,11 +324,15 @@ bool beginStartEditing(GameWorld* gw, const std::vector<std::pair<unsigned int, 
         if (data) data->bdata["from file"] = true;
     }
     cameraFocusOn(gw, chars[0]);
-    const Ogre::vector<GameDataReference>::type* races = start->getReferenceListIfExists("force race");
-    if (!showEditor(gw, &list, races && !races->empty() ? races : 0)) { cancelCharacterCreation(true); return false; }
-    cycleLeft = editCount > 1 ? editCount : 0; cycleTick = GetTickCount();
+    const Ogre::vector<GameDataReference>::type* races = midgame ? 0 : start->getReferenceListIfExists("force race");
+    if (!showEditor(gw, &list, races && !races->empty() ? races : 0, midgame ? EDIT_MIDGAME : EDIT_NEWGAME)) {
+        midgameSavedCount = 0; cancelCharacterCreation(true); return false;
+    }
+    // 中途编辑不用轮流显示角色建模型，否则会把玩家正在改的角色切走
+    cycleLeft = !midgame && editCount > 1 ? editCount : 0; cycleTick = GetTickCount();
     char b[160];
-    _snprintf(b, sizeof(b) - 1, "[chargen] native NEWGAME editor opened for %u starting characters", editCount);
+    _snprintf(b, sizeof(b) - 1, midgame ? "[chargen] native MIDGAME editor opened for %u characters"
+                                        : "[chargen] native NEWGAME editor opened for %u starting characters", editCount);
     b[sizeof(b) - 1] = '\0'; coop::logLine(b);
     return true;
 }
@@ -328,39 +347,12 @@ int pollCharacterCreation(GameWorld* gw, std::vector<StartAppearance>& out) {
     int result = editResult;
     for (unsigned int i = 0; result > 0 && i < editCount; ++i) {
         Character* c = resolveCharByHand(editHands[i][3], editHands[i][4], editHands[i][0], editHands[i][1], editHands[i][2]);
-        GameDataCopyStandalone* data = appearanceOf(c);
-        if (!data) continue;
         StartAppearance a;
         memcpy(a.hand, editHands[i], sizeof(a.hand));
-        CharacterDraft& draft = a.draft;
-        draft.startSid = editStart;
-        draft.templateSid = c->data ? c->data->stringID : editStart;
-        draft.name = c->getName();
-        // 保留原生外观的八类值；不复制模板属性、装备或资金。
-        #define CAPTURE_APPEARANCE(MAP, KIND, BODY) \
-        for (size_t unused = 0; unused < 1; ++unused) { \
-            for (auto it = data->MAP.begin(); it != data->MAP.end(); ++it) { \
-                AppearanceValue value; value.kind = KIND; value.key = it->first; BODY; draft.values.push_back(value); \
-            } \
-        }
-        CAPTURE_APPEARANCE(bdata, AV_BOOL, u8 b = it->second ? 1 : 0; draftAppend(value.bytes, &b, 1));
-        CAPTURE_APPEARANCE(idata, AV_INT, draftAppend(value.bytes, &it->second, 4));
-        CAPTURE_APPEARANCE(fdata, AV_FLOAT, draftAppend(value.bytes, &it->second, 4));
-        CAPTURE_APPEARANCE(sdata, AV_STRING, draftAppend(value.bytes, it->second.data(), (unsigned int)it->second.size()));
-        CAPTURE_APPEARANCE(filesdata, AV_FILE, draftAppend(value.bytes, it->second.data(), (unsigned int)it->second.size()));
-        CAPTURE_APPEARANCE(vecdata, AV_VECTOR, draftAppend(value.bytes, &it->second.x, 12));
-        CAPTURE_APPEARANCE(quatdata, AV_QUATERNION, draftAppend(value.bytes, &it->second.w, 16));
-        #undef CAPTURE_APPEARANCE
-        for (auto it = data->objectReferences.begin(); it != data->objectReferences.end(); ++it) {
-            AppearanceValue v; v.kind = AV_REFS; v.key = it->first;
-            u16 count = (u16)it->second.size(); draftAppend(v.bytes, &count, 2);
-            for (size_t j = 0; j < it->second.size(); ++j) {
-                draftString(v.bytes, it->second[j].sid); draftAppend(v.bytes, it->second[j].values.value, 12);
-            }
-            draft.values.push_back(v);
-        }
+        // 中途编辑用固定标记，不对应任何开局
+        if (!captureCharacterDraft(c, editStart.empty() ? std::string(coop::CHARACTER_DRAFT_MIDGAME) : editStart, a.draft)) continue;
         std::vector<u8> encoded;
-        if (encodeCharacterDraft(draft, encoded)) out.push_back(a);
+        if (encodeCharacterDraft(a.draft, encoded)) out.push_back(a);
     }
     if (result > 0 && out.empty()) result = -2;
     cancelCharacterCreation(true);
@@ -375,7 +367,17 @@ bool cancelCharacterCreation(bool worldAlive) {
             GameDataCopyStandalone* data = appearanceOf(resolveCharByHand(editHands[i][3], editHands[i][4], editHands[i][0], editHands[i][1], editHands[i][2]));
             if (data) data->bdata.erase("from file");
         }
+        // 中途编辑没确认（界面里取消、会话变化）时，把角色恢复成打开前的样子
+        if (editStart.empty() && editResult <= 0 && midgameSavedCount) {
+            for (unsigned int i = 0; i < midgameSavedCount; ++i) {
+                Character* c = resolveCharByHand(editHands[i][3], editHands[i][4], editHands[i][0], editHands[i][1], editHands[i][2]);
+                if (c) applyCharacterDraft(editWorld, c, midgameSaved[i]);
+            }
+            midgameSavedCount = 0;
+        }
     }
+    // 世界已销毁或这次编辑已放弃时快照没用了；中途编辑确认过的先留着给调用方复检
+    if (!worldAlive || editResult <= 0) midgameSavedCount = 0;
     editor = 0; editWorld = 0; editResult = 0; confirming = false; editCount = 0; editStart.clear(); cycleLeft = 0;
     return true;
 }
@@ -398,8 +400,10 @@ unsigned int playerTabSize(GameWorld* gw, unsigned int container, unsigned int s
 
 bool applyCharacterDraft(GameWorld* gw, Character* c, const CharacterDraft& draft) {
     if (!gw || !c || !validCharacterDraft(draft) || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, draft.name.data(), (int)draft.name.size(), 0, 0)) return false;
-    GameData* start = findItemTemplateImpl(gw, draft.startSid.c_str(), NEW_GAME_STARTOFF);
-    if (!start) { coop::logErrLine("[chargen] draft start is not a loaded game start"); return false; }
+    // 中途编辑的草稿用标记代替开局 SID：不查开局，也不按开局的 force race 过滤
+    bool midgame = draft.startSid == coop::CHARACTER_DRAFT_MIDGAME;
+    GameData* start = midgame ? 0 : findItemTemplateImpl(gw, draft.startSid.c_str(), NEW_GAME_STARTOFF);
+    if (!midgame && !start) { coop::logErrLine("[chargen] draft start is not a loaded game start"); return false; }
     GameDataCopyStandalone* data = new GameDataCopyStandalone();
     data->initialise(CHARACTER_APPEARANCE, false);
     for (size_t i = 0; i < draft.values.size(); ++i) {
@@ -422,18 +426,31 @@ bool applyCharacterDraft(GameWorld* gw, Character* c, const CharacterDraft& draf
         }
     }
     GameData* race = gw->gamedata.getData(data->getFromList("race", 0), RACE);
-    const Ogre::vector<GameDataReference>::type* limits = start->getReferenceListIfExists("force race");
     bool validRace = race != 0;
-    if (limits && !limits->empty()) {
-        validRace = false;
-        for (size_t i = 0; race && i < limits->size(); ++i) if ((*limits)[i].sid == race->stringID) validRace = true;
-    }
-    if (validRace) {
-        validRace = playableRace(race);
+    if (midgame) {
+        // 中途编辑界面不能换种族：草稿种族必须和角色当前种族一致
+        GameData* current = raceDataOf(c);
+        validRace = validRace && current && race == current;
         AppearanceManager* manager = AppearanceManager::getInstance();
         if (validRace && manager) manager->cleanValidateAppearanceData(data);
+    } else {
+        const Ogre::vector<GameDataReference>::type* limits = start->getReferenceListIfExists("force race");
+        if (limits && !limits->empty()) {
+            validRace = false;
+            for (size_t i = 0; race && i < limits->size(); ++i) if ((*limits)[i].sid == race->stringID) validRace = true;
+        }
+        if (validRace) {
+            validRace = playableRace(race);
+            AppearanceManager* manager = AppearanceManager::getInstance();
+            if (validRace && manager) manager->cleanValidateAppearanceData(data);
+        }
     }
-    if (!validRace) { delete data; coop::logErrLine("[chargen] draft race is not playable or violates game-start filter"); return false; }
+    if (!validRace) {
+        delete data;
+        coop::logErrLine(midgame ? "[chargen] midgame draft race differs from the character"
+                                 : "[chargen] draft race is not playable or violates game-start filter");
+        return false;
+    }
     // 原地改写角色现有的外观数据再原样交回：换成新对象会释放旧的，而已挂上的头发等附件仍指着旧对象，
     // 异步建模回调（setupHairMaterial）读它就崩。同一指针交回时引擎不释放，只按新值重算种族、发型等。
     GameDataCopyStandalone* current = appearanceOf(c);
@@ -446,5 +463,59 @@ bool applyCharacterDraft(GameWorld* gw, Character* c, const CharacterDraft& draf
     bool applied = current && setDraftAppearance(c, current, race, &draft.name);
     if (!applied) coop::logErrLine("[chargen] native appearance apply failed");
     return applied;
+}
+
+namespace {
+// 读出一个角色当前的名字和外观，作为草稿（startSid 由调用方给：开局 SID 或中途编辑标记）
+bool captureCharacterDraft(Character* c, const std::string& startSid, CharacterDraft& draft) {
+    GameDataCopyStandalone* data = appearanceOf(c);
+    if (!data) return false;
+    draft = CharacterDraft();
+    draft.startSid = startSid;
+    draft.templateSid = c->data ? c->data->stringID : startSid;
+    draft.name = c->getName();
+    // 名字上限 63 字节：按 UTF-8 边界截断，别把汉字切成半个
+    if (draft.name.size() > 63) {
+        size_t n = 63;
+        while (n && ((unsigned char)draft.name[n] & 0xC0) == 0x80) --n;
+        draft.name.resize(n);
+    }
+    // 保留原生外观的八类值；不复制模板属性、装备或资金。
+    #define CAPTURE_APPEARANCE(MAP, KIND, BODY) \
+    for (size_t unused = 0; unused < 1; ++unused) { \
+        for (auto it = data->MAP.begin(); it != data->MAP.end(); ++it) { \
+            AppearanceValue value; value.kind = KIND; value.key = it->first; BODY; draft.values.push_back(value); \
+        } \
+    }
+    CAPTURE_APPEARANCE(bdata, AV_BOOL, u8 b = it->second ? 1 : 0; draftAppend(value.bytes, &b, 1));
+    CAPTURE_APPEARANCE(idata, AV_INT, draftAppend(value.bytes, &it->second, 4));
+    CAPTURE_APPEARANCE(fdata, AV_FLOAT, draftAppend(value.bytes, &it->second, 4));
+    CAPTURE_APPEARANCE(sdata, AV_STRING, draftAppend(value.bytes, it->second.data(), (unsigned int)it->second.size()));
+    CAPTURE_APPEARANCE(filesdata, AV_FILE, draftAppend(value.bytes, it->second.data(), (unsigned int)it->second.size()));
+    CAPTURE_APPEARANCE(vecdata, AV_VECTOR, draftAppend(value.bytes, &it->second.x, 12));
+    CAPTURE_APPEARANCE(quatdata, AV_QUATERNION, draftAppend(value.bytes, &it->second.w, 16));
+    #undef CAPTURE_APPEARANCE
+    for (auto it = data->objectReferences.begin(); it != data->objectReferences.end(); ++it) {
+        AppearanceValue v; v.kind = AV_REFS; v.key = it->first;
+        u16 count = (u16)it->second.size(); draftAppend(v.bytes, &count, 2);
+        for (size_t j = 0; j < it->second.size(); ++j) {
+            draftString(v.bytes, it->second[j].sid); draftAppend(v.bytes, it->second[j].values.value, 12);
+        }
+        draft.values.push_back(v);
+    }
+    return true;
+}
+}
+
+bool restoreCharacterEdit(GameWorld* gw) {
+    if (!gw || !midgameSavedCount) return false;
+    bool restored = true;
+    for (unsigned int i = 0; i < midgameSavedCount; ++i) {
+        Character* c = resolveCharByHand(editHands[i][3], editHands[i][4], editHands[i][0], editHands[i][1], editHands[i][2]);
+        if (!c || !applyCharacterDraft(gw, c, midgameSaved[i])) restored = false;
+    }
+    midgameSavedCount = 0;
+    if (!restored) coop::logErrLine("[chargen] midgame edit could not be fully restored");
+    return restored;
 }
 } }

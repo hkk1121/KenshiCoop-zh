@@ -1,4 +1,4 @@
-#ifndef KENSHICOOP_CHARACTER_CREATION_H
+﻿#ifndef KENSHICOOP_CHARACTER_CREATION_H
 #define KENSHICOOP_CHARACTER_CREATION_H
 
 #include "Wire.h"
@@ -21,6 +21,8 @@ struct CharacterDraft {
     std::string startSid, templateSid, name;
     std::vector<AppearanceValue> values;
 };
+// 中途修改已有角色（F2）的草稿用这个固定 startSid 标记，不对应任何开局
+const char CHARACTER_DRAFT_MIDGAME[] = "coop:midgame";
 
 inline void draftAppend(std::vector<u8>& out, const void* p, unsigned int n) {
     const u8* first = static_cast<const u8*>(p);
