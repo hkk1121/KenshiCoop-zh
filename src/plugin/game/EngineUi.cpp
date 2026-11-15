@@ -300,10 +300,12 @@ DataPanelLine*          g_authLine     = 0; // 授权状态行
 CoopCharacterFn g_characterFn = 0;
 DataPanelLine_Button* g_characterTemplateBtn = 0;
 DataPanelLine_Button* g_characterCreateBtn = 0;
+DataPanelLine_Button* g_characterEditBtn = 0;
 std::string g_lastCharacterUi;
 bool g_lastCharacterEditing = false;
 void onCharacterTemplateBtn(DataPanelLine*);
 void onCharacterCreateBtn(DataPanelLine*);
+void onCharacterEditBtn(DataPanelLine*);
 CoopAuthFn              g_authFn       = 0;
 DataPanelLine_Button*   g_scanBtn      = 0; // JOIN+UDP: scan tailnet / next found host
 DataPanelLine*          g_debugLine    = 0; // white connection-status debug row
@@ -561,6 +563,7 @@ struct PanelStrings {
     const std::string *authYesCap, *authNoCap, *authRevokeCap;
     const std::string *authReqKey, *authYesKey, *authNoKey, *authRevokeKey;
     const std::string *characterTemplateKey, *characterTemplateCap, *characterCreateKey, *characterCreateCap;
+    const std::string *characterEditKey, *characterEditCap;
     const std::string *characterStatusKey, *characterStatus;
     int showAuthReq, showAuthYes, showAuthNo, showAuthRevoke; // 1 = 该按钮行要出现
     const std::string *empty;
@@ -626,6 +629,7 @@ void panelBuildSeh(DatapanelGUI* p, const PanelStrings* s) {
         if (s->showAuthRevoke) g_authRevokeBtn = p->setLineButton(*s->authRevokeKey, *s->authRevokeCap, 0);
         g_characterTemplateBtn = p->setLineButton(*s->characterTemplateKey, *s->characterTemplateCap, 0);
         g_characterCreateBtn = p->setLineButton(*s->characterCreateKey, *s->characterCreateCap, 0);
+        g_characterEditBtn = p->setLineButton(*s->characterEditKey, *s->characterEditCap, 0);
         p->setLine(*s->characterStatusKey, *s->characterStatus, *s->empty, 0, false, true);
         p->_NV_update();
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -1220,6 +1224,8 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         if (st->characterTemplate) characterTemplateCap += st->characterTemplate;
         std::string characterCreateCap = st->editingCharacter ? coop::tr("Cancel character creation") :
             st->canCreateCharacter ? coop::tr("Start the selected game start") : coop::tr("Start the selected game start (unavailable)");
+        std::string characterEditKey = "charedit";
+        std::string characterEditCap = st->editingCharacter ? coop::tr("Cancel character edit") : coop::tr("Modify selected character");
         std::string characterStatusKey = coop::tr("Character creation");
         std::string characterStatus = st->characterStatus ? st->characterStatus : "";
         std::string roomKey = coop::tr("Room info");
@@ -1243,6 +1249,7 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         ps.roomKey = roomDetail.empty() ? 0 : &roomKey; ps.roomVal = roomDetail.empty() ? 0 : &roomDetail;
         ps.characterTemplateKey = &characterTemplateKey; ps.characterTemplateCap = &characterTemplateCap;
         ps.characterCreateKey = &characterCreateKey; ps.characterCreateCap = &characterCreateCap;
+        ps.characterEditKey = &characterEditKey; ps.characterEditCap = &characterEditCap;
         ps.characterStatusKey = &characterStatusKey; ps.characterStatus = &characterStatus;
         ps.title = &title; ps.roleKey = &roleKey; ps.roleCap = &roleCap;
         ps.transKey = &transKey; ps.transCap = &transCap;
@@ -1299,6 +1306,7 @@ void coopPanelTick(const CoopPanelState* st, CoopConnectFn onConnect,
         if (g_clearProxyBtn)  g_clearProxyBtn->callback  = MyGUI::newDelegate(&onClearProxyBtn);
         if (g_characterTemplateBtn) g_characterTemplateBtn->callback = MyGUI::newDelegate(&onCharacterTemplateBtn);
         if (g_characterCreateBtn) g_characterCreateBtn->callback = MyGUI::newDelegate(&onCharacterCreateBtn);
+        if (g_characterEditBtn) g_characterEditBtn->callback = MyGUI::newDelegate(&onCharacterEditBtn);
         if (g_scanBtn)    g_scanBtn->callback    = MyGUI::newDelegate(&onScanBtn);
         if (g_authReqBtn)    g_authReqBtn->callback    = MyGUI::newDelegate(&onAuthReqBtn);
         if (g_authYesBtn)    g_authYesBtn->callback    = MyGUI::newDelegate(&onAuthYesBtn);
@@ -1504,6 +1512,7 @@ bool inventoryUiOpen() {
 namespace coop { namespace engine { namespace {
 void onCharacterTemplateBtn(DataPanelLine*) { if (g_characterFn) g_characterFn(0); }
 void onCharacterCreateBtn(DataPanelLine*) { if (g_characterFn) g_characterFn(1); }
+void onCharacterEditBtn(DataPanelLine*) { if (g_characterFn) g_characterFn(2); }
 } } }
 
 namespace coop { namespace engine {

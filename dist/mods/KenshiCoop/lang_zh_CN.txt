@@ -109,6 +109,17 @@ Load the host save and wait for ownership synchronization=请读取主机存档�
 No game starts found=没有可用的开局
 Wait for the current save or transfer to finish=请等待当前存档或传输完成
 
+# F2 修改已有角色
+Modify selected character=修改选中角色
+Cancel character edit=取消修改
+Character edit cancelled=已取消修改角色
+Session changed; character edit cancelled=会话已改变，已取消修改角色
+Select your own character first (squads on loan cannot be edited)=请先选中自己的角色（借用中的编队不能修改）
+Character editor could not be opened=无法打开角色编辑界面
+Edit the name and appearance, then confirm in the editor; F2 to cancel=改好名字和长相后在原生界面确认；按 F2 可取消
+Squad is on loan; this character edit was discarded=编队借用中，已放弃本次修改
+Character appearance sent to host=角色长相已发给主机
+
 # 好友房间连接提示
 No host Steam ID - paste it in the F2 panel=没有主机 Steam ID，请在 F2 面板粘贴
 Steam is unavailable - start Steam and reconnect=Steam 不可用，请启动 Steam 后重新联机
