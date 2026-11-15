@@ -54,6 +54,24 @@ if scenario == "offline_lock":
             for key in set(bodies) & set(baseline):
                 if bodies[key]["tab"] != baseline[key]["tab"]:
                     errors.append(name + ": " + stage + " body tab changed: " + str(key))
+    # 好友2 离线期间主机和好友1 向它申请编队：本地状态应为 0，日志里不能有 SEND kind=1 或 TIMEOUT
+    for name in names[:2]:
+        log = logs[name]
+        requests = re.findall(r"SCENARIO OFFLINEREQ .*?target=(\d+) req=(-?\d+)", log)
+        if len(requests) != 1 or requests[0][0] == "0" or requests[0][1] != "0":
+            errors.append(name + ": offline authorization request was not rejected locally")
+        checks = re.findall(r"SCENARIO OFFLINEREQCHK .*?stage=(\w+) req=(-?\d+) ok=(\d)", log)
+        if checks != [("next", "0", "1"), ("timeout", "0", "1")]:
+            errors.append(name + ": offline authorization state was not clear")
+        if re.search(r"\[auth\] SEND kind=1\b", log):
+            errors.append(name + ": authorization request was sent to the offline player")
+        if re.search(r"\[auth\] TIMEOUT", log):
+            errors.append(name + ": authorization request to the offline player timed out")
+        print(name + ": offline authorization checks=" + str(checks))
+    back = re.findall(r"SCENARIO OFFLINEBACKFINAL .*?pend=(-?\d+) grant=(-?\d+) borrow=(-?\d+) "
+                      r"req=(-?\d+) ok=(\d)", logs["test3_back.log"])
+    if back != [("0", "0", "0", "0", "1")]:
+        errors.append("reconnected player did not clear authorization state")
     moves = re.findall(r"SCENARIO OFFLINEBACKMOVE ([^\r\n]+)", logs["test3_back.log"])
     if len(moves) != 1:
         errors.append("expected one reconnect movement challenge")

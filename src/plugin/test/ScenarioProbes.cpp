@@ -2748,7 +2748,7 @@ public:
         : TimedScenario("offline_lock", /*evidenceMs=*/0),
           firstSlot_(0), startTick_(0), baseReady_(false), phase_(0), phaseTick_(0),
           moveAt_(0), baseOwn_(0), nPeerTabs_(0), nPeerBodies_(0), nOwnTabs_(0),
-          ok_(true) {}
+          ok_(true), peerOwner_(0), reqChk_(0) {}
 
     virtual void onStart(const ScenarioContext& ctx) {
         firstSlot_ = (GetTickCount() + LEAD_MS) / SLOT_MS + 1;
@@ -2796,6 +2796,41 @@ public:
             if (GetTickCount() - phaseTick_ < SETTLE_MS) return false;
             bool ok = checkOffline(ctx);
             if (!ok) ok_ = false;
+            // 第 4 层第 6 项后半句：好友2 离线期间主机和好友1 各向它申请编队。主人离线时
+            // 编队不可申请（squadAuthView.requestable 为假），应该什么都不发。
+            int req = -1;
+            if (ctx.authAction && peerOwner_)
+                ctx.authAction(ScenarioContext::AUTH_ACT_REQUEST, peerOwner_, 0);
+            if (ctx.authState) req = ctx.authState(ScenarioContext::AUTH_REQUESTING);
+            char rb[220];
+            _snprintf(rb, sizeof(rb) - 1, "SCENARIO OFFLINEREQ who=%s rank=%u target=%I64u req=%d",
+                      ctx.isHost ? "host" : "join", ctx.ownRank, peerOwner_, req);
+            rb[sizeof(rb) - 1] = '\0'; coop::logLine(rb);
+            if (!peerOwner_ || req != 0) ok_ = false;
+            phase_ = 7; phaseTick_ = GetTickCount(); reqChk_ = 0;
+            return false;
+        }
+        if (phase_ == 7) {
+            // 下一个整点状态仍应为 0；20 秒后（授权申请的超时窗口）也应为 0，没发出去就不该有超时
+            unsigned long el = GetTickCount() - phaseTick_;
+            if (reqChk_ == 0 && el >= SETTLE_MS) {
+                reqChk_ = 1;
+                int req = ctx.authState ? ctx.authState(ScenarioContext::AUTH_REQUESTING) : -1;
+                if (req != 0) ok_ = false;
+                char b[200];
+                _snprintf(b, sizeof(b) - 1,
+                          "SCENARIO OFFLINEREQCHK who=%s rank=%u stage=next req=%d ok=%d",
+                          ctx.isHost ? "host" : "join", ctx.ownRank, req, req == 0 ? 1 : 0);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+            if (el < TIMEOUT_WINDOW_MS) return false;
+            int req = ctx.authState ? ctx.authState(ScenarioContext::AUTH_REQUESTING) : -1;
+            if (req != 0) ok_ = false;
+            char b[200];
+            _snprintf(b, sizeof(b) - 1,
+                      "SCENARIO OFFLINEREQCHK who=%s rank=%u stage=timeout req=%d ok=%d",
+                      ctx.isHost ? "host" : "join", ctx.ownRank, req, req == 0 ? 1 : 0);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
             phase_ = 2;
             moveAt_ = (slot + 1) * SLOT_MS;
             return false;
@@ -2854,6 +2889,8 @@ private:
     static const unsigned long KEEPALIVE_MS      = 60000;
     static const unsigned long DROP_TIMEOUT_MS   = 240000;
     static const unsigned long BACK_TIMEOUT_MS   = 300000;
+    // 授权申请的超时窗口（TAB_AUTH_TIMEOUT_MS），离线申请没发出去就不该出现 TIMEOUT
+    static const unsigned long TIMEOUT_WINDOW_MS = 20000;
     static const float         MOVE_DIST;
 
     // 归属表接上、并且能看到好友2 的编队后才记基线
@@ -2905,6 +2942,8 @@ private:
             }
         }
         if (nPeerTabs_ == 0) return false; // 还没看到好友2 的编队
+        // 好友2 的稳定身份：离线期间向它申请编队时要用（掉线后归属表仍能查到）
+        peerOwner_ = ctx.tabOwner ? ctx.tabOwner(peerTabs_[0][0], peerTabs_[0][1]) : 0;
         baseOwn_ = countOwnBodies(ctx, sq, n);
         baseReady_ = true;
         char b[220];
@@ -3057,6 +3096,8 @@ private:
     unsigned int   ownTabs_[SCN_MAX_TABS][2];
     unsigned int   nOwnTabs_;
     bool           ok_;
+    coop::u64      peerOwner_;
+    unsigned int   reqChk_;
 };
 
 // 掉线期间移动自己人的距离（沿 x 方向，免得走回原来的位置看不出变化）
@@ -3161,12 +3202,20 @@ public:
         }
         unsigned int own = countOwnBodies(ctx, sq, n);
         bool online = ctx.playerOnline && ctx.playerOnline(0) == 1 && ctx.playerOnline(1) == 1;
-        bool ok = nOwnTabs_ > 0 && tabBad == 0 && readable == baseOwn_ && own == baseOwn_ && online && moveOk_;
-        char b[220];
+        // 重连后授权状态四项都应为 0（离线期间向它申请过，但应该没有发出任何申请）
+        int pend   = ctx.authState ? ctx.authState(ScenarioContext::AUTH_PENDING_PEER) : -1;
+        int grant  = ctx.authState ? ctx.authState(ScenarioContext::AUTH_GRANTED_MINE) : -1;
+        int borrow = ctx.authState ? ctx.authState(ScenarioContext::AUTH_BORROWED) : -1;
+        int req    = ctx.authState ? ctx.authState(ScenarioContext::AUTH_REQUESTING) : -1;
+        bool authOk = pend == 0 && grant == 0 && borrow == 0 && req == 0;
+        bool ok = nOwnTabs_ > 0 && tabBad == 0 && readable == baseOwn_ && own == baseOwn_ &&
+                  online && moveOk_ && authOk;
+        char b[260];
         _snprintf(b, sizeof(b) - 1,
                   "SCENARIO OFFLINEBACKFINAL who=join rank=2 tabs=%u tabBad=%u own=%u readable=%u "
-                  "online=%d ok=%d",
-                  nOwnTabs_, tabBad, own, readable, online ? 1 : 0, ok ? 1 : 0);
+                  "online=%d pend=%d grant=%d borrow=%d req=%d ok=%d",
+                  nOwnTabs_, tabBad, own, readable, online ? 1 : 0, pend, grant, borrow, req,
+                  ok ? 1 : 0);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
         passed_ = ok;
         finalTick_ = GetTickCount();
