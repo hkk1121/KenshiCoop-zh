@@ -2825,6 +2825,11 @@ public:
     bool characterRequestCurrent(const CharacterRequestHeader& h) const;
     bool createdCharacterArrived(u32 author, const unsigned int hand[5]) const;
     bool applyCreatedAppearance(GameWorld* gw, const unsigned int hand[5], const CharacterDraft& draft);
+    // 缓存里的外观被替换后，让加入方下次套用时不要因为“同一个指针已经套过”而跳过
+    void forgetCreatedAppearance(const unsigned int hand[5]) {
+        Key key; key.t = hand[0]; key.c = hand[1]; key.cs = hand[2]; key.i = hand[3]; key.s = hand[4];
+        createdAppearanceApplied_.erase(key);
+    }
 private:
     std::map<Key, Character*> createdAppearanceApplied_;
     u32 characterWorldEpoch_;
