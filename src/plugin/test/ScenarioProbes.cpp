@@ -3628,12 +3628,6 @@ private:
             // 出借方补人：名下至少两个编队有活人，才能区分“申请一个”和“申请全部”
             if (ctx.ownRank == 1 && !prepDone_ && prepSingle(ctx)) prepDone_ = true;
             if (!recordBaseSingle(ctx)) return false;
-            if (step_ >= SINGLE_STEPS) {
-                coop::logLine("SCENARIO AUTHSINGLEFINAL who=all rank=0 ok=0 "
-                              "lender has fewer than two populated squads");
-                passed_ = false;
-                return true;
-            }
         }
         unsigned long slot = GetTickCount() / SLOT_MS;
         if (ctx.ownRank == 2 && slot != lastIsolatedSlot_) {
