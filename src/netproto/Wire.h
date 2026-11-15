@@ -32,8 +32,9 @@ typedef double         f64;
 // 1006 资金按人分开（MONEY 只发给余额所属的加入者，增减量按连接认人）；F2 创建角色改为按开局生成
 // （请求只带开局 SID，加入方把捏好的外观发给主机）；
 // 1007 转移回执只由权威发送并携带源/目标角色，源端裁决未批准部分的收回数量；
+// 1008 允许中途修改已有角色的名字和外观（同一个角色可以再收到一份外观草稿）；
 // 双方须使用同一改进版，与官方 v0.51 不再互通
-const u16 PROTOCOL_VERSION = 1007;
+const u16 PROTOCOL_VERSION = 1008;
 
 // Session player cap (four-player first stage): the host + up to three joins.
 // Transport and replication are N-generic; the host enforces this policy limit
