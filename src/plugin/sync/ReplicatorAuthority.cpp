@@ -271,6 +271,33 @@ void Replicator::enforceHostAuthority(GameWorld* gw, u32 localId) {
                     hstep = dist3(pv->second.x, pv->second.y, pv->second.z,
                                   cp->second.x, cp->second.y, cp->second.z);
                 proxyDriftPrev_[it->first] = cp->second;
+                // 远铸代理的兜底纠正。铸造门槛允许到 censusRadius_*1.25（见
+                // ReplicatorSpawn 的 farOk），而两道 authority 枚举只扫到
+                // censusRadius_：落在 1.0~1.25 倍之间的代理谁都轮不到，
+                // reconcileProxy 永远等不到调用。这个遍历直接走 proxyByKey_，
+                // 是唯一还能看到它的地方，所以复用普通 NPC 的 census band
+                // （walk / 传送 / AI 冻结），不另造机制。
+                // 只在没被流式驱动、也没在战斗时纠正：驱动中的位置由流负责
+                // （drivenSeen_ 的 8 秒宽限与 wide pass 一致，避免把轮转空档
+                // 当成没人管）；战斗中瞬移会改变本地战斗判定，等打完再说。
+                if (censusParkDist_ > 0.0f && d >= censusParkDist_) {
+                    std::map<Character*, unsigned long>::iterator ds =
+                        drivenSeen_.find(it->second);
+                    bool driven =
+                        drivenChars_.find(it->second) != drivenChars_.end() ||
+                        (ds != drivenSeen_.end() && (nowD - ds->second) < 8000);
+                    engine::CombatRead cc;
+                    bool inFight = engine::readCombat(it->second, &cc) &&
+                                   (cc.inCombat || cc.modeActive);
+                    if (!driven && !inFight) {
+                        unsigned int lh[5];
+                        EntityState pst;
+                        if (engine::readHand(it->second, lh) &&
+                            engine::captureNpcByHand(gw, lh[0], lh[1], lh[2],
+                                                     lh[3], lh[4], &pst))
+                            reconcileProxy(it->second, pst, proxyKeyOf);
+                    }
+                }
                 // 偏差小的不记：每个代理每秒一行，一小时约 6 万行，绝大多数是正常跟随
                 if (d < 200.0f) continue;
                 // streamed=1 means applyTargets has a fresh sample and IS
