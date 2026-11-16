@@ -1,4 +1,4 @@
-// ScenarioNpc.cpp - world-NPC streaming + spawn scenarios (monolith split
+﻿// ScenarioNpc.cpp - world-NPC streaming + spawn scenarios (monolith split
 // from Scenario.cpp, 2026-07-12): npc_sync, craft_order, down_order,
 // death_order, spawn_probe/spawn_sync, npc_census, spawn_far. Classes are
 // TU-private (anonymous namespace); only makeNpcScenario (ScenarioSupport.h)
@@ -965,6 +965,245 @@ private:
     bool passed_;
 };
 
+// proxy_far_fix（2026-11-17）：远铸代理位置兜底（f8a5f9b + 52593d7）。
+// 加入方在 censusRadius_（默认 2000）到 1.25 倍（2500）这一圈里铸造的代理，
+// near / wide 两道 authority 枚举都看不到；修复后由 1 Hz 的 [proxy] drift
+// 遍历兜底纠正（120~400 走路、>400 传送、AI 冻结 20 秒后解除）。本场景把主机
+// 的一个运行时 NPC 停在这一圈（约 2250）上，沿圆弧移动两次：段 1 挪 250
+// （应 [census] walk，走到位后停住），段 2 不动（等冻结解除），段 3 挪 1000
+// （应 [census] park），段 4 不动（再次解冻）。加入方每秒把代理表里的每个代理
+// 打一行 SCENARIO FARFIX PROXY，逐段判定交给 verify_proxy_far_fix.py。
+class ProxyFarFixScenario : public TimedScenario {
+public:
+    ProxyFarFixScenario()
+        : TimedScenario("proxy_far_fix", 0), spawned_(false), haveAnchor_(false),
+          ax_(0), ay_(0), az_(0), haveRing_(false), ringAng_(0),
+          tx_(0), ty_(0), tz_(0), leg_(0), lastKeepMs_(0), lastLogMs_(0),
+          sawRing_(false), sawLow_(false), sawFrozen_(false), sawRelease_(false),
+          tracked_(false) {
+        for (int i = 0; i < 5; ++i) { spawnHand_[i] = 0; trackCanon_[i] = 0; }
+    }
+
+    virtual void onStart(const ScenarioContext& ctx) {
+        Character* ld = engine::leader(ctx.gw);
+        if (ld && engine::readPos(ld, &ax_, &ay_, &az_)) haveAnchor_ = true;
+        float cam[3] = { 0.0f, 0.0f, 0.0f };
+        bool haveCam = engine::cameraCenter(ctx.gw, cam);
+        // P0 尽量放在相机背后：wide pass 以队长/相机为圆心，背离相机能同时
+        // 拉开到所有锚点的距离，避免代理落进 2000 以内的正常纠正路径。
+        float dirX = 1.0f, dirZ = 0.0f;
+        if (haveAnchor_ && haveCam) {
+            float vx = ax_ - cam[0], vz = az_ - cam[2];
+            float len = (float)sqrt((double)(vx * vx + vz * vz));
+            if (len > 1.0f) { dirX = vx / len; dirZ = vz / len; }
+        }
+        float ang = (float)atan2((double)dirZ, (double)dirX);
+        if (haveAnchor_) {
+            // 16 个方向里挑第一个“区块已加载”的 2250 点。没挑到就照原方向
+            // 记一笔，主机不生成（场景判定 FAIL），按交接改用更小的 censusR。
+            for (int i = 0; i < 16; ++i) {
+                float a = ang + (float)i * 0.39269908f; // 22.5°
+                float x = ax_ + RING_R * (float)cos((double)a);
+                float z = az_ + RING_R * (float)sin((double)a);
+                if (engine::isZoneLoadedAt(ctx.gw, x, ay_, z)) {
+                    ringAng_ = a; haveRing_ = true; break;
+                }
+            }
+        }
+        if (!haveRing_) ringAng_ = ang;
+        float px = 0.0f, pz = 0.0f;
+        ringPoint(ringAng_, &px, &pz);
+        float cr = 0.0f, ar = 0.0f;
+        if (ctx.listProxies) ctx.listProxies(0, 0, &cr, &ar);
+        char b[240];
+        _snprintf(b, sizeof(b) - 1, "SCENARIO FARFIX CFG censusR=%.0f attnR=%.0f",
+                  cr, ar);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        _snprintf(b, sizeof(b) - 1,
+                  "SCENARIO FARFIX ANCHOR pos=%.1f,%.1f,%.1f cam=%.1f,%.1f,%.1f "
+                  "haveRing=%d p0=%.1f,%.1f",
+                  ax_, ay_, az_, cam[0], cam[1], cam[2], haveRing_ ? 1 : 0, px, pz);
+        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+    }
+
+    virtual bool onTick(const ScenarioContext& ctx) {
+        if (ctx.isHost) {
+            if (!spawned_ && haveRing_ && haveAnchor_ &&
+                ctx.elapsedMs >= SPAWN_AT_MS) {
+                spawned_ = true;
+                unsigned int hands[1][5];
+                unsigned int n = engine::spawnRuntimeSquad(ctx.gw, 1, hands);
+                if (n > 0) {
+                    for (int i = 0; i < 5; ++i) spawnHand_[i] = hands[0][i];
+                    float px = 0.0f, pz = 0.0f;
+                    ringPoint(ringAng_, &px, &pz);
+                    tx_ = px; ty_ = ay_; tz_ = pz;
+                    bool parked = parkAt(px, ty_, pz);
+                    char b[240];
+                    _snprintf(b, sizeof(b) - 1,
+                              "SCENARIO FARFIX SPAWN hand=%u,%u,%u,%u,%u "
+                              "pos=%.1f,%.1f,%.1f parked=%d r=%.0f",
+                              spawnHand_[0], spawnHand_[1], spawnHand_[2],
+                              spawnHand_[3], spawnHand_[4], px, ty_, pz,
+                              parked ? 1 : 0, RING_R);
+                    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                } else {
+                    coop::logLine("SCENARIO FARFIX SPAWN failed n=0");
+                }
+            }
+            // 每秒检查一次是否还停在目标点；偏了才 park，不要每帧停放。
+            if (spawned_ &&
+                (lastKeepMs_ == 0 || ctx.elapsedMs - lastKeepMs_ >= KEEP_MS)) {
+                lastKeepMs_ = ctx.elapsedMs;
+                Character* c = resolveSpawned();
+                float x = 0.0f, y = 0.0f, z = 0.0f;
+                bool have = c && engine::readPos(c, &x, &y, &z);
+                float dx = x - tx_, dz = z - tz_;
+                float dev = (float)sqrt((double)(dx * dx + dz * dz));
+                bool repark = (have && dev > KEEP_EPS) ? parkAt(tx_, ty_, tz_)
+                                                       : false;
+                char b[208];
+                _snprintf(b, sizeof(b) - 1,
+                          "SCENARIO FARFIX KEEP t=%lu pos=%.1f,%.1f,%.1f "
+                          "tgt=%.1f,%.1f dev=%.1f have=%d repark=%d",
+                          ctx.elapsedMs, x, y, z, tx_, tz_, dev,
+                          have ? 1 : 0, repark ? 1 : 0);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+            if (spawned_ && leg_ == 0 && ctx.elapsedMs >= WALK_AT_MS) {
+                leg_ = 1;
+                ringAng_ += ARC_WALK;
+                ringPoint(ringAng_, &tx_, &tz_);
+                ty_ = ay_;
+                bool parked = parkAt(tx_, ty_, tz_);
+                char b[176];
+                _snprintf(b, sizeof(b) - 1,
+                          "SCENARIO FARFIX MOVE t=%lu leg=walk pos=%.1f,%.1f,%.1f parked=%d",
+                          ctx.elapsedMs, tx_, ty_, tz_, parked ? 1 : 0);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+            if (spawned_ && leg_ == 1 && ctx.elapsedMs >= PARK_AT_MS) {
+                leg_ = 2;
+                ringAng_ += ARC_PARK;
+                ringPoint(ringAng_, &tx_, &tz_);
+                ty_ = ay_;
+                bool parked = parkAt(tx_, ty_, tz_);
+                char b[176];
+                _snprintf(b, sizeof(b) - 1,
+                          "SCENARIO FARFIX MOVE t=%lu leg=park pos=%.1f,%.1f,%.1f parked=%d",
+                          ctx.elapsedMs, tx_, ty_, tz_, parked ? 1 : 0);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+        } else if (lastLogMs_ == 0 ||
+                   ctx.elapsedMs - lastLogMs_ >= PROXY_LOG_MS) {
+            lastLogMs_ = ctx.elapsedMs;
+            ScenarioProxyInfo pi[MAX_PROXY_LOG];
+            float cr = 0.0f, ar = 0.0f;
+            int n = ctx.listProxies ? ctx.listProxies(pi, MAX_PROXY_LOG, &cr, &ar)
+                                    : 0;
+            for (int i = 0; i < n; ++i) {
+                // inband = 落在 wide pass 够不着的一侧（camd > censusR），
+                // 这正是“正常枚举纠正不到、只能靠兜底”的判据；上界不卡，
+                // 因为 mintDist 才是铸造门槛，camd 只证明 wide pass 看不到。
+                bool inband = cr > 0.0f && pi[i].camd > cr;
+                char b[384];
+                _snprintf(b, sizeof(b) - 1,
+                          "SCENARIO FARFIX PROXY canon=%u,%u,%u,%u,%u "
+                          "local=%u,%u,%u,%u,%u pos=%.1f,%.1f,%.1f "
+                          "census=%.1f,%.1f,%.1f d=%.1f d3=%.1f camd=%.1f "
+                          "inband=%d driven=%d frozen=%d dest=%d",
+                          pi[i].canon[0], pi[i].canon[1], pi[i].canon[2],
+                          pi[i].canon[3], pi[i].canon[4],
+                          pi[i].local[0], pi[i].local[1], pi[i].local[2],
+                          pi[i].local[3], pi[i].local[4],
+                          pi[i].localPos[0], pi[i].localPos[1], pi[i].localPos[2],
+                          pi[i].censusPos[0], pi[i].censusPos[1], pi[i].censusPos[2],
+                          pi[i].d, pi[i].d3, pi[i].camd, inband ? 1 : 0,
+                          pi[i].driven, pi[i].frozen, pi[i].haveDest);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                if (!inband) continue;
+                sawRing_ = true;
+                if (!tracked_) {
+                    tracked_ = true;
+                    for (int k = 0; k < 5; ++k) trackCanon_[k] = pi[i].canon[k];
+                }
+                if (!sameCanon(pi[i].canon, trackCanon_)) continue;
+                if (pi[i].d >= 0.0f && pi[i].d < LOW_DIST) sawLow_ = true;
+                if (pi[i].frozen) sawFrozen_ = true;
+                else if (sawFrozen_) sawRelease_ = true;
+            }
+        }
+        unsigned long dur = ctx.isHost ? HOST_DURATION_MS : JOIN_DURATION_MS;
+        if (ctx.elapsedMs >= dur) {
+            // 本机只判“脚本跑到了”和“代理确实被纠正过”；逐段时序和
+            // walk/park 证据由 verify_proxy_far_fix.py 跨机判。
+            passed_ = ctx.isHost
+                ? (spawned_ && leg_ >= 2)
+                : (sawRing_ && sawLow_ && sawFrozen_ && sawRelease_);
+            return true;
+        }
+        return false;
+    }
+
+private:
+    Character* resolveSpawned() const {
+        if (spawnHand_[0] == 0 && spawnHand_[1] == 0 && spawnHand_[2] == 0 &&
+            spawnHand_[3] == 0 && spawnHand_[4] == 0) return 0;
+        return engine::resolveCharByHand(spawnHand_[3], spawnHand_[4],
+                                         spawnHand_[0], spawnHand_[1],
+                                         spawnHand_[2]);
+    }
+    bool parkAt(float x, float y, float z) {
+        Character* c = resolveSpawned();
+        return c && engine::park(c, x, y, z, 0.0f);
+    }
+    void ringPoint(float ang, float* x, float* z) const {
+        *x = ax_ + RING_R * (float)cos((double)ang);
+        *z = az_ + RING_R * (float)sin((double)ang);
+    }
+    bool sameCanon(const unsigned int a[5], const unsigned int b[5]) const {
+        for (int i = 0; i < 5; ++i) if (a[i] != b[i]) return false;
+        return true;
+    }
+
+    static const unsigned long SPAWN_AT_MS      = 6000;
+    static const unsigned long WALK_AT_MS       = 40000;
+    static const unsigned long PARK_AT_MS       = 80000;
+    static const unsigned long JOIN_DURATION_MS = 128000;
+    static const unsigned long HOST_DURATION_MS = 135000;
+    static const unsigned long KEEP_MS          = 1000;
+    static const unsigned long PROXY_LOG_MS     = 1000;
+    static const unsigned int  MAX_PROXY_LOG    = 128;
+    static const float         RING_R;       // 远铸环中点的半径（1.125 倍 censusR）
+    static const float         ARC_WALK;     // 弧长 250 对应的圆心角
+    static const float         ARC_PARK;     // 弧长 1000 对应的圆心角
+    static const float         KEEP_EPS;     // 偏离目标超过这个才重新 park
+    static const float         LOW_DIST;     // 判定“偏差已收住”的线
+
+    bool          spawned_;
+    bool          haveAnchor_;
+    float         ax_, ay_, az_;
+    bool          haveRing_;
+    float         ringAng_;
+    float         tx_, ty_, tz_;
+    int           leg_;          // 0 = P0，1 = P1，2 = P2
+    unsigned long lastKeepMs_;
+    unsigned long lastLogMs_;
+    bool          sawRing_;
+    bool          sawLow_;
+    bool          sawFrozen_;
+    bool          sawRelease_;
+    bool          tracked_;
+    unsigned int  spawnHand_[5];
+    unsigned int  trackCanon_[5];
+};
+
+const float ProxyFarFixScenario::RING_R   = 2250.0f;
+const float ProxyFarFixScenario::ARC_WALK = 0.11118f;
+const float ProxyFarFixScenario::ARC_PARK = 0.44783f;
+const float ProxyFarFixScenario::KEEP_EPS = 5.0f;
+const float ProxyFarFixScenario::LOW_DIST = 120.0f;
+
 } // namespace
 
 Scenario* makeNpcScenario(const std::string& name) {
@@ -977,6 +1216,7 @@ Scenario* makeNpcScenario(const std::string& name) {
     if (name == "spawn_sync")   return new SpawnSyncScenario(/*probe=*/false);
     if (name == "npc_census")   return new NpcCensusScenario();
     if (name == "spawn_far")    return new SpawnFarScenario();
+    if (name == "proxy_far_fix") return new ProxyFarFixScenario();
     if (name == "world_parity") return new WorldParityScenario("world_parity");
     if (name == "jail_probe")   return new WorldParityScenario("jail_probe");
     if (name == "jail_soak")    return new WorldParityScenario("jail_soak");

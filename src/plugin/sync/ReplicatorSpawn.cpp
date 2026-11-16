@@ -11,6 +11,10 @@
 
 #include "ReplicatorUtil.h"
 
+#ifdef KENSHICOOP_HARNESS
+#include "../test/Scenario.h" // proxy_far_fix 的只读代理快照
+#endif
+
 namespace coop {
 
 // Destroy a bound proxy body only if we are the ones who created it (see
@@ -1348,6 +1352,74 @@ void Replicator::insertPeerMember(GameWorld* gw, u32 authorId, Character* c,
         pinnedLocal ? 1 : 0, ownIt ? 1 : 0);
     b[sizeof(b) - 1] = '\0'; coop::logLine(b);
 }
+
+#ifdef KENSHICOOP_HARNESS
+unsigned int Replicator::listProxiesForScenario(GameWorld* gw, ScenarioProxyInfo* out,
+                                                unsigned int maxOut, float* outCensusR,
+                                                float* outAttnR) const {
+    if (outCensusR) *outCensusR = censusRadius_;
+    if (outAttnR)   *outAttnR   = attentionRadius_;
+    if (!gw || !out || maxOut == 0) return 0;
+    // 兴趣锚点和 wide pass 用的是同一组（各队队长 + 相机），所以 camd 就是
+    // “那道枚举够不够得着这个代理”的直接度量。
+    float anch[24];
+    unsigned int nAnch = engine::interestAnchors(gw, anch);
+    unsigned long now = nowMs();
+    unsigned int n = 0;
+    for (std::map<Key, Character*>::const_iterator it = proxyByKey_.begin();
+         it != proxyByKey_.end() && n < maxOut; ++it) {
+        Character* c = it->second;
+        if (!c) continue;
+        ScenarioProxyInfo& o = out[n];
+        o.canon[0] = it->first.t; o.canon[1] = it->first.c;
+        o.canon[2] = it->first.cs; o.canon[3] = it->first.i;
+        o.canon[4] = it->first.s;
+        unsigned int lh[5] = { 0, 0, 0, 0, 0 };
+        bool haveLocal = engine::readHand(c, lh);
+        // readHand 是 [index,serial,type,container,containerSerial]，场景线统一
+        // 用 readObjectHand 布局 [type,container,containerSerial,index,serial]，
+        // 与主机 SCENARIO FARFIX SPAWN hand= 对齐。
+        if (haveLocal) {
+            o.local[0] = lh[2]; o.local[1] = lh[3]; o.local[2] = lh[4];
+            o.local[3] = lh[0]; o.local[4] = lh[1];
+        } else {
+            o.local[0] = 0; o.local[1] = 0; o.local[2] = 0;
+            o.local[3] = 0; o.local[4] = 0;
+        }
+        o.localPos[0] = 0.0f; o.localPos[1] = 0.0f; o.localPos[2] = 0.0f;
+        engine::readPos(c, &o.localPos[0], &o.localPos[1], &o.localPos[2]);
+        std::map<Key, CensusPos>::const_iterator cp = censusPos_.find(it->first);
+        o.haveCensus = cp != censusPos_.end() ? 1 : 0;
+        if (o.haveCensus) {
+            o.censusPos[0] = cp->second.x;
+            o.censusPos[1] = cp->second.y;
+            o.censusPos[2] = cp->second.z;
+            float ddx = o.localPos[0] - cp->second.x;
+            float ddz = o.localPos[2] - cp->second.z;
+            o.d  = (float)sqrt((double)(ddx * ddx + ddz * ddz));
+            o.d3 = dist3(o.localPos[0], o.localPos[1], o.localPos[2],
+                         cp->second.x, cp->second.y, cp->second.z);
+        } else {
+            o.censusPos[0] = 0.0f; o.censusPos[1] = 0.0f; o.censusPos[2] = 0.0f;
+            o.d = -1.0f; o.d3 = -1.0f;
+        }
+        o.camd = -1.0f;
+        for (unsigned int a = 0; a < nAnch; ++a) {
+            float d = dist3(o.localPos[0], o.localPos[1], o.localPos[2],
+                            anch[a * 3 + 0], anch[a * 3 + 1], anch[a * 3 + 2]);
+            if (o.camd < 0.0f || d < o.camd) o.camd = d;
+        }
+        std::map<Character*, unsigned long>::const_iterator ds = drivenSeen_.find(c);
+        o.driven = (drivenChars_.find(c) != drivenChars_.end() ||
+                    (ds != drivenSeen_.end() && (now - ds->second) < 8000)) ? 1 : 0;
+        o.frozen = censusFrozen_.count(it->first) ? 1 : 0;
+        std::map<Key, CensusFix>::const_iterator cf = censusFix_.find(it->first);
+        o.haveDest = (cf != censusFix_.end() && cf->second.haveDest) ? 1 : 0;
+        ++n;
+    }
+    return n;
+}
+#endif
 
 
 } // namespace coop

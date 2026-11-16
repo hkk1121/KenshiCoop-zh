@@ -35,6 +35,9 @@ class RootObject;
 
 namespace coop {
 struct CharacterDraft;
+#ifdef KENSHICOOP_HARNESS
+struct ScenarioProxyInfo; // test/Scenario.h：proxy_far_fix 的只读代理快照
+#endif
 
 class Replicator {
 public:
@@ -111,6 +114,17 @@ public:
     bool pickMintedProxyNear(GameWorld* gw, const unsigned int refHand[5],
                              unsigned int outLocal[5], unsigned int outCanon[5],
                              float* outDist) const;
+
+#ifdef KENSHICOOP_HARNESS
+    // proxy_far_fix（Harness 只读）：把 proxyByKey_ 里的每个代理连同主机 census
+    // 位置、偏差、驱动/冻结/走路目标状态列出来，并回填本端 census / attention
+    // 半径。场景层不能直接碰 Replicator，Plugin.cpp 的适配函数把它转给
+    // ScenarioContext::listProxies。d 用 parkDivergedCopy 的水平度量，d3 用
+    // [proxy] drift 的三维度量，camd 是到本端兴趣锚点的最近距离。
+    unsigned int listProxiesForScenario(GameWorld* gw, ScenarioProxyInfo* out,
+                                        unsigned int maxOut, float* outCensusR,
+                                        float* outAttnR) const;
+#endif
 
     // AI-gating probe (join side): recruit diverged NPCs into the player squad to
     // validate the "inhabit" lever (stops self-tasking + becomes drivable).

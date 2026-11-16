@@ -96,6 +96,22 @@ static bool coopScenarioPickMintedProxy(const unsigned int refHand[5],
     return g_repl.pickMintedProxyNear(g_lastGw, refHand, outLocal, outCanon, outDist);
 }
 
+#ifdef KENSHICOOP_HARNESS
+// proxy_far_fix 的代理快照（ScenarioContext::listProxies）。和上面的
+// pickMintedProxy 同样：场景层不认识 Replicator，只由这里转一手。
+static int coopScenarioListProxies(coop::ScenarioProxyInfo* out, int maxOut,
+                                   float* outCensusR, float* outAttnR) {
+    if (!g_lastGw) {
+        if (outCensusR) *outCensusR = 0.0f;
+        if (outAttnR)   *outAttnR   = 0.0f;
+        return 0;
+    }
+    unsigned int maxOutU = (maxOut > 0) ? (unsigned int)maxOut : 0;
+    return (int)g_repl.listProxiesForScenario(g_lastGw, out, maxOutU,
+                                              outCensusR, outAttnR);
+}
+#endif
+
 // SessionController (Phase 3): the mutable per-session lifecycle state that used
 // to live as ~18 loose file globals - peer presence, the gameplay-start edge,
 // the title auto-load gate, and the coordinated save/load (protocol 31/32)
@@ -1988,6 +2004,7 @@ void tickScenarioStart(GameWorld* gw) {
             pctx.orderClass = &coopScenarioOrderClass;
             pctx.authState = &coopScenarioAuthState;
             pctx.authAction = &coopScenarioAuthAction;
+            pctx.listProxies = &coopScenarioListProxies;
             g_scenario->onGameplay(pctx);
         }
         if (peerReady || fallback) {
@@ -2007,6 +2024,7 @@ void tickScenarioStart(GameWorld* gw) {
             ctx.orderClass = &coopScenarioOrderClass;
             ctx.authState = &coopScenarioAuthState;
             ctx.authAction = &coopScenarioAuthAction;
+            ctx.listProxies = &coopScenarioListProxies;
             char m[200];
             _snprintf(m, sizeof(m) - 1, "SCENARIO arm trigger=%s waitedMs=%lu",
                       peerReady ? "peer-ready" : "timeout", (unsigned long)waitedMs);
@@ -2203,6 +2221,7 @@ void tickScenarioTick(GameWorld* gw) {
         ctx.orderClass = &coopScenarioOrderClass;
         ctx.authState = &coopScenarioAuthState;
         ctx.authAction = &coopScenarioAuthAction;
+        ctx.listProxies = &coopScenarioListProxies;
         if (g_scenario->onTick(ctx)) {
             // Stage 2: the receiver emits its interpolation smoothness summary
             // alongside the verdict so the runner can assert per-frame gliding.

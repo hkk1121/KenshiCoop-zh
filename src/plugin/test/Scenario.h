@@ -17,6 +17,8 @@ class GameWorld;
 
 namespace coop {
 
+struct ScenarioProxyInfo; // proxy_far_fix 的代理快照，定义在本文件末尾
+
 struct ScenarioContext {
     GameWorld*    gw;
     bool          isHost;
@@ -77,6 +79,13 @@ struct ScenarioContext {
     // targetPlayer 为对方的稳定身份（0 = 不按人筛选）；singleTab 为 {container,
     // containerSerial}，0 = 全部可申请 / 挂起的编队。
     void        (*authAction)(int action, u64 targetPlayer, const unsigned int singleTab[2]);
+    // proxy_far_fix：逐条列出本机代理表里的代理（Harness 只读查询）。canon/local
+    // 都是 readObjectHand 布局 [type, container, containerSerial, index, serial]；
+    // canon 是主机流键，与主机 SCENARIO FARFIX SPAWN hand= 同序。outCensusR /
+    // outAttnR 回填本端配置的 census / attention 半径（0 = 未知）。返回写入条数；
+    // 适配函数缺失时一律 0。
+    int         (*listProxies)(ScenarioProxyInfo* out, int maxOut,
+                               float* outCensusR, float* outAttnR);
 };
 
 class Scenario {
@@ -103,6 +112,24 @@ public:
 
 // Build the scenario named 'name', or 0 if unknown.
 Scenario* makeScenario(const std::string& name);
+
+// proxy_far_fix 场景的只读代理快照：只包含判定要用的字段，场景不能直接碰
+// Replicator。d 是水平偏差（parkDivergedCopy 用的度量），d3 是三维偏差（[proxy]
+// drift 用的度量），camd 是代理到本机兴趣锚点（各队队长 + 相机）的最近距离 -
+// 也就是 wide pass 的扫描半径基准。haveCensus=0 时 d/d3 为 -1。
+struct ScenarioProxyInfo {
+    unsigned int canon[5];    // 主机流键（readObjectHand 布局）
+    unsigned int local[5];    // 本机手把（readObjectHand 布局）
+    float        localPos[3];
+    float        censusPos[3];
+    float        d;
+    float        d3;
+    float        camd;
+    int          haveCensus;
+    int          driven;
+    int          frozen;
+    int          haveDest;
+};
 
 } // namespace coop
 
