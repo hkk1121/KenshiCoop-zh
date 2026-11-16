@@ -734,6 +734,8 @@ void Replicator::syncSpawns(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerI
     // proxy body's ACTUAL local position, in the SCENARIO series shape (hand
     // order i,s,t,c,cs like MEMBER/RECV lines) so the spawn_sync oracle can
     // time-pair it with the host's MEMBER series per hand.
+    // 只给 Harness 场景判定用，正式版不输出（每个代理每秒 2 行，一小时约 40 万行）
+#ifdef KENSHICOOP_HARNESS
     if (!proxyByKey_.empty() && (now - spawnPosLogMs_) >= 500) {
         spawnPosLogMs_ = now;
         for (std::map<Key, Character*>::iterator it = proxyByKey_.begin();
@@ -747,6 +749,7 @@ void Replicator::syncSpawns(GameWorld* gw, Inbound& in, NetLink& net, u32 ownerI
             b[sizeof(b) - 1] = '\0'; coop::logLine(b);
         }
     }
+#endif
 }
 
 bool Replicator::pickMintedProxyNear(GameWorld* gw, const unsigned int refHand[5],

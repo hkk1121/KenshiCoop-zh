@@ -271,6 +271,8 @@ void Replicator::enforceHostAuthority(GameWorld* gw, u32 localId) {
                     hstep = dist3(pv->second.x, pv->second.y, pv->second.z,
                                   cp->second.x, cp->second.y, cp->second.z);
                 proxyDriftPrev_[it->first] = cp->second;
+                // 偏差小的不记：每个代理每秒一行，一小时约 6 万行，绝大多数是正常跟随
+                if (d < 200.0f) continue;
                 // streamed=1 means applyTargets has a fresh sample and IS
                 // driving it; the uncorrected case is the one that can run away.
                 std::map<Key, Driven>::iterator dt = targets_.find(it->first);
