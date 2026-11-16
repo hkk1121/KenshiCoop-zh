@@ -280,23 +280,24 @@ void Replicator::enforceHostAuthority(GameWorld* gw, u32 localId) {
                 // 只在没被流式驱动、也没在战斗时纠正：驱动中的位置由流负责
                 // （drivenSeen_ 的 8 秒宽限与 wide pass 一致，避免把轮转空档
                 // 当成没人管）；战斗中瞬移会改变本地战斗判定，等打完再说。
-                if (censusParkDist_ > 0.0f && d >= censusParkDist_) {
-                    std::map<Character*, unsigned long>::iterator ds =
-                        drivenSeen_.find(it->second);
-                    bool driven =
-                        drivenChars_.find(it->second) != drivenChars_.end() ||
-                        (ds != drivenSeen_.end() && (nowD - ds->second) < 8000);
-                    engine::CombatRead cc;
-                    bool inFight = engine::readCombat(it->second, &cc) &&
-                                   (cc.inCombat || cc.modeActive);
-                    if (!driven && !inFight) {
-                        unsigned int lh[5];
-                        EntityState pst;
-                        if (engine::readHand(it->second, lh) &&
-                            engine::captureNpcByHand(gw, lh[0], lh[1], lh[2],
-                                                     lh[3], lh[4], &pst))
-                            reconcileProxy(it->second, pst, proxyKeyOf);
-                    }
+                // 这里刻意不卡偏差阈值：parkDivergedCopy 自带 120 u 阈值和
+                // 0.5 倍收敛余量，但身体追平后还要再被调用一次才能清 haveDest、
+                // 解除 AI 冻结（见它的收敛分支），门槛会把这次调用挡掉。
+                std::map<Character*, unsigned long>::iterator ds =
+                    drivenSeen_.find(it->second);
+                bool driven =
+                    drivenChars_.find(it->second) != drivenChars_.end() ||
+                    (ds != drivenSeen_.end() && (nowD - ds->second) < 8000);
+                engine::CombatRead cc;
+                bool inFight = engine::readCombat(it->second, &cc) &&
+                               (cc.inCombat || cc.modeActive);
+                if (!driven && !inFight) {
+                    unsigned int lh[5];
+                    EntityState pst;
+                    if (engine::readHand(it->second, lh) &&
+                        engine::captureNpcByHand(gw, lh[0], lh[1], lh[2],
+                                                 lh[3], lh[4], &pst))
+                        reconcileProxy(it->second, pst, proxyKeyOf);
                 }
                 // 偏差小的不记：每个代理每秒一行，一小时约 6 万行，绝大多数是正常跟随
                 if (d < 200.0f) continue;
