@@ -357,7 +357,11 @@ int pollCharacterCreation(GameWorld* gw, std::vector<StartAppearance>& out) {
     if (editCount && editor) {
         // 打开后的前几帧不暂停：新窗口要先在未暂停的帧里被建出来（见 showEditor）
         if (pauseDelay) --pauseDelay;
-        else writeGameSpeed(editWorld, previousSpeed, true);
+        else {
+            // 已经暂停就不再写：每次写都会被速度钩子当成一次玩家操作，每帧刷一行 [speed] REQ
+            float mult = 0.0f; bool paused = false;
+            if (!readGameSpeed(editWorld, &mult, &paused) || !paused) writeGameSpeed(editWorld, previousSpeed, true);
+        }
     }
     if (editCount && editor && cycleLeft) stepEditorCycle();
     if (!editCount || editor || !editResult) return 0;
