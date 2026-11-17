@@ -2940,12 +2940,20 @@ static void __fastcall refreshPortraitTabs_hook(MainBarGUI* self) {
         f->activePlatoons.stuff = saved;
         f->activePlatoons.count = n;
     }
-    if (squadBarShowsSeh(squadBarCurrentSeh())) return;
     // 末尾那次头像刷新被跳过时，头像索引仍指向刚随标签销毁的头像框，updatePortraits 会照着它重绘，
-    // 所以先清掉（引擎刷新头像时同样先清再填）
+    // 所以先清掉（引擎刷新头像时同样先清再填）。
+    // 空编队没有标签：当前编队不可见或是空的，就切到第一个有成员的可见编队，否则头像栏是空的、
+    // 唯一的标签点了也不会切换。
     __try {
-        self->portraitsIndices.clear();
-        if (k) ou->player->setCurrentPlatoon(g_squadBarList[0]);
+        Platoon* cur = squadBarCurrentSeh();
+        bool curShown = squadBarShowsSeh(cur);
+        if (!curShown || cur->getCharacterCount() <= 0) {
+            Platoon* pick = (curShown || !k) ? 0 : g_squadBarList[0];
+            for (unsigned int i = 0; i < k; ++i)
+                if (g_squadBarList[i]->getCharacterCount() > 0) { pick = g_squadBarList[i]; break; }
+            if (!curShown) self->portraitsIndices.clear();
+            if (pick) ou->player->setCurrentPlatoon(pick);
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
