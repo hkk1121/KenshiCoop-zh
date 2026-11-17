@@ -985,9 +985,11 @@ void Replicator::detectAndPublishWeaponDrops(GameWorld* gw, NetLink& net, u32 ow
                     curPtrs[pe->first] = prevC.ptrs[pe->first]; // and keep the departed Item* handle(s)
                     continue;
                 }
-                // 兜底发丢弃之前先看离开背包的那一件：它已经在别的物品栏里（卖给商人、放进箱子），就不是
-                // 丢到地上，不发丢弃，否则别的机器会在主人脚下多出这件东西。拿在鼠标上的也可能读作在
-                // 物品栏里，所以先继续等，最多 WD_NEVER_LIVE_MAX_MS，期间落地照常发丢弃，超时按已离开处理。
+                // 兜底发丢弃之前先排除两种“不是丢到地上”的情况，否则别的机器会在主人脚下多出这件东西：
+                // ① 这段时间本机的钱变多了：卖给商人了（卖出的东西关掉交易窗口后会短暂读成自由物品，
+                //    所以不能只看物品自己的状态），直接按已离开处理；
+                // ② 离开的那一件在别的物品栏里（放进箱子等）。拿在鼠标上的也读作在物品栏里，所以先继续等，
+                //    最多 WD_NEVER_LIVE_MAX_MS，期间落地照常发丢弃，超时按已离开处理。
                 void* left = 0;
                 {
                     std::deque<void*>& had = prevC.ptrs[pe->first];
@@ -1000,9 +1002,12 @@ void Replicator::detectAndPublishWeaponDrops(GameWorld* gw, NetLink& net, u32 ow
                         if (!still) left = *q;
                     }
                 }
+                int wallet = -1;
+                bool sold = (walletGainMs_ && walletGainMs_ + 1000 >= prevC.retryArmMs[pe->first]) ||
+                            (poolSeen_ >= 0 && engine::readPlayerWallet(gw, &wallet) && wallet > poolSeen_);
                 bool inBag = false; float bagPos[3];
-                if (left && !engine::groundObjectLiveness(reinterpret_cast<RootObject*>(left), bagPos, &inBag) && inBag) {
-                    if (nowMs() - prevC.retryArmMs[pe->first] < WD_NEVER_LIVE_MAX_MS) {
+                if (sold || (left && !engine::groundObjectLiveness(reinterpret_cast<RootObject*>(left), bagPos, &inBag) && inBag)) {
+                    if (!sold && nowMs() - prevC.retryArmMs[pe->first] < WD_NEVER_LIVE_MAX_MS) {
                         r = 1;
                         cur[pe->first] = pe->second;
                         curPtrs[pe->first] = prevC.ptrs[pe->first];
@@ -1010,8 +1015,8 @@ void Replicator::detectAndPublishWeaponDrops(GameWorld* gw, NetLink& net, u32 ow
                     }
                     prevC.retries.erase(pe->first); prevC.retryArmMs.erase(pe->first);
                     char b[200]; _snprintf(b, sizeof(b) - 1,
-                        "[wd] decrease-absorbed hand=%u,%u,%u,%u,%u sid='%s' delta=%d (item is in another inventory; not a ground drop)",
-                        it->t, it->c, it->cs, it->i, it->s, pe->first.c_str(), delta);
+                        "[wd] decrease-absorbed hand=%u,%u,%u,%u,%u sid='%s' delta=%d sold=%d (not a ground drop)",
+                        it->t, it->c, it->cs, it->i, it->s, pe->first.c_str(), delta, sold ? 1 : 0);
                     b[sizeof(b) - 1] = '\0'; coop::logLine(b);
                     continue;
                 }

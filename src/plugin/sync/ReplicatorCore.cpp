@@ -77,7 +77,7 @@ Replicator::Replicator()
       spawnSync_(false), spawnPosLogMs_(0),
       spawnMintRadius_(0.0f), adoptRadius_(0.0f), censusAdopts_(0),
       censusScanMs_(0),
-      poolSeen_(-1),
+      poolSeen_(-1), walletGainMs_(0),
       poolSeq_(0), poolAcked_(0),
       moneySync_(true), recruitSync_(true),
       squadSync_(true), tabsSeeded_(0),

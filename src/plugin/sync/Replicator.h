@@ -1981,6 +1981,7 @@ private:
         PoolDelta(u32 s, int d) : seq(s), delta(d) {}
     };
     int  poolSeen_;
+    unsigned long walletGainMs_; // 本机钱数上次变多的时刻；丢弃检测靠它认出“卖给商人了”
     u32  poolSeq_;
     u32  poolAcked_;
     std::deque<PoolDelta> poolPending_;

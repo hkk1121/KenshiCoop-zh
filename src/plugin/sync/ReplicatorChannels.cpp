@@ -553,6 +553,7 @@ void Replicator::publishMoneyPool(const SyncContext& ctx) {
     if (hostRole) {
         // 主机：本机的钱只属于主机自己，变化只记日志；各加入者的余额从账本单独发给本人
         if (cur != poolSeen_) {
+            if (poolSeen_ >= 0 && cur > poolSeen_) walletGainMs_ = now;
             char b[128];
             _snprintf(b, sizeof(b) - 1, "[wallet] LOCAL t=%d was=%d", cur, poolSeen_);
             b[sizeof(b) - 1] = '\0'; coop::logLine(b);
@@ -594,6 +595,7 @@ void Replicator::publishMoneyPool(const SyncContext& ctx) {
     // does not include it yet.
     if (poolSeen_ < 0 || cur == poolSeen_) return;
     int delta = cur - poolSeen_;
+    if (delta > 0) walletGainMs_ = now;
     poolSeen_ = cur;
     ++poolSeq_;
     poolPending_.push_back(PoolDelta(poolSeq_, delta));
