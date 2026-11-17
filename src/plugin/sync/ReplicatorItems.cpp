@@ -985,6 +985,36 @@ void Replicator::detectAndPublishWeaponDrops(GameWorld* gw, NetLink& net, u32 ow
                     curPtrs[pe->first] = prevC.ptrs[pe->first]; // and keep the departed Item* handle(s)
                     continue;
                 }
+                // 兜底发丢弃之前先看离开背包的那一件：它已经在别的物品栏里（卖给商人、放进箱子），就不是
+                // 丢到地上，不发丢弃，否则别的机器会在主人脚下多出这件东西。拿在鼠标上的也可能读作在
+                // 物品栏里，所以先继续等，最多 WD_NEVER_LIVE_MAX_MS，期间落地照常发丢弃，超时按已离开处理。
+                void* left = 0;
+                {
+                    std::deque<void*>& had = prevC.ptrs[pe->first];
+                    std::map<std::string, std::deque<void*> >::iterator held = curPtrs.find(pe->first);
+                    for (std::deque<void*>::iterator q = had.begin(); q != had.end() && !left; ++q) {
+                        bool still = false;
+                        if (held != curPtrs.end())
+                            for (std::deque<void*>::iterator h = held->second.begin(); h != held->second.end(); ++h)
+                                if (*h == *q) { still = true; break; }
+                        if (!still) left = *q;
+                    }
+                }
+                bool inBag = false; float bagPos[3];
+                if (left && !engine::groundObjectLiveness(reinterpret_cast<RootObject*>(left), bagPos, &inBag) && inBag) {
+                    if (nowMs() - prevC.retryArmMs[pe->first] < WD_NEVER_LIVE_MAX_MS) {
+                        r = 1;
+                        cur[pe->first] = pe->second;
+                        curPtrs[pe->first] = prevC.ptrs[pe->first];
+                        continue;
+                    }
+                    prevC.retries.erase(pe->first); prevC.retryArmMs.erase(pe->first);
+                    char b[200]; _snprintf(b, sizeof(b) - 1,
+                        "[wd] decrease-absorbed hand=%u,%u,%u,%u,%u sid='%s' delta=%d (item is in another inventory; not a ground drop)",
+                        it->t, it->c, it->cs, it->i, it->s, pe->first.c_str(), delta);
+                    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                    continue;
+                }
                 // Debounce expired: the weapon really LEFT this owned character (we never mutate
                 // owned inventories ourselves, so this is a genuine user action). Author the drop
                 // at the OWNER's position as the mirror target - the weapon was dropped at its
